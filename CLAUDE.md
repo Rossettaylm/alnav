@@ -38,6 +38,7 @@ src/
 ├── main.rs        # CLI 入口（clap derive），输入调度（stdin/文件），主循环
 ├── parser.rs      # LogEntry 结构体 + 解析器（支持 threadtime/xlog/brief 三种格式）
 ├── filter.rs      # FilterChain：多条件组合过滤（同类 OR，跨类 AND）
+├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
 ├── formatter.rs   # 输出格式化：text（彩色）/ json（NDJSON）/ csv
 └── summary.rs     # 聚合统计：级别分布、Top tags、时间范围
 ```
@@ -51,6 +52,19 @@ src/
 - 跨类型 = AND：`--tag "A" --msg "err"` → tag=A AND msg~err
 - 值内 `|` 也是 OR：`--tag "A|B"`
 - `--level W` 匹配 W/E/F（最低级别）
+- `-e` 布尔表达式：支持 `and`/`or`/`not`/括号的任意组合
+  - 语法：`FIELD ~ VALUE`、`level >= LEVEL`，用 `and`/`or`/`not`/`()` 组合
+  - FIELD = `tag` | `msg` | `pkg`；VALUE = 裸词或 `"引号字符串"`
+  - 多个 `-e` 之间 OR（与 grep `-e` 一致），与其他 flag AND
+
+```bash
+# 表达式过滤
+loggrep -e 'msg ~ mobile_msf and msg ~ 0x9293'
+loggrep -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+loggrep -e 'not tag ~ Debug' --level I
+# 多个 -e 之间 OR，与其他 flag AND
+loggrep -e 'tag ~ OkHttp' -e 'tag ~ Retrofit' --level W
+```
 
 ## Exit Codes
 

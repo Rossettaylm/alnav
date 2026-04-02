@@ -1,5 +1,6 @@
 use regex::Regex;
 
+use crate::expr::Expr;
 use crate::parser::{Level, LogEntry};
 use crate::Cli;
 
@@ -11,6 +12,7 @@ pub struct FilterChain {
     since: Option<String>,
     until: Option<String>,
     use_and: bool,
+    exprs: Vec<Expr>,
 }
 
 fn compile_patterns(patterns: &[String], case_flag: &str, label: &str) -> Result<Vec<Regex>, String> {
@@ -46,6 +48,12 @@ impl FilterChain {
             .map(|l| Level::from_str(l).ok_or_else(|| format!("unknown level '{}', expected V/D/I/W/E/F", l)))
             .transpose()?;
 
+        let exprs = cli
+            .expr
+            .iter()
+            .map(|e| Expr::parse(e, cli.ignore_case))
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Self {
             tag_filters,
             msg_filters,
@@ -54,6 +62,7 @@ impl FilterChain {
             since: cli.since.clone(),
             until: cli.until.clone(),
             use_and: cli.and,
+            exprs,
         })
     }
 
@@ -64,6 +73,7 @@ impl FilterChain {
             && self.min_level.is_none()
             && self.since.is_none()
             && self.until.is_none()
+            && self.exprs.is_empty()
     }
 
     pub fn matches(&self, entry: &LogEntry) -> bool {
@@ -72,6 +82,7 @@ impl FilterChain {
             && self.match_group(&self.tag_filters, entry.tag)
             && self.match_group(&self.msg_filters, entry.msg)
             && self.match_package(entry)
+            && self.match_exprs(entry)
     }
 
     fn match_group(&self, filters: &[Regex], value: &str) -> bool {
@@ -114,8 +125,20 @@ impl FilterChain {
         self.package_filters.iter().any(|re| re.is_match(entry.tag) || re.is_match(entry.msg))
     }
 
+    fn match_exprs(&self, entry: &LogEntry) -> bool {
+        if self.exprs.is_empty() {
+            return true;
+        }
+        // Multiple -e are OR'd (like grep -e)
+        self.exprs.iter().any(|expr| expr.matches(entry))
+    }
+
     pub fn highlight_patterns(&self) -> Vec<&Regex> {
-        self.tag_filters.iter().chain(self.msg_filters.iter()).collect()
+        let mut pats: Vec<&Regex> = self.tag_filters.iter().chain(self.msg_filters.iter()).collect();
+        for expr in &self.exprs {
+            expr.collect_patterns(&mut pats);
+        }
+        pats
     }
 }
 
@@ -151,6 +174,7 @@ mod tests {
             ignore_case: false,
             invert: false,
             and,
+            expr: vec![],
         };
         FilterChain::from_cli(&cli).unwrap()
     }

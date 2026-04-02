@@ -1,3 +1,4 @@
+mod expr;
 mod filter;
 mod formatter;
 mod parser;
@@ -23,7 +24,37 @@ pub enum OutputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "loggrep", about = "Lightweight Android logcat filter & analyzer")]
+#[command(
+    name = "loggrep",
+    about = "Lightweight Android logcat filter & analyzer",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+  # Filter by tag and level
+  adb logcat | loggrep --tag OkHttp --level W
+
+  # Multiple tags (OR), minimum level (AND)
+  loggrep -f app.log --tag \"OkHttp|Retrofit\" --level E
+
+  # Boolean expression with -e
+  loggrep -f app.log -e 'msg ~ timeout and level >= W'
+  loggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+  loggrep -f app.log -e 'not tag ~ Debug'
+
+  # Multiple -e (OR between them), combined with flags (AND)
+  loggrep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit' --level W
+
+  # Expression syntax:
+  #   tag ~ <regex>      Match tag field
+  #   msg ~ <regex>      Match message field
+  #   pkg ~ <regex>      Match tag or message (package)
+  #   level >= <V|D|I|W|E|F>   Minimum log level
+  #   and / or / not / ( )     Boolean combinators
+
+  # Output as JSON / CSV
+  loggrep -f app.log --tag crash --format json --limit 50
+
+  # Aggregated summary
+  loggrep -f app.log --summary"
+)]
 pub struct Cli {
     /// Filter by tag (regex, repeatable, OR logic within)
     #[arg(short, long, value_name = "REGEX")]
@@ -84,6 +115,10 @@ pub struct Cli {
     /// Use AND logic for same-type filters (default is OR)
     #[arg(long)]
     and: bool,
+
+    /// Boolean expression filter (repeatable, OR between multiple -e)
+    #[arg(short = 'e', long = "expr", value_name = "EXPR")]
+    expr: Vec<String>,
 }
 
 /// Process a single line. Returns false to stop reading.
