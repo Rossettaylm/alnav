@@ -35,23 +35,43 @@ impl Formatter {
             return writeln!(out, "{raw_line}");
         }
 
-        // Highlight keywords on raw text first, then apply level color
-        let base = if self.highlight_patterns.is_empty() {
-            raw_line.to_string()
+        // Per-field coloring for better readability
+        let ts_pid = if !entry.timestamp.is_empty() {
+            if !entry.tid.is_empty() {
+                format!("{} {} {} ", entry.timestamp, entry.pid, entry.tid)
+            } else {
+                format!("{} {} ", entry.timestamp, entry.pid)
+            }
+        } else if !entry.pid.is_empty() {
+            format!("({}) ", entry.pid)
         } else {
-            self.highlight_keywords(raw_line)
+            String::new()
         };
 
-        let colored = match entry.level {
-            Level::V => base.white().to_string(),
-            Level::D => base.blue().to_string(),
-            Level::I => base.green().to_string(),
-            Level::W => base.yellow().to_string(),
-            Level::E => base.red().to_string(),
-            Level::F => base.white().on_red().bold().to_string(),
+        let level_badge = match entry.level {
+            Level::V => format!(" {} ", entry.level.as_char()).white().on_truecolor(100, 100, 100).to_string(),
+            Level::D => format!(" {} ", entry.level.as_char()).black().on_blue().to_string(),
+            Level::I => format!(" {} ", entry.level.as_char()).black().on_green().to_string(),
+            Level::W => format!(" {} ", entry.level.as_char()).black().on_yellow().to_string(),
+            Level::E => format!(" {} ", entry.level.as_char()).white().on_red().to_string(),
+            Level::F => format!(" {} ", entry.level.as_char()).white().on_red().bold().to_string(),
         };
 
-        writeln!(out, "{colored}")
+        let msg = if self.highlight_patterns.is_empty() {
+            entry.msg.to_string()
+        } else {
+            self.highlight_keywords(entry.msg)
+        };
+
+        writeln!(
+            out,
+            "{}{} {}{} {}",
+            ts_pid.truecolor(140, 140, 140),
+            level_badge,
+            entry.tag.bold().cyan(),
+            ":".truecolor(140, 140, 140),
+            msg,
+        )
     }
 
     fn write_json<W: Write>(&self, entry: &LogEntry, out: &mut W) -> std::io::Result<()> {
@@ -74,7 +94,7 @@ impl Formatter {
         let mut result = text.to_string();
         for re in &self.highlight_patterns {
             let replaced = re.replace_all(&result, |caps: &regex::Captures| {
-                caps[0].bold().underline().to_string()
+                caps[0].bold().on_truecolor(180, 140, 50).to_string()
             });
             if let std::borrow::Cow::Owned(s) = replaced {
                 result = s;
