@@ -31,40 +31,41 @@ pub enum OutputFormat {
     name = "loggrep",
     about = "Lightweight Android logcat filter & analyzer",
     after_long_help = "\x1b[1mExamples:\x1b[0m
-  # Filter by tag and level
+
+  \x1b[4mBasic filtering\x1b[0m
   adb logcat | loggrep --tag OkHttp --level W
-
-  # Multiple tags (OR), minimum level (AND)
   loggrep -f app.log --tag \"OkHttp|Retrofit\" --level E
+  loggrep -f app.log --msg error -i              # case-insensitive
+  loggrep -f app.log --tag Debug -v              # invert match
+  loggrep -f app.log --tag A --tag B             # tag=A OR tag=B
+  loggrep -f app.log --tag A --tag B --and       # tag=A AND tag=B
 
-  # Boolean expression with -e
+  \x1b[4mBoolean expressions (-e)\x1b[0m
   loggrep -f app.log -e 'msg ~ timeout and level >= W'
   loggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
   loggrep -f app.log -e 'not tag ~ Debug'
+  loggrep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit'  # multiple -e = OR
+  # Syntax: tag|msg|pkg ~ <regex>, level >= V|D|I|W|E|F
+  # Combine with: and, or, not, ( )
 
-  # Multiple -e (OR between them), combined with flags (AND)
-  loggrep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit' --level W
+  \x1b[4mContext lines\x1b[0m
+  loggrep -f app.log --tag crash -C 3            # 3 lines before + after
+  loggrep -f app.log -e 'level >= E' -B 5 -A 2  # 5 before, 2 after
 
-  # Expression syntax:
-  #   tag ~ <regex>      Match tag field
-  #   msg ~ <regex>      Match message field
-  #   pkg ~ <regex>      Match tag or message (package)
-  #   level >= <V|D|I|W|E|F>   Minimum log level
-  #   and / or / not / ( )     Boolean combinators
+  \x1b[4mDeduplicate (group similar lines)\x1b[0m
+  loggrep -f app.log --level E --dedupe          # group errors by pattern
+  loggrep -f app.log --dedupe --limit 20         # top 20 patterns
+  loggrep -f app.log --dedupe --format json      # JSON output for AI
+  # Numbers/hex/UUIDs are normalized: \"timeout 100ms\" ≈ \"timeout 200ms\"
 
-  # Output as JSON / CSV
+  \x1b[4mOutput formats\x1b[0m
   loggrep -f app.log --tag crash --format json --limit 50
+  loggrep -f app.log --format csv > out.csv
+  loggrep -f app.log --tag crash --count         # print match count only
+  loggrep -f app.log --summary                   # aggregated stats (JSON)
 
-  # Context lines (like grep -C/-A/-B)
-  loggrep -f app.log --tag crash -C 3
-  loggrep -f app.log -e 'level >= E' -B 5 -A 2
-
-  # Deduplicate similar lines (group by pattern)
-  loggrep -f app.log --level E --dedupe
-  loggrep -f app.log --dedupe --format json --limit 20
-
-  # Aggregated summary
-  loggrep -f app.log --summary"
+  \x1b[4mTime range\x1b[0m
+  loggrep -f app.log --since 10:30:00 --until 10:35:00"
 )]
 pub struct Cli {
     /// Filter by tag (regex, repeatable, OR logic within)
