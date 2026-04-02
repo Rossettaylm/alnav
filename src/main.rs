@@ -1,3 +1,4 @@
+mod dedupe;
 mod expr;
 mod filter;
 mod formatter;
@@ -12,6 +13,7 @@ use std::process;
 use clap::{Parser, ValueEnum};
 use glob::glob;
 
+use dedupe::Deduper;
 use filter::FilterChain;
 use formatter::Formatter;
 use parser::LogEntry;
@@ -56,6 +58,10 @@ pub enum OutputFormat {
   # Context lines (like grep -C/-A/-B)
   loggrep -f app.log --tag crash -C 3
   loggrep -f app.log -e 'level >= E' -B 5 -A 2
+
+  # Deduplicate similar lines (group by pattern)
+  loggrep -f app.log --level E --dedupe
+  loggrep -f app.log --dedupe --format json --limit 20
 
   # Aggregated summary
   loggrep -f app.log --summary"
@@ -136,6 +142,10 @@ pub struct Cli {
     /// Show NUM lines before each match
     #[arg(short = 'B', long = "before-context", value_name = "NUM")]
     before_context: Option<usize>,
+
+    /// Deduplicate: group similar lines, show count + time range
+    #[arg(long)]
+    dedupe: bool,
 }
 
 /// Resolve effective before/after context from -C/-A/-B flags.
@@ -158,12 +168,13 @@ fn run_lines<W: io::Write>(
     cli: &Cli,
     matched: &mut usize,
     summary: &mut Option<Summary>,
+    deduper: &mut Option<Deduper>,
     out: &mut W,
 ) {
     if use_context(cli) {
-        run_with_context(lines, filter_chain, formatter, cli, matched, summary, out);
+        run_with_context(lines, filter_chain, formatter, cli, matched, summary, deduper, out);
     } else {
-        run_simple(lines, filter_chain, formatter, cli, matched, summary, out);
+        run_simple(lines, filter_chain, formatter, cli, matched, summary, deduper, out);
     }
 }
 
@@ -175,6 +186,7 @@ fn run_simple<W: io::Write>(
     cli: &Cli,
     matched: &mut usize,
     summary: &mut Option<Summary>,
+    deduper: &mut Option<Deduper>,
     out: &mut W,
 ) {
     for line in lines {
@@ -185,7 +197,7 @@ fn run_simple<W: io::Write>(
         let entry = match LogEntry::parse(&line) {
             Some(e) => e,
             None => {
-                if filter_chain.is_empty() && !cli.count && !cli.summary {
+                if filter_chain.is_empty() && !cli.count && !cli.summary && !cli.dedupe {
                     let _ = writeln!(out, "{line}");
                 }
                 continue;
@@ -199,6 +211,8 @@ fn run_simple<W: io::Write>(
             *matched += 1;
             if let Some(ref mut s) = summary {
                 s.record(&entry);
+            } else if let Some(ref mut d) = deduper {
+                d.record(&entry);
             } else if !cli.count {
                 let _ = formatter.write_entry(&entry, &line, out);
             }
@@ -217,6 +231,7 @@ fn run_with_context<W: io::Write>(
     cli: &Cli,
     matched: &mut usize,
     summary: &mut Option<Summary>,
+    deduper: &mut Option<Deduper>,
     out: &mut W,
 ) {
     let (ctx_before, ctx_after) = context_sizes(cli);
@@ -245,6 +260,11 @@ fn run_with_context<W: io::Write>(
             if let Some(ref mut s) = summary {
                 if let Some(entry) = LogEntry::parse(&line) {
                     s.record(&entry);
+                }
+            }
+            if let Some(ref mut d) = deduper {
+                if let Some(entry) = LogEntry::parse(&line) {
+                    d.record(&entry);
                 }
             }
 
@@ -297,12 +317,28 @@ fn run_with_context<W: io::Write>(
     }
 }
 
-fn finish_output<W: io::Write>(out: &mut W, cli: &Cli, matched: usize, summary: Option<Summary>) {
+fn finish_output<W: io::Write>(
+    out: &mut W,
+    formatter: &Formatter,
+    cli: &Cli,
+    matched: usize,
+    summary: Option<Summary>,
+    deduper: Option<Deduper>,
+) {
     if cli.count {
         let _ = writeln!(out, "{matched}");
     }
     if let Some(s) = summary {
         let _ = writeln!(out, "{}", s.to_json(matched));
+    }
+    if let Some(d) = deduper {
+        let mut groups = d.into_groups();
+        if cli.limit > 0 {
+            groups.truncate(cli.limit);
+        }
+        for g in &groups {
+            let _ = formatter.write_dedupe_group(g, out);
+        }
     }
     let _ = out.flush();
 }
@@ -323,6 +359,7 @@ fn main() {
 
     let mut matched: usize = 0;
     let mut summary = if cli.summary { Some(Summary::new()) } else { None };
+    let mut deduper = if cli.dedupe { Some(Deduper::new()) } else { None };
 
     if cli.file.is_empty() {
         let stdout = io::stdout();
@@ -330,9 +367,9 @@ fn main() {
         let stdin = io::stdin();
         run_lines(
             BufReader::new(stdin.lock()).lines(),
-            &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut out,
+            &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper, &mut out,
         );
-        finish_output(&mut out, &cli, matched, summary);
+        finish_output(&mut out, &formatter, &cli, matched, summary, deduper);
     } else {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -355,18 +392,18 @@ fn main() {
                 };
                 run_lines(
                     BufReader::new(file).lines(),
-                    &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut out,
+                    &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper, &mut out,
                 );
-                if cli.limit > 0 && matched >= cli.limit {
+                if cli.limit > 0 && matched >= cli.limit && !cli.dedupe {
                     break;
                 }
             }
-            if cli.limit > 0 && matched >= cli.limit {
+            if cli.limit > 0 && matched >= cli.limit && !cli.dedupe {
                 break;
             }
         }
 
-        finish_output(&mut out, &cli, matched, summary);
+        finish_output(&mut out, &formatter, &cli, matched, summary, deduper);
     }
 
     process::exit(if matched > 0 { 0 } else { 1 });

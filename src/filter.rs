@@ -178,6 +178,7 @@ mod tests {
             context: None,
             after_context: None,
             before_context: None,
+            dedupe: false,
         };
         FilterChain::from_cli(&cli).unwrap()
     }

@@ -2,6 +2,7 @@ use std::io::Write;
 
 use colored::Colorize;
 
+use crate::dedupe::DedupGroup;
 use crate::filter::FilterChain;
 use crate::parser::{Level, LogEntry};
 use crate::OutputFormat;
@@ -110,5 +111,78 @@ impl Formatter {
         } else {
             writeln!(out, "{raw_line}")
         }
+    }
+
+    /// Write a deduplicated group.
+    pub fn write_dedupe_group<W: Write>(&self, group: &DedupGroup, out: &mut W) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Text => self.write_dedupe_text(group, out),
+            OutputFormat::Json => self.write_dedupe_json(group, out),
+            OutputFormat::Csv => self.write_dedupe_csv(group, out),
+        }
+    }
+
+    fn write_dedupe_text<W: Write>(&self, g: &DedupGroup, out: &mut W) -> std::io::Result<()> {
+        let count_str = format!("[{:>5}x]", g.count);
+        let level_char = g.level.as_char();
+        let time_range = if g.first_ts == g.last_ts || g.last_ts.is_empty() {
+            format!("({})", g.first_ts)
+        } else {
+            format!("({} ~ {})", g.first_ts, g.last_ts)
+        };
+
+        if self.use_color {
+            let count_colored = if g.count >= 100 {
+                count_str.bold().red().to_string()
+            } else if g.count >= 10 {
+                count_str.bold().yellow().to_string()
+            } else {
+                count_str.bold().to_string()
+            };
+            let level_badge = match g.level {
+                Level::V => format!(" {level_char} ").white().on_truecolor(100, 100, 100).to_string(),
+                Level::D => format!(" {level_char} ").black().on_blue().to_string(),
+                Level::I => format!(" {level_char} ").black().on_green().to_string(),
+                Level::W => format!(" {level_char} ").black().on_yellow().to_string(),
+                Level::E => format!(" {level_char} ").white().on_red().to_string(),
+                Level::F => format!(" {level_char} ").white().on_red().bold().to_string(),
+            };
+            writeln!(
+                out,
+                "{} {} {}{} {}  {}",
+                count_colored,
+                level_badge,
+                g.tag.bold().cyan(),
+                ":".truecolor(140, 140, 140),
+                g.pattern,
+                time_range.truecolor(110, 110, 110),
+            )
+        } else {
+            writeln!(
+                out,
+                "{} {} {}: {}  {}",
+                count_str, level_char, g.tag, g.pattern, time_range,
+            )
+        }
+    }
+
+    fn write_dedupe_json<W: Write>(&self, g: &DedupGroup, out: &mut W) -> std::io::Result<()> {
+        let json = serde_json::to_string(g).unwrap_or_default();
+        writeln!(out, "{json}")
+    }
+
+    fn write_dedupe_csv<W: Write>(&self, g: &DedupGroup, out: &mut W) -> std::io::Result<()> {
+        write!(
+            out,
+            "{},{},{},\"{}\",\"{}\",{},{}",
+            g.count,
+            g.level.as_char(),
+            g.tag,
+            g.pattern.replace('"', "\"\""),
+            g.sample_msg.replace('"', "\"\""),
+            g.first_ts,
+            g.last_ts,
+        )?;
+        writeln!(out)
     }
 }
