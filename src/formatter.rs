@@ -102,4 +102,13 @@ impl Formatter {
         }
         result
     }
+
+    /// Write a context (non-matching) line — dimmed if color is on.
+    pub fn write_context_line<W: Write>(&self, raw_line: &str, out: &mut W) -> std::io::Result<()> {
+        if self.use_color {
+            writeln!(out, "{}", raw_line.truecolor(110, 110, 110))
+        } else {
+            writeln!(out, "{raw_line}")
+        }
+    }
 }

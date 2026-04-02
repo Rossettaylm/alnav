@@ -175,6 +175,9 @@ mod tests {
             invert: false,
             and,
             expr: vec![],
+            context: None,
+            after_context: None,
+            before_context: None,
         };
         FilterChain::from_cli(&cli).unwrap()
     }

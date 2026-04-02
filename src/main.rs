@@ -4,6 +4,7 @@ mod formatter;
 mod parser;
 mod summary;
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, LineWriter};
 use std::process;
@@ -51,6 +52,10 @@ pub enum OutputFormat {
 
   # Output as JSON / CSV
   loggrep -f app.log --tag crash --format json --limit 50
+
+  # Context lines (like grep -C/-A/-B)
+  loggrep -f app.log --tag crash -C 3
+  loggrep -f app.log -e 'level >= E' -B 5 -A 2
 
   # Aggregated summary
   loggrep -f app.log --summary"
@@ -119,43 +124,177 @@ pub struct Cli {
     /// Boolean expression filter (repeatable, OR between multiple -e)
     #[arg(short = 'e', long = "expr", value_name = "EXPR")]
     expr: Vec<String>,
+
+    /// Show NUM lines of context around each match
+    #[arg(short = 'C', long = "context", value_name = "NUM")]
+    context: Option<usize>,
+
+    /// Show NUM lines after each match
+    #[arg(short = 'A', long = "after-context", value_name = "NUM")]
+    after_context: Option<usize>,
+
+    /// Show NUM lines before each match
+    #[arg(short = 'B', long = "before-context", value_name = "NUM")]
+    before_context: Option<usize>,
 }
 
-/// Process a single line. Returns false to stop reading.
-fn process_line<W: io::Write>(
-    line: &str,
+/// Resolve effective before/after context from -C/-A/-B flags.
+fn context_sizes(cli: &Cli) -> (usize, usize) {
+    let before = cli.before_context.or(cli.context).unwrap_or(0);
+    let after = cli.after_context.or(cli.context).unwrap_or(0);
+    (before, after)
+}
+
+/// Whether context lines should be printed (text mode, not count/summary).
+fn use_context(cli: &Cli) -> bool {
+    let (b, a) = context_sizes(cli);
+    (b > 0 || a > 0) && !cli.count && !cli.summary
+}
+
+fn run_lines<W: io::Write>(
+    lines: impl Iterator<Item = io::Result<String>>,
     filter_chain: &FilterChain,
     formatter: &Formatter,
     cli: &Cli,
     matched: &mut usize,
     summary: &mut Option<Summary>,
     out: &mut W,
-) -> bool {
-    let entry = match LogEntry::parse(line) {
-        Some(e) => e,
-        None => {
-            if filter_chain.is_empty() && !cli.count && !cli.summary {
-                let _ = writeln!(out, "{line}");
+) {
+    if use_context(cli) {
+        run_with_context(lines, filter_chain, formatter, cli, matched, summary, out);
+    } else {
+        run_simple(lines, filter_chain, formatter, cli, matched, summary, out);
+    }
+}
+
+/// Original fast path — no context buffering.
+fn run_simple<W: io::Write>(
+    lines: impl Iterator<Item = io::Result<String>>,
+    filter_chain: &FilterChain,
+    formatter: &Formatter,
+    cli: &Cli,
+    matched: &mut usize,
+    summary: &mut Option<Summary>,
+    out: &mut W,
+) {
+    for line in lines {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let entry = match LogEntry::parse(&line) {
+            Some(e) => e,
+            None => {
+                if filter_chain.is_empty() && !cli.count && !cli.summary {
+                    let _ = writeln!(out, "{line}");
+                }
+                continue;
             }
-            return true;
-        }
-    };
+        };
 
-    let is_match = filter_chain.matches(&entry);
-    let is_match = if cli.invert { !is_match } else { is_match };
+        let is_match = filter_chain.matches(&entry);
+        let is_match = if cli.invert { !is_match } else { is_match };
 
-    if is_match {
-        *matched += 1;
-        if let Some(ref mut s) = summary {
-            s.record(&entry);
-        } else if !cli.count {
-            let _ = formatter.write_entry(&entry, line, out);
-        }
-        if cli.limit > 0 && *matched >= cli.limit {
-            return false;
+        if is_match {
+            *matched += 1;
+            if let Some(ref mut s) = summary {
+                s.record(&entry);
+            } else if !cli.count {
+                let _ = formatter.write_entry(&entry, &line, out);
+            }
+            if cli.limit > 0 && *matched >= cli.limit {
+                break;
+            }
         }
     }
-    true
+}
+
+/// Context-aware path: buffer before-lines, print after-lines.
+fn run_with_context<W: io::Write>(
+    lines: impl Iterator<Item = io::Result<String>>,
+    filter_chain: &FilterChain,
+    formatter: &Formatter,
+    cli: &Cli,
+    matched: &mut usize,
+    summary: &mut Option<Summary>,
+    out: &mut W,
+) {
+    let (ctx_before, ctx_after) = context_sizes(cli);
+    let mut before_buf: VecDeque<String> = VecDeque::with_capacity(ctx_before + 1);
+    let mut after_remaining: usize = 0;
+    // Track the line number of the last printed line to detect gaps for "--" separator
+    let mut last_printed: Option<usize> = None;
+    let mut line_no: usize = 0;
+
+    for line in lines {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        line_no += 1;
+
+        let is_match = LogEntry::parse(&line)
+            .map(|entry| {
+                let m = filter_chain.matches(&entry);
+                if cli.invert { !m } else { m }
+            })
+            .unwrap_or(false);
+
+        if is_match {
+            *matched += 1;
+            if let Some(ref mut s) = summary {
+                if let Some(entry) = LogEntry::parse(&line) {
+                    s.record(&entry);
+                }
+            }
+
+            // Print separator if there's a gap from previous context group
+            let before_start = line_no.saturating_sub(before_buf.len());
+            if let Some(lp) = last_printed {
+                if before_start > lp + 1 {
+                    let _ = writeln!(out, "--");
+                }
+            }
+
+            // Flush before-context buffer
+            for (i, ctx_line) in before_buf.drain(..).enumerate() {
+                let ctx_line_no = before_start + i;
+                if last_printed.map_or(true, |lp| ctx_line_no > lp) {
+                    let _ = formatter.write_context_line(&ctx_line, out);
+                }
+            }
+
+            // Print the matching line
+            if let Some(entry) = LogEntry::parse(&line) {
+                let _ = formatter.write_entry(&entry, &line, out);
+            } else {
+                let _ = writeln!(out, "{line}");
+            }
+            last_printed = Some(line_no);
+            after_remaining = ctx_after;
+
+            if cli.limit > 0 && *matched >= cli.limit && after_remaining == 0 {
+                break;
+            }
+        } else if after_remaining > 0 {
+            // Print as after-context
+            let _ = formatter.write_context_line(&line, out);
+            last_printed = Some(line_no);
+            after_remaining -= 1;
+
+            if cli.limit > 0 && *matched >= cli.limit && after_remaining == 0 {
+                break;
+            }
+        } else {
+            // Buffer for potential before-context
+            if ctx_before > 0 {
+                if before_buf.len() == ctx_before {
+                    before_buf.pop_front();
+                }
+                before_buf.push_back(line);
+            }
+        }
+    }
 }
 
 fn finish_output<W: io::Write>(out: &mut W, cli: &Cli, matched: usize, summary: Option<Summary>) {
@@ -166,26 +305,6 @@ fn finish_output<W: io::Write>(out: &mut W, cli: &Cli, matched: usize, summary: 
         let _ = writeln!(out, "{}", s.to_json(matched));
     }
     let _ = out.flush();
-}
-
-fn run_reader<R: BufRead, W: io::Write>(
-    reader: R,
-    filter_chain: &FilterChain,
-    formatter: &Formatter,
-    cli: &Cli,
-    matched: &mut usize,
-    summary: &mut Option<Summary>,
-    out: &mut W,
-) {
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        if !process_line(&line, filter_chain, formatter, cli, matched, summary, out) {
-            break;
-        }
-    }
 }
 
 fn main() {
@@ -209,13 +328,16 @@ fn main() {
         let stdout = io::stdout();
         let mut out = LineWriter::new(stdout.lock());
         let stdin = io::stdin();
-        run_reader(BufReader::new(stdin.lock()), &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut out);
+        run_lines(
+            BufReader::new(stdin.lock()).lines(),
+            &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut out,
+        );
         finish_output(&mut out, &cli, matched, summary);
     } else {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
 
-        'outer: for pattern in &cli.file {
+        for pattern in &cli.file {
             let paths = match glob(pattern) {
                 Ok(p) => p,
                 Err(e) => {
@@ -231,15 +353,16 @@ fn main() {
                         continue;
                     }
                 };
-                for line in BufReader::new(file).lines() {
-                    let line = match line {
-                        Ok(l) => l,
-                        Err(_) => break,
-                    };
-                    if !process_line(&line, &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut out) {
-                        break 'outer;
-                    }
+                run_lines(
+                    BufReader::new(file).lines(),
+                    &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut out,
+                );
+                if cli.limit > 0 && matched >= cli.limit {
+                    break;
                 }
+            }
+            if cli.limit > 0 && matched >= cli.limit {
+                break;
             }
         }
 
