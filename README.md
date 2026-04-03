@@ -7,6 +7,12 @@
 ## 安装
 
 ```bash
+cargo install aloggrep
+```
+
+或从源码安装：
+
+```bash
 cargo install --path .
 ```
 
@@ -139,6 +145,34 @@ src/
 ```
 
 **数据流：** stdin/file → 逐行读取 → [MultilineMerger] → `LogEntry::parse()` → `FilterChain::matches()` → [CrashDetector] → `Formatter::write_entry()` / `Summary::record()`
+
+## Claude Code Skill
+
+本仓库附带 `loggrep-analyzer.skill`，这是一个 [Claude Code](https://claude.ai/code) skill，可以让 AI agent 自动使用 loggrep 进行系统化日志分析。
+
+### 安装 skill
+
+将 `.skill` 文件放入 Claude Code 的 skill 目录：
+
+```bash
+# 解压到全局 skill 目录（所有项目可用）
+unzip loggrep-analyzer.skill -d ~/.claude/skills/loggrep-analyzer
+
+# 或解压到项目级 skill 目录（仅当前项目可用）
+unzip loggrep-analyzer.skill -d .claude/skills/loggrep-analyzer
+```
+
+### 使用
+
+安装后，在 Claude Code 中直接描述分析需求即可自动触发：
+
+```
+帮我分析这个日志 /path/to/app.log
+在日志中搜索所有 OkHttp 相关的 timeout 错误
+这份日志有崩溃吗？Error 集中在哪个时间段？
+```
+
+Skill 会引导 agent 按 4 阶段工作流进行分析：**全局概览 → 定位问题区域 → 深入追踪 → 结构化报告**。
 
 ## License
 
