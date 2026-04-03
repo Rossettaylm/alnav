@@ -5,6 +5,37 @@ use serde::Serialize;
 
 use crate::parser::{Level, LogEntry};
 
+/// Reusable message normalizer: replaces UUIDs, hex, trace IDs, numbers with placeholders.
+pub struct Normalizer {
+    regexes: Vec<Regex>,
+}
+
+impl Normalizer {
+    pub fn new() -> Self {
+        Self {
+            regexes: vec![
+                // UUID: 8-4-4-4-12 hex
+                Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").unwrap(),
+                // Trace ID: 24+ char hex (OpenTelemetry style)
+                Regex::new(r"[0-9a-fA-F]{24,}").unwrap(),
+                // Hex number: 0x...
+                Regex::new(r"0x[0-9a-fA-F]+").unwrap(),
+                // Decimal number: 3+ consecutive digits
+                Regex::new(r"[0-9]{3,}").unwrap(),
+            ],
+        }
+    }
+
+    pub fn normalize(&self, msg: &str) -> String {
+        let mut result = msg.to_string();
+        result = self.regexes[0].replace_all(&result, "<uuid>").into_owned();
+        result = self.regexes[1].replace_all(&result, "<id>").into_owned();
+        result = self.regexes[2].replace_all(&result, "<hex>").into_owned();
+        result = self.regexes[3].replace_all(&result, "<N>").into_owned();
+        result
+    }
+}
+
 /// A group of deduplicated log entries sharing the same (level, tag, pattern).
 #[derive(Serialize)]
 pub struct DedupGroup {
@@ -20,7 +51,7 @@ pub struct DedupGroup {
 pub struct Deduper {
     groups: HashMap<DedupKey, DedupGroup>,
     order: Vec<DedupKey>,
-    normalizers: Vec<Regex>,
+    normalizer: Normalizer,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
@@ -32,39 +63,15 @@ struct DedupKey {
 
 impl Deduper {
     pub fn new() -> Self {
-        // Pre-compile normalization regexes (order matters: specific before general)
-        let normalizers = vec![
-            // UUID: 8-4-4-4-12 hex
-            Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").unwrap(),
-            // Trace ID: 24+ char hex (OpenTelemetry style)
-            Regex::new(r"[0-9a-fA-F]{24,}").unwrap(),
-            // Hex number: 0x...
-            Regex::new(r"0x[0-9a-fA-F]+").unwrap(),
-            // Decimal number: 3+ consecutive digits
-            Regex::new(r"[0-9]{3,}").unwrap(),
-        ];
         Self {
             groups: HashMap::new(),
             order: Vec::new(),
-            normalizers,
+            normalizer: Normalizer::new(),
         }
     }
 
-    fn normalize(&self, msg: &str) -> String {
-        let mut result = msg.to_string();
-        // Replace UUIDs
-        result = self.normalizers[0].replace_all(&result, "<uuid>").into_owned();
-        // Replace trace IDs
-        result = self.normalizers[1].replace_all(&result, "<id>").into_owned();
-        // Replace hex numbers
-        result = self.normalizers[2].replace_all(&result, "<hex>").into_owned();
-        // Replace long decimal numbers
-        result = self.normalizers[3].replace_all(&result, "<N>").into_owned();
-        result
-    }
-
     pub fn record(&mut self, entry: &LogEntry) {
-        let pattern = self.normalize(entry.msg);
+        let pattern = self.normalizer.normalize(entry.msg);
         let key = DedupKey {
             level: entry.level,
             tag: entry.tag.to_string(),
@@ -118,24 +125,24 @@ mod tests {
 
     #[test]
     fn test_normalize_numbers() {
-        let d = Deduper::new();
-        assert_eq!(d.normalize("timeout after 30000ms"), "timeout after <N>ms");
-        assert_eq!(d.normalize("timeout after 100ms"), "timeout after <N>ms");
-        assert_eq!(d.normalize("cmd:0x9293 done"), "cmd:<hex> done");
+        let n = Normalizer::new();
+        assert_eq!(n.normalize("timeout after 30000ms"), "timeout after <N>ms");
+        assert_eq!(n.normalize("timeout after 100ms"), "timeout after <N>ms");
+        assert_eq!(n.normalize("cmd:0x9293 done"), "cmd:<hex> done");
     }
 
     #[test]
     fn test_normalize_uuid() {
-        let d = Deduper::new();
+        let n = Normalizer::new();
         let msg = "id=550e8400-e29b-41d4-a716-446655440000 ok";
-        assert_eq!(d.normalize(msg), "id=<uuid> ok");
+        assert_eq!(n.normalize(msg), "id=<uuid> ok");
     }
 
     #[test]
     fn test_normalize_trace_id() {
-        let d = Deduper::new();
+        let n = Normalizer::new();
         let msg = "trace=13bfbc5e52c0410860c4bfb90d2a4c46 req";
-        assert_eq!(d.normalize(msg), "trace=<id> req");
+        assert_eq!(n.normalize(msg), "trace=<id> req");
     }
 
     #[test]
@@ -173,10 +180,10 @@ mod tests {
 
     #[test]
     fn test_short_numbers_not_normalized() {
-        let d = Deduper::new();
+        let n = Normalizer::new();
         // 2-digit numbers should NOT be replaced
-        assert_eq!(d.normalize("flag:2 step:15"), "flag:2 step:15");
+        assert_eq!(n.normalize("flag:2 step:15"), "flag:2 step:15");
         // 3+ digits should be replaced
-        assert_eq!(d.normalize("size:208"), "size:<N>");
+        assert_eq!(n.normalize("size:208"), "size:<N>");
     }
 }

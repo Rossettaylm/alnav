@@ -179,6 +179,10 @@ mod tests {
             after_context: None,
             before_context: None,
             dedupe: false,
+            multiline: false,
+            crashes: false,
+            tail: 0,
+            sample: 0,
         };
         FilterChain::from_cli(&cli).unwrap()
     }

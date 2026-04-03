@@ -39,11 +39,15 @@ src/
 ├── parser.rs      # LogEntry 结构体 + 解析器（支持 threadtime/xlog/brief 三种格式）
 ├── filter.rs      # FilterChain：多条件组合过滤（同类 OR，跨类 AND）
 ├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
+├── multiline.rs   # MultilineMerger：多行合并迭代器适配器（合并续行如栈追踪）
+├── crash.rs       # CrashDetector：崩溃识别 + CrashInfo 结构化提取
+├── dedupe.rs      # Normalizer（消息归一化）+ Deduper（去重分组）
+├── sampler.rs     # Sampler：输出采样（--tail 尾部 / --sample 均匀抽样）
 ├── formatter.rs   # 输出格式化：text（彩色）/ json（NDJSON）/ csv
-└── summary.rs     # 聚合统计：级别分布、Top tags、时间范围
+└── summary.rs     # 聚合统计：级别分布、Top tags、Top errors、崩溃计数
 ```
 
-**数据流：** stdin/file → 逐行读取 → `LogEntry::parse()` → `FilterChain::matches()` → `Formatter::write_entry()` / `Summary::record()`
+**数据流：** stdin/file → 逐行读取 → [MultilineMerger] → `LogEntry::parse()` → `FilterChain::matches()` → [CrashDetector] → `Formatter::write_entry()` / `Summary::record()`
 
 ## Filter Logic
 

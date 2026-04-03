@@ -1,8 +1,11 @@
+mod crash;
 mod dedupe;
 mod expr;
 mod filter;
 mod formatter;
+mod multiline;
 mod parser;
+mod sampler;
 mod summary;
 
 use std::collections::VecDeque;
@@ -13,10 +16,13 @@ use std::process;
 use clap::{Parser, ValueEnum};
 use glob::glob;
 
+use crash::CrashDetector;
 use dedupe::Deduper;
 use filter::FilterChain;
 use formatter::Formatter;
+use multiline::MultilineMerger;
 use parser::LogEntry;
+use sampler::Sampler;
 use summary::Summary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -52,6 +58,20 @@ pub enum OutputFormat {
   loggrep -f app.log --tag crash -C 3            # 3 lines before + after
   loggrep -f app.log -e 'level >= E' -B 5 -A 2  # 5 before, 2 after
 
+  \x1b[4mMulti-line merge\x1b[0m
+  loggrep -f app.log --tag AndroidRuntime -M     # merge stack traces
+  adb logcat | loggrep -M --level E              # merged error entries
+
+  \x1b[4mCrash extraction\x1b[0m
+  loggrep -f app.log --crashes                   # all crashes → JSON
+  loggrep -f app.log --crashes --tag MyApp       # filter + extract
+  loggrep -f app.log --crashes --limit 5         # first 5 crashes
+
+  \x1b[4mSampling (manage large output)\x1b[0m
+  loggrep -f app.log --level E --tail 50           # last 50 errors
+  loggrep -f app.log --level E --limit 20 --tail 20 # first 20 + last 20
+  loggrep -f app.log --sample 100                  # uniform sample of 100
+
   \x1b[4mDeduplicate (group similar lines)\x1b[0m
   loggrep -f app.log --level E --dedupe          # group errors by pattern
   loggrep -f app.log --dedupe --limit 20         # top 20 patterns
@@ -62,7 +82,7 @@ pub enum OutputFormat {
   loggrep -f app.log --tag crash --format json --limit 50
   loggrep -f app.log --format csv > out.csv
   loggrep -f app.log --tag crash --count         # print match count only
-  loggrep -f app.log --summary                   # aggregated stats (JSON)
+  loggrep -f app.log --summary                   # stats + top errors + crash count
 
   \x1b[4mTime range\x1b[0m
   loggrep -f app.log --since 10:30:00 --until 10:35:00"
@@ -147,6 +167,22 @@ pub struct Cli {
     /// Deduplicate: group similar lines, show count + time range
     #[arg(long)]
     dedupe: bool,
+
+    /// Merge multi-line entries (e.g. stack traces) into one logical entry
+    #[arg(short = 'M', long)]
+    multiline: bool,
+
+    /// Extract crashes as structured JSON (implies --multiline)
+    #[arg(long)]
+    crashes: bool,
+
+    /// Show last N matched entries (combine with --limit for head+tail)
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    tail: usize,
+
+    /// Uniformly sample N entries from all matches (reservoir sampling)
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    sample: usize,
 }
 
 /// Resolve effective before/after context from -C/-A/-B flags.
@@ -156,10 +192,10 @@ fn context_sizes(cli: &Cli) -> (usize, usize) {
     (before, after)
 }
 
-/// Whether context lines should be printed (text mode, not count/summary).
+/// Whether context lines should be printed (text mode, not count/summary/crashes).
 fn use_context(cli: &Cli) -> bool {
     let (b, a) = context_sizes(cli);
-    (b > 0 || a > 0) && !cli.count && !cli.summary
+    (b > 0 || a > 0) && !cli.count && !cli.summary && !cli.crashes
 }
 
 fn run_lines<W: io::Write>(
@@ -170,12 +206,14 @@ fn run_lines<W: io::Write>(
     matched: &mut usize,
     summary: &mut Option<Summary>,
     deduper: &mut Option<Deduper>,
+    crash_detector: Option<&CrashDetector>,
+    sampler: &mut Sampler,
     out: &mut W,
 ) {
-    if use_context(cli) {
+    if use_context(cli) && !sampler.needs_full_scan() {
         run_with_context(lines, filter_chain, formatter, cli, matched, summary, deduper, out);
     } else {
-        run_simple(lines, filter_chain, formatter, cli, matched, summary, deduper, out);
+        run_simple(lines, filter_chain, formatter, cli, matched, summary, deduper, crash_detector, sampler, out);
     }
 }
 
@@ -188,6 +226,8 @@ fn run_simple<W: io::Write>(
     matched: &mut usize,
     summary: &mut Option<Summary>,
     deduper: &mut Option<Deduper>,
+    crash_detector: Option<&CrashDetector>,
+    sampler: &mut Sampler,
     out: &mut W,
 ) {
     for line in lines {
@@ -198,7 +238,7 @@ fn run_simple<W: io::Write>(
         let entry = match LogEntry::parse(&line) {
             Some(e) => e,
             None => {
-                if filter_chain.is_empty() && !cli.count && !cli.summary && !cli.dedupe {
+                if filter_chain.is_empty() && !cli.count && !cli.summary && !cli.dedupe && crash_detector.is_none() {
                     let _ = writeln!(out, "{line}");
                 }
                 continue;
@@ -208,6 +248,14 @@ fn run_simple<W: io::Write>(
         let is_match = filter_chain.matches(&entry);
         let is_match = if cli.invert { !is_match } else { is_match };
 
+        // Crash filter: when --crashes, entry must also be a crash
+        let crash_type = if is_match {
+            crash_detector.and_then(|d| d.detect(&entry))
+        } else {
+            None
+        };
+        let is_match = is_match && crash_detector.map_or(true, |_| crash_type.is_some());
+
         if is_match {
             *matched += 1;
             if let Some(ref mut s) = summary {
@@ -215,12 +263,47 @@ fn run_simple<W: io::Write>(
             } else if let Some(ref mut d) = deduper {
                 d.record(&entry);
             } else if !cli.count {
-                let _ = formatter.write_entry(&entry, &line, out);
+                if sampler.should_emit(&line) {
+                    emit_entry(&entry, &line, formatter, crash_type, crash_detector, out);
+                }
             }
-            if cli.limit > 0 && *matched >= cli.limit {
+            if cli.limit > 0 && *matched >= cli.limit && !sampler.needs_full_scan() {
                 break;
             }
         }
+    }
+}
+
+/// Write a single matched entry (text/json/csv or crash JSON).
+fn emit_entry<W: io::Write>(
+    entry: &LogEntry,
+    line: &str,
+    formatter: &Formatter,
+    crash_type: Option<crash::CrashType>,
+    crash_detector: Option<&CrashDetector>,
+    out: &mut W,
+) {
+    if let (Some(ct), Some(detector)) = (crash_type, crash_detector) {
+        let info = detector.parse_crash(entry, ct);
+        let json = serde_json::to_string(&info).unwrap_or_default();
+        let _ = writeln!(out, "{json}");
+    } else {
+        let _ = formatter.write_entry(entry, line, out);
+    }
+}
+
+/// Re-parse and output a buffered line (used by sampler flush).
+fn emit_buffered_line<W: io::Write>(
+    line: &str,
+    formatter: &Formatter,
+    crash_detector: Option<&CrashDetector>,
+    out: &mut W,
+) {
+    if let Some(entry) = LogEntry::parse(line) {
+        let crash_type = crash_detector.and_then(|d| d.detect(&entry));
+        emit_entry(&entry, line, formatter, crash_type, crash_detector, out);
+    } else {
+        let _ = writeln!(out, "{line}");
     }
 }
 
@@ -249,9 +332,11 @@ fn run_with_context<W: io::Write>(
         };
         line_no += 1;
 
-        let is_match = LogEntry::parse(&line)
-            .map(|entry| {
-                let m = filter_chain.matches(&entry);
+        let entry = LogEntry::parse(&line);
+        let is_match = entry
+            .as_ref()
+            .map(|e| {
+                let m = filter_chain.matches(e);
                 if cli.invert { !m } else { m }
             })
             .unwrap_or(false);
@@ -259,13 +344,13 @@ fn run_with_context<W: io::Write>(
         if is_match {
             *matched += 1;
             if let Some(ref mut s) = summary {
-                if let Some(entry) = LogEntry::parse(&line) {
-                    s.record(&entry);
+                if let Some(ref e) = entry {
+                    s.record(e);
                 }
             }
             if let Some(ref mut d) = deduper {
-                if let Some(entry) = LogEntry::parse(&line) {
-                    d.record(&entry);
+                if let Some(ref e) = entry {
+                    d.record(e);
                 }
             }
 
@@ -286,8 +371,8 @@ fn run_with_context<W: io::Write>(
             }
 
             // Print the matching line
-            if let Some(entry) = LogEntry::parse(&line) {
-                let _ = formatter.write_entry(&entry, &line, out);
+            if let Some(ref e) = entry {
+                let _ = formatter.write_entry(e, &line, out);
             } else {
                 let _ = writeln!(out, "{line}");
             }
@@ -325,6 +410,8 @@ fn finish_output<W: io::Write>(
     matched: usize,
     summary: Option<Summary>,
     deduper: Option<Deduper>,
+    sampler: Sampler,
+    crash_detector: Option<&CrashDetector>,
 ) {
     if cli.count {
         let _ = writeln!(out, "{matched}");
@@ -341,6 +428,16 @@ fn finish_output<W: io::Write>(
             let _ = formatter.write_dedupe_group(g, out);
         }
     }
+
+    // Flush sampler buffer (tail / sample)
+    let result = sampler.finish();
+    if let Some(ref header) = result.header {
+        let _ = writeln!(out, "\n--- {header} ---\n");
+    }
+    for line in &result.lines {
+        emit_buffered_line(line, formatter, crash_detector, out);
+    }
+
     let _ = out.flush();
 }
 
@@ -361,16 +458,41 @@ fn main() {
     let mut matched: usize = 0;
     let mut summary = if cli.summary { Some(Summary::new()) } else { None };
     let mut deduper = if cli.dedupe { Some(Deduper::new()) } else { None };
+    let crash_detector = if cli.crashes { Some(CrashDetector::new()) } else { None };
+    let merge = cli.multiline || cli.crashes;
+
+    if cli.tail > 0 && cli.sample > 0 {
+        eprintln!("loggrep: --tail and --sample are mutually exclusive");
+        process::exit(2);
+    }
+    let mut sampler = Sampler::new(cli.tail, cli.sample, cli.limit);
+    let needs_full_scan = sampler.needs_full_scan();
+
+    /// Dispatch `run_lines` with optional `MultilineMerger` wrapping.
+    macro_rules! dispatch_lines {
+        ($lines:expr, $out:expr) => {
+            if merge {
+                run_lines(
+                    MultilineMerger::new($lines),
+                    &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper,
+                    crash_detector.as_ref(), &mut sampler, $out,
+                );
+            } else {
+                run_lines(
+                    $lines,
+                    &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper,
+                    crash_detector.as_ref(), &mut sampler, $out,
+                );
+            }
+        };
+    }
 
     if cli.file.is_empty() {
         let stdout = io::stdout();
         let mut out = LineWriter::new(stdout.lock());
         let stdin = io::stdin();
-        run_lines(
-            BufReader::new(stdin.lock()).lines(),
-            &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper, &mut out,
-        );
-        finish_output(&mut out, &formatter, &cli, matched, summary, deduper);
+        dispatch_lines!(BufReader::new(stdin.lock()).lines(), &mut out);
+        finish_output(&mut out, &formatter, &cli, matched, summary, deduper, sampler, crash_detector.as_ref());
     } else {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -391,20 +513,17 @@ fn main() {
                         continue;
                     }
                 };
-                run_lines(
-                    BufReader::new(file).lines(),
-                    &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper, &mut out,
-                );
-                if cli.limit > 0 && matched >= cli.limit && !cli.dedupe {
+                dispatch_lines!(BufReader::new(file).lines(), &mut out);
+                if cli.limit > 0 && matched >= cli.limit && !cli.dedupe && !needs_full_scan {
                     break;
                 }
             }
-            if cli.limit > 0 && matched >= cli.limit && !cli.dedupe {
+            if cli.limit > 0 && matched >= cli.limit && !cli.dedupe && !needs_full_scan {
                 break;
             }
         }
 
-        finish_output(&mut out, &formatter, &cli, matched, summary, deduper);
+        finish_output(&mut out, &formatter, &cli, matched, summary, deduper, sampler, crash_detector.as_ref());
     }
 
     process::exit(if matched > 0 { 0 } else { 1 });
