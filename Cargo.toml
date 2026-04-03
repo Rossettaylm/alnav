@@ -1,5 +1,5 @@
 [package]
-name = "loggrep"
+name = "aloggrep"
 version = "0.1.0"
 edition = "2021"
 description = "Lightweight Android logcat/xlog log filter and analyzer CLI"

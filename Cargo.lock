@@ -12,6 +12,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aloggrep"
+version = "0.1.0"
+dependencies = [
+ "atty",
+ "clap",
+ "colored",
+ "glob",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -172,19 +185,6 @@ name = "libc"
 version = "0.2.184"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
-
-[[package]]
-name = "loggrep"
-version = "0.1.0"
-dependencies = [
- "atty",
- "clap",
- "colored",
- "glob",
- "regex",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "memchr"
