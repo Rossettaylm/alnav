@@ -1,6 +1,6 @@
 [package]
 name = "aloggrep"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Lightweight Android logcat/xlog log filter and analyzer CLI"
 license = "MIT"
