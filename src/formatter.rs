@@ -167,6 +167,7 @@ impl Formatter {
         if f.level { json_field!("level", entry.level.as_char()); }
         if f.tag { json_field_escaped!("tag", entry.tag); }
         if f.msg { json_field_escaped!("msg", entry.msg); }
+        let _ = first;
         writeln!(out, "}}")
     }
 
