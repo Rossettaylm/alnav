@@ -49,6 +49,19 @@ impl FieldSet {
     }
 }
 
+/// Colored level badge string (e.g. " E " on red background).
+fn level_badge(level: Level) -> String {
+    let ch = level.as_char();
+    match level {
+        Level::V => format!(" {ch} ").white().on_truecolor(100, 100, 100).to_string(),
+        Level::D => format!(" {ch} ").black().on_blue().to_string(),
+        Level::I => format!(" {ch} ").black().on_green().to_string(),
+        Level::W => format!(" {ch} ").black().on_yellow().to_string(),
+        Level::E => format!(" {ch} ").white().on_red().to_string(),
+        Level::F => format!(" {ch} ").white().on_red().bold().to_string(),
+    }
+}
+
 pub struct Formatter {
     format: OutputFormat,
     use_color: bool,
@@ -103,14 +116,7 @@ impl Formatter {
             String::new()
         };
 
-        let level_badge = match entry.level {
-            Level::V => format!(" {} ", entry.level.as_char()).white().on_truecolor(100, 100, 100).to_string(),
-            Level::D => format!(" {} ", entry.level.as_char()).black().on_blue().to_string(),
-            Level::I => format!(" {} ", entry.level.as_char()).black().on_green().to_string(),
-            Level::W => format!(" {} ", entry.level.as_char()).black().on_yellow().to_string(),
-            Level::E => format!(" {} ", entry.level.as_char()).white().on_red().to_string(),
-            Level::F => format!(" {} ", entry.level.as_char()).white().on_red().bold().to_string(),
-        };
+        let level_badge = level_badge(entry.level);
 
         let msg = if self.highlight_patterns.is_empty() {
             entry.msg.to_string()
@@ -131,29 +137,37 @@ impl Formatter {
 
     fn write_json<W: Write>(&self, entry: &LogEntry, out: &mut W) -> std::io::Result<()> {
         let f = &self.fields;
-        // Build selective JSON
-        let mut parts: Vec<String> = Vec::new();
-        if f.timestamp {
-            parts.push(format!("\"timestamp\":\"{}\"", entry.timestamp.trim()));
+        write!(out, "{{")?;
+        let mut first = true;
+        macro_rules! json_field {
+            ($name:expr, $val:expr) => {{
+                if !first { write!(out, ",")?; }
+                first = false;
+                write!(out, "\"{}\":\"{}\"", $name, $val)?;
+            }};
         }
-        if f.pid {
-            parts.push(format!("\"pid\":\"{}\"", entry.pid));
+        macro_rules! json_field_escaped {
+            ($name:expr, $val:expr) => {{
+                if !first { write!(out, ",")?; }
+                first = false;
+                write!(out, "\"{}\":\"", $name)?;
+                for ch in $val.chars() {
+                    match ch {
+                        '"' => write!(out, "\\\"")?,
+                        '\\' => write!(out, "\\\\")?,
+                        _ => write!(out, "{ch}")?,
+                    }
+                }
+                write!(out, "\"")?;
+            }};
         }
-        if f.tid {
-            parts.push(format!("\"tid\":\"{}\"", entry.tid));
-        }
-        if f.level {
-            parts.push(format!("\"level\":\"{}\"", entry.level.as_char()));
-        }
-        if f.tag {
-            let tag_escaped = entry.tag.replace('\\', "\\\\").replace('"', "\\\"");
-            parts.push(format!("\"tag\":\"{}\"", tag_escaped));
-        }
-        if f.msg {
-            let msg_escaped = entry.msg.replace('\\', "\\\\").replace('"', "\\\"");
-            parts.push(format!("\"msg\":\"{}\"", msg_escaped));
-        }
-        writeln!(out, "{{{}}}", parts.join(","))
+        if f.timestamp { json_field!("timestamp", entry.timestamp.trim()); }
+        if f.pid { json_field!("pid", entry.pid); }
+        if f.tid { json_field!("tid", entry.tid); }
+        if f.level { json_field!("level", entry.level.as_char()); }
+        if f.tag { json_field_escaped!("tag", entry.tag); }
+        if f.msg { json_field_escaped!("msg", entry.msg); }
+        writeln!(out, "}}")
     }
 
     fn write_csv<W: Write>(&self, entry: &LogEntry, out: &mut W) -> std::io::Result<()> {
@@ -218,15 +232,7 @@ impl Formatter {
             buf.push(' ');
         }
         if f.level {
-            let level_badge = match entry.level {
-                Level::V => format!(" {} ", entry.level.as_char()).white().on_truecolor(100, 100, 100).to_string(),
-                Level::D => format!(" {} ", entry.level.as_char()).black().on_blue().to_string(),
-                Level::I => format!(" {} ", entry.level.as_char()).black().on_green().to_string(),
-                Level::W => format!(" {} ", entry.level.as_char()).black().on_yellow().to_string(),
-                Level::E => format!(" {} ", entry.level.as_char()).white().on_red().to_string(),
-                Level::F => format!(" {} ", entry.level.as_char()).white().on_red().bold().to_string(),
-            };
-            buf.push_str(&level_badge);
+            buf.push_str(&level_badge(entry.level));
             buf.push(' ');
         }
         if f.tag {
@@ -279,19 +285,12 @@ impl Formatter {
             } else {
                 count_str.bold().to_string()
             };
-            let level_badge = match g.level {
-                Level::V => format!(" {level_char} ").white().on_truecolor(100, 100, 100).to_string(),
-                Level::D => format!(" {level_char} ").black().on_blue().to_string(),
-                Level::I => format!(" {level_char} ").black().on_green().to_string(),
-                Level::W => format!(" {level_char} ").black().on_yellow().to_string(),
-                Level::E => format!(" {level_char} ").white().on_red().to_string(),
-                Level::F => format!(" {level_char} ").white().on_red().bold().to_string(),
-            };
+            let badge = level_badge(g.level);
             writeln!(
                 out,
                 "{} {} {}{} {}  {}",
                 count_colored,
-                level_badge,
+                badge,
                 g.tag.bold().cyan(),
                 ":".truecolor(140, 140, 140),
                 g.pattern,

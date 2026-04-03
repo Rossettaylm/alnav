@@ -246,6 +246,33 @@ fn use_context(cli: &Cli) -> bool {
     (b > 0 || a > 0) && !cli.count && !cli.summary && !cli.crashes
 }
 
+/// Read all lines from files matching glob patterns into a Vec.
+fn collect_file_lines(patterns: &[String]) -> Vec<String> {
+    let mut all_lines = Vec::new();
+    for pattern in patterns {
+        let paths = match glob(pattern) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("loggrep: invalid glob '{}': {}", pattern, e);
+                process::exit(2);
+            }
+        };
+        for path in paths.flatten() {
+            let file = match File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("loggrep: cannot open '{}': {}", path.display(), e);
+                    continue;
+                }
+            };
+            for line in BufReader::new(file).lines().flatten() {
+                all_lines.push(line);
+            }
+        }
+    }
+    all_lines
+}
+
 /// Time-based context: two-pass approach.
 /// Pass 1: collect all lines, find matching timestamps.
 /// Pass 2: output all lines whose timestamp falls within [match_ts - window, match_ts + window].
@@ -286,14 +313,24 @@ fn run_time_context<W: io::Write>(
         return 0;
     }
 
-    // Pass 2: output lines within any window
+    // Sort match_secs for binary search (already mostly sorted, but be safe)
+    match_secs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Pass 2: output lines within any window (binary search for O(N log M))
     let window = window_secs as f64;
     let mut matched = 0usize;
     let mut last_printed = false;
 
     for (i, line) in all_lines.iter().enumerate() {
         let in_window = timed[i].secs.map_or(false, |s| {
-            match_secs.iter().any(|&ms| (s - ms).abs() <= window)
+            // Binary search: find the closest match_secs entry
+            let idx = match match_secs.binary_search_by(|ms| ms.partial_cmp(&s).unwrap_or(std::cmp::Ordering::Equal)) {
+                Ok(i) => i,
+                Err(i) => i,
+            };
+            // Check neighbors at idx-1 and idx
+            (idx < match_secs.len() && (match_secs[idx] - s).abs() <= window)
+                || (idx > 0 && (match_secs[idx - 1] - s).abs() <= window)
         });
 
         if in_window {
@@ -664,42 +701,12 @@ fn main() {
 
     // --time-context mode: two-pass, needs all lines in memory
     if let Some(window_secs) = time_context_secs {
-        let mut all_lines: Vec<String> = Vec::new();
-
-        if cli.file.is_empty() {
+        let all_lines = if cli.file.is_empty() {
             let stdin = io::stdin();
-            for line in BufReader::new(stdin.lock()).lines() {
-                match line {
-                    Ok(l) => all_lines.push(l),
-                    Err(_) => break,
-                }
-            }
+            BufReader::new(stdin.lock()).lines().flatten().collect()
         } else {
-            for pattern in &cli.file {
-                let paths = match glob(pattern) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("loggrep: invalid glob '{}': {}", pattern, e);
-                        process::exit(2);
-                    }
-                };
-                for path in paths.flatten() {
-                    let file = match File::open(&path) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            eprintln!("loggrep: cannot open '{}': {}", path.display(), e);
-                            continue;
-                        }
-                    };
-                    for line in BufReader::new(file).lines() {
-                        match line {
-                            Ok(l) => all_lines.push(l),
-                            Err(_) => break,
-                        }
-                    }
-                }
-            }
-        }
+            collect_file_lines(&cli.file)
+        };
 
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -735,33 +742,10 @@ fn main() {
         finish_output(&mut out, &formatter, &cli, matched, summary, deduper, hist, sampler, crash_detector.as_ref());
     } else if cli.sort_time {
         // --sort-time: read all lines, sort by timestamp, then process
-        let mut all_lines: Vec<String> = Vec::new();
-        for pattern in &cli.file {
-            let paths = match glob(pattern) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("loggrep: invalid glob '{}': {}", pattern, e);
-                    process::exit(2);
-                }
-            };
-            for path in paths.flatten() {
-                let file = match File::open(&path) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("loggrep: cannot open '{}': {}", path.display(), e);
-                        continue;
-                    }
-                };
-                for line in BufReader::new(file).lines().flatten() {
-                    all_lines.push(line);
-                }
-            }
-        }
+        let mut all_lines = collect_file_lines(&cli.file);
         // Sort by timestamp (lexicographic on time_full, fallback to original order)
-        all_lines.sort_by(|a, b| {
-            let ta = LogEntry::parse(a).and_then(|e| e.time_full().map(|s| s.to_string()));
-            let tb = LogEntry::parse(b).and_then(|e| e.time_full().map(|s| s.to_string()));
-            ta.cmp(&tb)
+        all_lines.sort_by_cached_key(|line| {
+            LogEntry::parse(line).and_then(|e| e.time_full().map(|s| s.to_string()))
         });
 
         let stdout = io::stdout();
