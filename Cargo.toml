@@ -2,6 +2,13 @@
 name = "loggrep"
 version = "0.1.0"
 edition = "2021"
+description = "Lightweight Android logcat/xlog log filter and analyzer CLI"
+license = "MIT"
+authors = ["Lyman Yang"]
+repository = "https://github.com/Rossettaylm/loggrep"
+keywords = ["android", "logcat", "log", "filter", "analysis"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
