@@ -85,7 +85,9 @@ pub enum OutputFormat {
   loggrep -f app.log --summary                   # stats + top errors + crash count
 
   \x1b[4mTime range\x1b[0m
-  loggrep -f app.log --since 10:30:00 --until 10:35:00"
+  loggrep -f app.log --since 10:30:00 --until 10:35:00
+  loggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
+  loggrep -f app.log --since '04-02 12:00:00'      # threadtime date+time"
 )]
 pub struct Cli {
     /// Filter by tag (regex, repeatable, OR logic within)
@@ -124,11 +126,11 @@ pub struct Cli {
     #[arg(long)]
     summary: bool,
 
-    /// Start time filter (HH:MM:SS)
+    /// Start time filter (HH:MM:SS or YYYY-MM-DD HH:MM:SS or MM-DD HH:MM:SS)
     #[arg(long, value_name = "TIME")]
     since: Option<String>,
 
-    /// End time filter (HH:MM:SS)
+    /// End time filter (HH:MM:SS or YYYY-MM-DD HH:MM:SS or MM-DD HH:MM:SS)
     #[arg(long, value_name = "TIME")]
     until: Option<String>,
 

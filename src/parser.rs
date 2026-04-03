@@ -190,6 +190,24 @@ impl<'a> LogEntry<'a> {
             None
         }
     }
+
+    /// Extract sortable datetime prefix from timestamp for full datetime range filtering.
+    ///
+    /// Returns a string that can be compared lexicographically:
+    /// - xlog: `"YYYY-MM-DD HH:MM:SS"` (19 chars)
+    /// - threadtime: `"MM-DD HH:MM:SS"` (14 chars)
+    /// - brief: None (no timestamp)
+    pub fn time_full(&self) -> Option<&str> {
+        if self.timestamp.len() >= 19 && self.timestamp.as_bytes()[4] == b'-' {
+            // xlog: "YYYY-MM-DD HH:MM:SS.mmm" → "YYYY-MM-DD HH:MM:SS"
+            Some(&self.timestamp[..19])
+        } else if self.timestamp.len() >= 14 {
+            // threadtime: "MM-DD HH:MM:SS.mmm" → "MM-DD HH:MM:SS"
+            Some(&self.timestamp[..14])
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +274,19 @@ mod tests {
         let line = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
         let entry = LogEntry::parse(line).unwrap();
         assert_eq!(entry.time_hms(), Some("12:34:56"));
+    }
+
+    #[test]
+    fn test_time_full_threadtime() {
+        let line = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
+        let entry = LogEntry::parse(line).unwrap();
+        assert_eq!(entry.time_full(), Some("04-02 12:34:56"));
+    }
+
+    #[test]
+    fn test_time_full_xlog() {
+        let line = "2026-03-04 10:23:28.872|1[3542]3831|3542|I|Tag|msg";
+        let entry = LogEntry::parse(line).unwrap();
+        assert_eq!(entry.time_full(), Some("2026-03-04 10:23:28"));
     }
 }

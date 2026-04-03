@@ -4,13 +4,65 @@ use crate::expr::Expr;
 use crate::parser::{Level, LogEntry};
 use crate::Cli;
 
+/// Time filter that auto-detects user input format.
+///
+/// - `HH:MM:SS` → compare against `time_hms()` (time only)
+/// - `YYYY-MM-DD HH:MM:SS` → compare against `time_full()` (full datetime)
+/// - `MM-DD HH:MM:SS` → compare against `time_full()` (threadtime date+time)
+enum TimeFilter {
+    /// HH:MM:SS — compare against time_hms()
+    TimeOnly(String),
+    /// Anything longer — compare against time_full()
+    Full(String),
+}
+
+impl TimeFilter {
+    fn parse(input: &str) -> Result<Self, String> {
+        let s = input.trim();
+        if s.is_empty() {
+            return Err("empty time value".to_string());
+        }
+        // HH:MM:SS (8 chars, e.g. "10:30:00")
+        if s.len() == 8 && s.as_bytes()[2] == b':' && s.as_bytes()[5] == b':' {
+            Ok(TimeFilter::TimeOnly(s.to_string()))
+        } else {
+            // YYYY-MM-DD HH:MM:SS (19 chars) or MM-DD HH:MM:SS (14 chars) or other
+            Ok(TimeFilter::Full(s.to_string()))
+        }
+    }
+
+    /// Check if entry timestamp >= this filter value.
+    fn entry_gte(&self, entry: &LogEntry) -> bool {
+        match self {
+            TimeFilter::TimeOnly(t) => {
+                entry.time_hms().map_or(true, |hms| hms >= t.as_str())
+            }
+            TimeFilter::Full(t) => {
+                entry.time_full().map_or(true, |full| full >= t.as_str())
+            }
+        }
+    }
+
+    /// Check if entry timestamp <= this filter value.
+    fn entry_lte(&self, entry: &LogEntry) -> bool {
+        match self {
+            TimeFilter::TimeOnly(t) => {
+                entry.time_hms().map_or(true, |hms| hms <= t.as_str())
+            }
+            TimeFilter::Full(t) => {
+                entry.time_full().map_or(true, |full| full <= t.as_str())
+            }
+        }
+    }
+}
+
 pub struct FilterChain {
     tag_filters: Vec<Regex>,
     msg_filters: Vec<Regex>,
     package_filters: Vec<Regex>,
     min_level: Option<Level>,
-    since: Option<String>,
-    until: Option<String>,
+    since: Option<TimeFilter>,
+    until: Option<TimeFilter>,
     use_and: bool,
     exprs: Vec<Expr>,
 }
@@ -54,13 +106,16 @@ impl FilterChain {
             .map(|e| Expr::parse(e, cli.ignore_case))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let since = cli.since.as_ref().map(|s| TimeFilter::parse(s)).transpose()?;
+        let until = cli.until.as_ref().map(|s| TimeFilter::parse(s)).transpose()?;
+
         Ok(Self {
             tag_filters,
             msg_filters,
             package_filters,
             min_level,
-            since: cli.since.clone(),
-            until: cli.until.clone(),
+            since,
+            until,
             use_and: cli.and,
             exprs,
         })
@@ -101,17 +156,13 @@ impl FilterChain {
     }
 
     fn match_time(&self, entry: &LogEntry) -> bool {
-        let hms = match entry.time_hms() {
-            Some(t) => t,
-            None => return true,
-        };
         if let Some(ref since) = self.since {
-            if hms < since.as_str() {
+            if !since.entry_gte(entry) {
                 return false;
             }
         }
         if let Some(ref until) = self.until {
-            if hms > until.as_str() {
+            if !until.entry_lte(entry) {
                 return false;
             }
         }
@@ -237,5 +288,71 @@ mod tests {
         assert!(chain.matches(&LogEntry::parse(&make_entry(Level::I, "NT", "mobile_msf cmd:0x9293 done")).unwrap()));
         assert!(!chain.matches(&LogEntry::parse(&make_entry(Level::I, "NT", "mobile_msf cmd:0xfe1 done")).unwrap()));
         assert!(!chain.matches(&LogEntry::parse(&make_entry(Level::I, "NT", "other cmd:0x9293 done")).unwrap()));
+    }
+
+    fn build_chain_time(since: Option<&str>, until: Option<&str>) -> FilterChain {
+        let cli = Cli {
+            tag: vec![], msg: vec![], level: None, package: vec![],
+            file: vec![], format: OutputFormat::Text, limit: 0, count: false,
+            summary: false, since: since.map(|s| s.to_string()),
+            until: until.map(|s| s.to_string()), no_color: false,
+            ignore_case: false, invert: false, and: false, expr: vec![],
+            context: None, after_context: None, before_context: None,
+            dedupe: false, multiline: false, crashes: false, tail: 0, sample: 0,
+        };
+        FilterChain::from_cli(&cli).unwrap()
+    }
+
+    #[test]
+    fn test_time_hms_since_until() {
+        let chain = build_chain_time(Some("12:00:00"), Some("13:00:00"));
+        let hit = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
+        let before = "04-02 11:59:59.999  1234  5678 D Tag     : msg";
+        let after = "04-02 13:00:01.000  1234  5678 D Tag     : msg";
+        assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(before).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(after).unwrap()));
+    }
+
+    #[test]
+    fn test_time_full_datetime_xlog() {
+        let chain = build_chain_time(
+            Some("2026-03-04 10:30:00"),
+            Some("2026-03-04 10:35:00"),
+        );
+        let hit = "2026-03-04 10:32:00.000|1[3542]3831|3542|I|Tag|msg";
+        let before = "2026-03-04 10:29:59.000|1[3542]3831|3542|I|Tag|msg";
+        let after = "2026-03-04 10:35:01.000|1[3542]3831|3542|I|Tag|msg";
+        assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(before).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(after).unwrap()));
+    }
+
+    #[test]
+    fn test_time_full_date_threadtime() {
+        // MM-DD HH:MM:SS format for threadtime
+        let chain = build_chain_time(
+            Some("04-02 12:00:00"),
+            Some("04-02 13:00:00"),
+        );
+        let hit = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
+        let before = "04-01 23:59:59.999  1234  5678 D Tag     : msg";
+        let after = "04-03 00:00:01.000  1234  5678 D Tag     : msg";
+        assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(before).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(after).unwrap()));
+    }
+
+    #[test]
+    fn test_time_full_xlog_cross_day() {
+        // Can filter across days with full datetime
+        let chain = build_chain_time(
+            Some("2026-03-03 23:00:00"),
+            Some("2026-03-04 01:00:00"),
+        );
+        let hit = "2026-03-03 23:30:00.000|1[3542]3831|3542|I|Tag|msg";
+        let miss = "2026-03-04 02:00:00.000|1[3542]3831|3542|I|Tag|msg";
+        assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(miss).unwrap()));
     }
 }
