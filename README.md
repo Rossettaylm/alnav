@@ -1,4 +1,4 @@
-# loggrep
+# aloggrep
 
 轻量级 Android logcat / xlog 日志过滤与分析 CLI 工具。
 
@@ -10,6 +10,8 @@
 cargo install aloggrep
 ```
 
+安装后提供两个命令：`aloggrep`（完整名）和 `alg`（简写），功能完全相同。
+
 或从源码安装：
 
 ```bash
@@ -20,16 +22,16 @@ cargo install --path .
 
 ```bash
 # 管道模式（配合 adb logcat）
-adb logcat | loggrep --tag "OkHttp" --level W
+adb logcat | aloggrep --tag "OkHttp" --level W
 
 # 文件模式
-loggrep -f app.log --tag "MyApp" --level E
+aloggrep -f app.log --tag "MyApp" --level E
 
 # 全局概览
-loggrep -f app.log --summary
+aloggrep -f app.log --summary
 
 # 崩溃提取
-loggrep -f app.log --crashes
+aloggrep -f app.log --crashes
 ```
 
 ## 核心功能
@@ -37,19 +39,19 @@ loggrep -f app.log --crashes
 ### 多条件过滤
 
 ```bash
-loggrep -f app.log --tag "OkHttp" --msg "timeout" --level W
-loggrep -f app.log --tag A --tag B            # OR: tag=A 或 tag=B
-loggrep -f app.log --tag A --tag B --and      # AND: tag=A 且 tag=B
-loggrep -f app.log --pid 3542 --tid 999       # 按 PID/TID 过滤
+aloggrep -f app.log --tag "OkHttp" --msg "timeout" --level W
+aloggrep -f app.log --tag A --tag B            # OR: tag=A 或 tag=B
+aloggrep -f app.log --tag A --tag B --and      # AND: tag=A 且 tag=B
+aloggrep -f app.log --pid 3542 --tid 999       # 按 PID/TID 过滤
 ```
 
 ### 布尔表达式 (`-e`)
 
 ```bash
-loggrep -f app.log -e 'msg ~ timeout and tag ~ OkHttp'
-loggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
-loggrep -f app.log -e 'not tag ~ Debug'
-loggrep -f app.log -e 'pid ~ 3542 and tid ~ 999'
+aloggrep -f app.log -e 'msg ~ timeout and tag ~ OkHttp'
+aloggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+aloggrep -f app.log -e 'not tag ~ Debug'
+aloggrep -f app.log -e 'pid ~ 3542 and tid ~ 999'
 ```
 
 语法：`FIELD ~ VALUE` | `level >= LEVEL`，用 `and` / `or` / `not` / `()` 组合。FIELD = `tag` | `msg` | `pkg` | `pid` | `tid`。
@@ -57,47 +59,47 @@ loggrep -f app.log -e 'pid ~ 3542 and tid ~ 999'
 ### 时间范围
 
 ```bash
-loggrep -f app.log --since 10:30:00 --until 10:35:00
-loggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
+aloggrep -f app.log --since 10:30:00 --until 10:35:00
+aloggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
 ```
 
 ### 输出格式与字段选择
 
 ```bash
-loggrep -f app.log --format json --limit 50          # JSON lines
-loggrep -f app.log --format csv > out.csv             # CSV
-loggrep -f app.log --fields timestamp,level,tag,msg   # 只输出指定字段
-loggrep -f app.log --count                            # 仅输出匹配数量
+aloggrep -f app.log --format json --limit 50          # JSON lines
+aloggrep -f app.log --format csv > out.csv             # CSV
+aloggrep -f app.log --fields timestamp,level,tag,msg   # 只输出指定字段
+aloggrep -f app.log --count                            # 仅输出匹配数量
 ```
 
 ### 上下文
 
 ```bash
-loggrep -f app.log --tag crash -C 3                   # 前后各 3 行
-loggrep -f app.log --level F --time-context 5s        # 前后各 5 秒
+aloggrep -f app.log --tag crash -C 3                   # 前后各 3 行
+aloggrep -f app.log --level F --time-context 5s        # 前后各 5 秒
 ```
 
 ### 分析工具
 
 ```bash
-loggrep -f app.log --summary                          # 级别分布、Top tags/errors、崩溃数
-loggrep -f app.log --histogram 1m                     # 每分钟级别分布 (JSON)
-loggrep -f app.log --dedupe --limit 20                # 去重归并 Top 20 模式
-loggrep -f app.log --crashes                          # 崩溃提取 (JSON)
+aloggrep -f app.log --summary                          # 级别分布、Top tags/errors、崩溃数
+aloggrep -f app.log --histogram 1m                     # 每分钟级别分布 (JSON)
+aloggrep -f app.log --dedupe --limit 20                # 去重归并 Top 20 模式
+aloggrep -f app.log --crashes                          # 崩溃提取 (JSON)
 ```
 
 ### 多行合并与采样
 
 ```bash
-loggrep -f app.log -M --tag AndroidRuntime            # 合并堆栈追踪
-loggrep -f app.log --tail 50                          # 最后 50 条
-loggrep -f app.log --sample 100                       # 均匀抽样 100 条
+aloggrep -f app.log -M --tag AndroidRuntime            # 合并堆栈追踪
+aloggrep -f app.log --tail 50                          # 最后 50 条
+aloggrep -f app.log --sample 100                       # 均匀抽样 100 条
 ```
 
 ### 多文件归并
 
 ```bash
-loggrep -f 'logs/*.log' --sort-time --level E         # 按时间合并排序
+aloggrep -f 'logs/*.log' --sort-time --level E         # 按时间合并排序
 ```
 
 ## 过滤逻辑

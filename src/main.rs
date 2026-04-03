@@ -36,80 +36,80 @@ pub enum OutputFormat {
 
 #[derive(Parser)]
 #[command(
-    name = "loggrep",
+    name = "aloggrep",
     about = "Lightweight Android logcat filter & analyzer",
     after_long_help = "\x1b[1mExamples:\x1b[0m
 
   \x1b[4mBasic filtering\x1b[0m
-  adb logcat | loggrep --tag OkHttp --level W
-  loggrep -f app.log --tag \"OkHttp|Retrofit\" --level E
-  loggrep -f app.log --msg error -i              # case-insensitive
-  loggrep -f app.log --tag Debug -v              # invert match
-  loggrep -f app.log --tag A --tag B             # tag=A OR tag=B
-  loggrep -f app.log --tag A --tag B --and       # tag=A AND tag=B
+  adb logcat | aloggrep --tag OkHttp --level W
+  aloggrep -f app.log --tag \"OkHttp|Retrofit\" --level E
+  aloggrep -f app.log --msg error -i              # case-insensitive
+  aloggrep -f app.log --tag Debug -v              # invert match
+  aloggrep -f app.log --tag A --tag B             # tag=A OR tag=B
+  aloggrep -f app.log --tag A --tag B --and       # tag=A AND tag=B
 
   \x1b[4mBoolean expressions (-e)\x1b[0m
-  loggrep -f app.log -e 'msg ~ timeout and level >= W'
-  loggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
-  loggrep -f app.log -e 'not tag ~ Debug'
-  loggrep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit'  # multiple -e = OR
+  aloggrep -f app.log -e 'msg ~ timeout and level >= W'
+  aloggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+  aloggrep -f app.log -e 'not tag ~ Debug'
+  aloggrep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit'  # multiple -e = OR
   # Syntax: tag|msg|pkg ~ <regex>, level >= V|D|I|W|E|F
   # Combine with: and, or, not, ( )
 
   \x1b[4mContext lines\x1b[0m
-  loggrep -f app.log --tag crash -C 3            # 3 lines before + after
-  loggrep -f app.log -e 'level >= E' -B 5 -A 2  # 5 before, 2 after
+  aloggrep -f app.log --tag crash -C 3            # 3 lines before + after
+  aloggrep -f app.log -e 'level >= E' -B 5 -A 2  # 5 before, 2 after
 
   \x1b[4mMulti-line merge\x1b[0m
-  loggrep -f app.log --tag AndroidRuntime -M     # merge stack traces
-  adb logcat | loggrep -M --level E              # merged error entries
+  aloggrep -f app.log --tag AndroidRuntime -M     # merge stack traces
+  adb logcat | aloggrep -M --level E              # merged error entries
 
   \x1b[4mCrash extraction\x1b[0m
-  loggrep -f app.log --crashes                   # all crashes → JSON
-  loggrep -f app.log --crashes --tag MyApp       # filter + extract
-  loggrep -f app.log --crashes --limit 5         # first 5 crashes
+  aloggrep -f app.log --crashes                   # all crashes → JSON
+  aloggrep -f app.log --crashes --tag MyApp       # filter + extract
+  aloggrep -f app.log --crashes --limit 5         # first 5 crashes
 
   \x1b[4mSampling (manage large output)\x1b[0m
-  loggrep -f app.log --level E --tail 50           # last 50 errors
-  loggrep -f app.log --level E --limit 20 --tail 20 # first 20 + last 20
-  loggrep -f app.log --sample 100                  # uniform sample of 100
+  aloggrep -f app.log --level E --tail 50           # last 50 errors
+  aloggrep -f app.log --level E --limit 20 --tail 20 # first 20 + last 20
+  aloggrep -f app.log --sample 100                  # uniform sample of 100
 
   \x1b[4mDeduplicate (group similar lines)\x1b[0m
-  loggrep -f app.log --level E --dedupe          # group errors by pattern
-  loggrep -f app.log --dedupe --limit 20         # top 20 patterns
-  loggrep -f app.log --dedupe --format json      # JSON output for AI
+  aloggrep -f app.log --level E --dedupe          # group errors by pattern
+  aloggrep -f app.log --dedupe --limit 20         # top 20 patterns
+  aloggrep -f app.log --dedupe --format json      # JSON output for AI
   # Numbers/hex/UUIDs are normalized: \"timeout 100ms\" ≈ \"timeout 200ms\"
 
   \x1b[4mOutput formats\x1b[0m
-  loggrep -f app.log --tag crash --format json --limit 50
-  loggrep -f app.log --format csv > out.csv
-  loggrep -f app.log --tag crash --count         # print match count only
-  loggrep -f app.log --summary                   # stats + top errors + crash count
+  aloggrep -f app.log --tag crash --format json --limit 50
+  aloggrep -f app.log --format csv > out.csv
+  aloggrep -f app.log --tag crash --count         # print match count only
+  aloggrep -f app.log --summary                   # stats + top errors + crash count
 
   \x1b[4mTime range\x1b[0m
-  loggrep -f app.log --since 10:30:00 --until 10:35:00
-  loggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
-  loggrep -f app.log --since '04-02 12:00:00'      # threadtime date+time
+  aloggrep -f app.log --since 10:30:00 --until 10:35:00
+  aloggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
+  aloggrep -f app.log --since '04-02 12:00:00'      # threadtime date+time
 
   \x1b[4mPID/TID filtering\x1b[0m
-  loggrep -f app.log --tid 5678 --level W           # track specific thread
-  loggrep -f app.log --pid 1234 --tid 5678          # PID + TID combined
-  loggrep -f app.log -e 'pid ~ 3542 and level >= E' # expression with pid/tid
+  aloggrep -f app.log --tid 5678 --level W           # track specific thread
+  aloggrep -f app.log --pid 1234 --tid 5678          # PID + TID combined
+  aloggrep -f app.log -e 'pid ~ 3542 and level >= E' # expression with pid/tid
 
   \x1b[4mHistogram (time distribution)\x1b[0m
-  loggrep -f app.log --histogram 1m                 # level distribution per minute
-  loggrep -f app.log --histogram 10s --level E      # error count per 10 seconds
+  aloggrep -f app.log --histogram 1m                 # level distribution per minute
+  aloggrep -f app.log --histogram 10s --level E      # error count per 10 seconds
 
   \x1b[4mField selection\x1b[0m
-  loggrep -f app.log --level E --fields level,tag,msg --format json  # minimal output
-  loggrep -f app.log --fields timestamp,msg         # time + message only
+  aloggrep -f app.log --level E --fields level,tag,msg --format json  # minimal output
+  aloggrep -f app.log --fields timestamp,msg         # time + message only
 
   \x1b[4mTime-based context\x1b[0m
-  loggrep -f app.log --level F --time-context 5s    # all logs within 5s of fatal errors
-  loggrep -f app.log --tag crash --time-context 10s # 10s window around crash lines
+  aloggrep -f app.log --level F --time-context 5s    # all logs within 5s of fatal errors
+  aloggrep -f app.log --tag crash --time-context 10s # 10s window around crash lines
 
   \x1b[4mMulti-file time sort\x1b[0m
-  loggrep -f 'logs/*.log' --sort-time --level E     # merge-sort by timestamp"
+  aloggrep -f 'logs/*.log' --sort-time --level E     # merge-sort by timestamp"
 )]
 pub struct Cli {
     /// Filter by tag (regex, repeatable, OR logic within)

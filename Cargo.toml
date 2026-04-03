@@ -10,6 +10,14 @@ keywords = ["android", "logcat", "log", "filter", "analysis"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
+[[bin]]
+name = "aloggrep"
+path = "src/main.rs"
+
+[[bin]]
+name = "alg"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 regex = "1"
