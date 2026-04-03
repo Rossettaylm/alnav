@@ -3,6 +3,7 @@ mod dedupe;
 mod expr;
 mod filter;
 mod formatter;
+mod histogram;
 mod multiline;
 mod parser;
 mod sampler;
@@ -10,7 +11,7 @@ mod summary;
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, LineWriter};
+use std::io::{self, BufRead, BufReader, LineWriter, Write};
 use std::process;
 
 use clap::{Parser, ValueEnum};
@@ -19,7 +20,8 @@ use glob::glob;
 use crash::CrashDetector;
 use dedupe::Deduper;
 use filter::FilterChain;
-use formatter::Formatter;
+use formatter::{FieldSet, Formatter};
+use histogram::Histogram;
 use multiline::MultilineMerger;
 use parser::LogEntry;
 use sampler::Sampler;
@@ -87,7 +89,27 @@ pub enum OutputFormat {
   \x1b[4mTime range\x1b[0m
   loggrep -f app.log --since 10:30:00 --until 10:35:00
   loggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
-  loggrep -f app.log --since '04-02 12:00:00'      # threadtime date+time"
+  loggrep -f app.log --since '04-02 12:00:00'      # threadtime date+time
+
+  \x1b[4mPID/TID filtering\x1b[0m
+  loggrep -f app.log --tid 5678 --level W           # track specific thread
+  loggrep -f app.log --pid 1234 --tid 5678          # PID + TID combined
+  loggrep -f app.log -e 'pid ~ 3542 and level >= E' # expression with pid/tid
+
+  \x1b[4mHistogram (time distribution)\x1b[0m
+  loggrep -f app.log --histogram 1m                 # level distribution per minute
+  loggrep -f app.log --histogram 10s --level E      # error count per 10 seconds
+
+  \x1b[4mField selection\x1b[0m
+  loggrep -f app.log --level E --fields level,tag,msg --format json  # minimal output
+  loggrep -f app.log --fields timestamp,msg         # time + message only
+
+  \x1b[4mTime-based context\x1b[0m
+  loggrep -f app.log --level F --time-context 5s    # all logs within 5s of fatal errors
+  loggrep -f app.log --tag crash --time-context 10s # 10s window around crash lines
+
+  \x1b[4mMulti-file time sort\x1b[0m
+  loggrep -f 'logs/*.log' --sort-time --level E     # merge-sort by timestamp"
 )]
 pub struct Cli {
     /// Filter by tag (regex, repeatable, OR logic within)
@@ -185,6 +207,30 @@ pub struct Cli {
     /// Uniformly sample N entries from all matches (reservoir sampling)
     #[arg(long, value_name = "N", default_value_t = 0)]
     sample: usize,
+
+    /// Filter by PID (regex, repeatable, OR logic within)
+    #[arg(long, value_name = "REGEX")]
+    pid: Vec<String>,
+
+    /// Filter by TID (regex, repeatable, OR logic within)
+    #[arg(long, value_name = "REGEX")]
+    tid: Vec<String>,
+
+    /// Time bucket histogram: group entries by interval (e.g. 10s, 1m, 5m)
+    #[arg(long, value_name = "INTERVAL")]
+    histogram: Option<String>,
+
+    /// Select output fields: timestamp,pid,tid,level,tag,msg (comma-separated)
+    #[arg(long, value_name = "FIELDS")]
+    fields: Option<String>,
+
+    /// Sort entries by timestamp across multiple files
+    #[arg(long)]
+    sort_time: bool,
+
+    /// Show context by time window (e.g. 5s, 10s) instead of line count
+    #[arg(long, value_name = "DURATION")]
+    time_context: Option<String>,
 }
 
 /// Resolve effective before/after context from -C/-A/-B flags.
@@ -200,6 +246,107 @@ fn use_context(cli: &Cli) -> bool {
     (b > 0 || a > 0) && !cli.count && !cli.summary && !cli.crashes
 }
 
+/// Time-based context: two-pass approach.
+/// Pass 1: collect all lines, find matching timestamps.
+/// Pass 2: output all lines whose timestamp falls within [match_ts - window, match_ts + window].
+fn run_time_context<W: io::Write>(
+    all_lines: &[String],
+    filter_chain: &FilterChain,
+    formatter: &Formatter,
+    cli: &Cli,
+    window_secs: u64,
+    out: &mut W,
+) -> usize {
+    // Pass 1: find match timestamps as seconds offsets
+    struct TimedLine {
+        secs: Option<f64>,
+    }
+
+    // Parse all lines and compute timestamps as comparable seconds
+    let mut timed: Vec<TimedLine> = Vec::with_capacity(all_lines.len());
+    let mut match_secs: Vec<f64> = Vec::new();
+
+    for line in all_lines {
+        let entry = LogEntry::parse(line);
+        let secs = entry.as_ref().and_then(|e| timestamp_to_secs(e.timestamp));
+        timed.push(TimedLine { secs });
+
+        if let Some(ref e) = entry {
+            let is_match = filter_chain.matches(e);
+            let is_match = if cli.invert { !is_match } else { is_match };
+            if is_match {
+                if let Some(s) = secs {
+                    match_secs.push(s);
+                }
+            }
+        }
+    }
+
+    if match_secs.is_empty() {
+        return 0;
+    }
+
+    // Pass 2: output lines within any window
+    let window = window_secs as f64;
+    let mut matched = 0usize;
+    let mut last_printed = false;
+
+    for (i, line) in all_lines.iter().enumerate() {
+        let in_window = timed[i].secs.map_or(false, |s| {
+            match_secs.iter().any(|&ms| (s - ms).abs() <= window)
+        });
+
+        if in_window {
+            if !last_printed && matched > 0 {
+                let _ = writeln!(out, "--");
+            }
+            if let Some(entry) = LogEntry::parse(line) {
+                let _ = formatter.write_entry(&entry, line, out);
+            } else {
+                let _ = writeln!(out, "{line}");
+            }
+            matched += 1;
+            last_printed = true;
+            if cli.limit > 0 && matched >= cli.limit {
+                break;
+            }
+        } else {
+            last_printed = false;
+        }
+    }
+
+    matched
+}
+
+/// Convert a timestamp string to seconds (for time-context comparison).
+/// xlog: "YYYY-MM-DD HH:MM:SS.mmm" → day_offset * 86400 + secs
+/// threadtime: "MM-DD HH:MM:SS.mmm" → day_offset * 86400 + secs
+fn timestamp_to_secs(ts: &str) -> Option<f64> {
+    let ts = ts.trim();
+    if ts.len() >= 23 && ts.as_bytes()[4] == b'-' {
+        // xlog: YYYY-MM-DD HH:MM:SS.mmm
+        let day: f64 = ts[8..10].parse().ok()?;
+        let h: f64 = ts[11..13].parse().ok()?;
+        let m: f64 = ts[14..16].parse().ok()?;
+        let s: f64 = ts[17..19].parse().ok()?;
+        let ms: f64 = ts[20..23].parse().ok()?;
+        // Use month*31+day as rough day offset for cross-day comparison
+        let month: f64 = ts[5..7].parse().ok()?;
+        Some((month * 31.0 + day) * 86400.0 + h * 3600.0 + m * 60.0 + s + ms / 1000.0)
+    } else if ts.len() >= 18 {
+        // threadtime: MM-DD HH:MM:SS.mmm
+        let day: f64 = ts[3..5].parse().ok()?;
+        let h: f64 = ts[6..8].parse().ok()?;
+        let m: f64 = ts[9..11].parse().ok()?;
+        let s: f64 = ts[12..14].parse().ok()?;
+        let ms: f64 = ts[15..18].parse().ok()?;
+        let month: f64 = ts[0..2].parse().ok()?;
+        Some((month * 31.0 + day) * 86400.0 + h * 3600.0 + m * 60.0 + s + ms / 1000.0)
+    } else {
+        None
+    }
+}
+
 fn run_lines<W: io::Write>(
     lines: impl Iterator<Item = io::Result<String>>,
     filter_chain: &FilterChain,
@@ -208,14 +355,15 @@ fn run_lines<W: io::Write>(
     matched: &mut usize,
     summary: &mut Option<Summary>,
     deduper: &mut Option<Deduper>,
+    histogram: &mut Option<Histogram>,
     crash_detector: Option<&CrashDetector>,
     sampler: &mut Sampler,
     out: &mut W,
 ) {
     if use_context(cli) && !sampler.needs_full_scan() {
-        run_with_context(lines, filter_chain, formatter, cli, matched, summary, deduper, out);
+        run_with_context(lines, filter_chain, formatter, cli, matched, summary, deduper, histogram, out);
     } else {
-        run_simple(lines, filter_chain, formatter, cli, matched, summary, deduper, crash_detector, sampler, out);
+        run_simple(lines, filter_chain, formatter, cli, matched, summary, deduper, histogram, crash_detector, sampler, out);
     }
 }
 
@@ -228,6 +376,7 @@ fn run_simple<W: io::Write>(
     matched: &mut usize,
     summary: &mut Option<Summary>,
     deduper: &mut Option<Deduper>,
+    histogram: &mut Option<Histogram>,
     crash_detector: Option<&CrashDetector>,
     sampler: &mut Sampler,
     out: &mut W,
@@ -240,7 +389,7 @@ fn run_simple<W: io::Write>(
         let entry = match LogEntry::parse(&line) {
             Some(e) => e,
             None => {
-                if filter_chain.is_empty() && !cli.count && !cli.summary && !cli.dedupe && crash_detector.is_none() {
+                if filter_chain.is_empty() && !cli.count && !cli.summary && !cli.dedupe && crash_detector.is_none() && histogram.is_none() {
                     let _ = writeln!(out, "{line}");
                 }
                 continue;
@@ -260,7 +409,9 @@ fn run_simple<W: io::Write>(
 
         if is_match {
             *matched += 1;
-            if let Some(ref mut s) = summary {
+            if let Some(ref mut h) = histogram {
+                h.record(&entry);
+            } else if let Some(ref mut s) = summary {
                 s.record(&entry);
             } else if let Some(ref mut d) = deduper {
                 d.record(&entry);
@@ -318,6 +469,7 @@ fn run_with_context<W: io::Write>(
     matched: &mut usize,
     summary: &mut Option<Summary>,
     deduper: &mut Option<Deduper>,
+    histogram: &mut Option<Histogram>,
     out: &mut W,
 ) {
     let (ctx_before, ctx_after) = context_sizes(cli);
@@ -345,6 +497,11 @@ fn run_with_context<W: io::Write>(
 
         if is_match {
             *matched += 1;
+            if let Some(ref mut h) = histogram {
+                if let Some(ref e) = entry {
+                    h.record(e);
+                }
+            }
             if let Some(ref mut s) = summary {
                 if let Some(ref e) = entry {
                     s.record(e);
@@ -412,11 +569,15 @@ fn finish_output<W: io::Write>(
     matched: usize,
     summary: Option<Summary>,
     deduper: Option<Deduper>,
+    histogram: Option<Histogram>,
     sampler: Sampler,
     crash_detector: Option<&CrashDetector>,
 ) {
     if cli.count {
         let _ = writeln!(out, "{matched}");
+    }
+    if let Some(h) = histogram {
+        let _ = h.write_json(out);
     }
     if let Some(s) = summary {
         let _ = writeln!(out, "{}", s.to_json(matched));
@@ -455,13 +616,33 @@ fn main() {
     };
 
     let use_color = !cli.no_color && cli.format == OutputFormat::Text && atty::is(atty::Stream::Stdout);
-    let formatter = Formatter::new(cli.format, use_color, &filter_chain);
+    let fields = match cli.fields.as_ref() {
+        Some(f) => match FieldSet::parse(f) {
+            Ok(fs) => fs,
+            Err(e) => {
+                eprintln!("loggrep: {e}");
+                process::exit(2);
+            }
+        },
+        None => FieldSet::all(),
+    };
+    let formatter = Formatter::new(cli.format, use_color, &filter_chain, fields);
 
     let mut matched: usize = 0;
     let mut summary = if cli.summary { Some(Summary::new()) } else { None };
     let mut deduper = if cli.dedupe { Some(Deduper::new()) } else { None };
     let crash_detector = if cli.crashes { Some(CrashDetector::new()) } else { None };
     let merge = cli.multiline || cli.crashes;
+
+    let mut hist = cli.histogram.as_ref().map(|interval_str| {
+        match histogram::parse_interval(interval_str) {
+            Ok(secs) => Histogram::new(secs),
+            Err(e) => {
+                eprintln!("loggrep: bad --histogram interval: {e}");
+                process::exit(2);
+            }
+        }
+    });
 
     if cli.tail > 0 && cli.sample > 0 {
         eprintln!("loggrep: --tail and --sample are mutually exclusive");
@@ -470,6 +651,63 @@ fn main() {
     let mut sampler = Sampler::new(cli.tail, cli.sample, cli.limit);
     let needs_full_scan = sampler.needs_full_scan();
 
+    // Parse --time-context duration
+    let time_context_secs = cli.time_context.as_ref().map(|tc| {
+        match histogram::parse_interval(tc) {
+            Ok(secs) => secs,
+            Err(e) => {
+                eprintln!("loggrep: bad --time-context duration: {e}");
+                process::exit(2);
+            }
+        }
+    });
+
+    // --time-context mode: two-pass, needs all lines in memory
+    if let Some(window_secs) = time_context_secs {
+        let mut all_lines: Vec<String> = Vec::new();
+
+        if cli.file.is_empty() {
+            let stdin = io::stdin();
+            for line in BufReader::new(stdin.lock()).lines() {
+                match line {
+                    Ok(l) => all_lines.push(l),
+                    Err(_) => break,
+                }
+            }
+        } else {
+            for pattern in &cli.file {
+                let paths = match glob(pattern) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("loggrep: invalid glob '{}': {}", pattern, e);
+                        process::exit(2);
+                    }
+                };
+                for path in paths.flatten() {
+                    let file = match File::open(&path) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("loggrep: cannot open '{}': {}", path.display(), e);
+                            continue;
+                        }
+                    };
+                    for line in BufReader::new(file).lines() {
+                        match line {
+                            Ok(l) => all_lines.push(l),
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        }
+
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        matched = run_time_context(&all_lines, &filter_chain, &formatter, &cli, window_secs, &mut out);
+        let _ = out.flush();
+        process::exit(if matched > 0 { 0 } else { 1 });
+    }
+
     /// Dispatch `run_lines` with optional `MultilineMerger` wrapping.
     macro_rules! dispatch_lines {
         ($lines:expr, $out:expr) => {
@@ -477,13 +715,13 @@ fn main() {
                 run_lines(
                     MultilineMerger::new($lines),
                     &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper,
-                    crash_detector.as_ref(), &mut sampler, $out,
+                    &mut hist, crash_detector.as_ref(), &mut sampler, $out,
                 );
             } else {
                 run_lines(
                     $lines,
                     &filter_chain, &formatter, &cli, &mut matched, &mut summary, &mut deduper,
-                    crash_detector.as_ref(), &mut sampler, $out,
+                    &mut hist, crash_detector.as_ref(), &mut sampler, $out,
                 );
             }
         };
@@ -494,7 +732,43 @@ fn main() {
         let mut out = LineWriter::new(stdout.lock());
         let stdin = io::stdin();
         dispatch_lines!(BufReader::new(stdin.lock()).lines(), &mut out);
-        finish_output(&mut out, &formatter, &cli, matched, summary, deduper, sampler, crash_detector.as_ref());
+        finish_output(&mut out, &formatter, &cli, matched, summary, deduper, hist, sampler, crash_detector.as_ref());
+    } else if cli.sort_time {
+        // --sort-time: read all lines, sort by timestamp, then process
+        let mut all_lines: Vec<String> = Vec::new();
+        for pattern in &cli.file {
+            let paths = match glob(pattern) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("loggrep: invalid glob '{}': {}", pattern, e);
+                    process::exit(2);
+                }
+            };
+            for path in paths.flatten() {
+                let file = match File::open(&path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("loggrep: cannot open '{}': {}", path.display(), e);
+                        continue;
+                    }
+                };
+                for line in BufReader::new(file).lines().flatten() {
+                    all_lines.push(line);
+                }
+            }
+        }
+        // Sort by timestamp (lexicographic on time_full, fallback to original order)
+        all_lines.sort_by(|a, b| {
+            let ta = LogEntry::parse(a).and_then(|e| e.time_full().map(|s| s.to_string()));
+            let tb = LogEntry::parse(b).and_then(|e| e.time_full().map(|s| s.to_string()));
+            ta.cmp(&tb)
+        });
+
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        let sorted_iter = all_lines.into_iter().map(Ok::<String, io::Error>);
+        dispatch_lines!(sorted_iter, &mut out);
+        finish_output(&mut out, &formatter, &cli, matched, summary, deduper, hist, sampler, crash_detector.as_ref());
     } else {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -525,7 +799,7 @@ fn main() {
             }
         }
 
-        finish_output(&mut out, &formatter, &cli, matched, summary, deduper, sampler, crash_detector.as_ref());
+        finish_output(&mut out, &formatter, &cli, matched, summary, deduper, hist, sampler, crash_detector.as_ref());
     }
 
     process::exit(if matched > 0 { 0 } else { 1 });

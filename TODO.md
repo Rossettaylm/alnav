@@ -48,7 +48,7 @@
 - `--since 10:30:00` （仅时间，现有行为）
 - `--since "2026-03-04 10:30:00"` （完整日期时间）
 
-## P1-2: `--pid`/`--tid` 过滤 ⬜
+## P1-2: `--pid`/`--tid` 过滤 ✅
 
 **阶段**: 4（追踪因果链）
 
@@ -62,7 +62,7 @@ loggrep -f app.log --tid 5678 --level W          # 追踪特定线程的警告
 loggrep -f app.log -e 'pid ~ 3542 and level >= E' # 表达式中使用
 ```
 
-## P1-3: 时间窗口聚合 `--histogram` ⬜
+## P1-3: 时间窗口聚合 `--histogram` ✅
 
 **阶段**: 2（聚焦问题区域）
 
@@ -84,7 +84,7 @@ loggrep -f app.log --histogram 10s --level E      # 每10秒 Error 数量
 ]
 ```
 
-## P1-4: `--fields` 字段选择 ⬜
+## P1-4: `--fields` 字段选择 ✅
 
 **阶段**: 6（精确提取）
 
@@ -98,7 +98,7 @@ loggrep -f app.log --level E --fields level,tag,msg --format json  # 最精简
 loggrep -f app.log --fields timestamp,msg                          # 只看时间+消息
 ```
 
-## P1-5: 多文件时间线合并排序 ⬜
+## P1-5: 多文件时间线合并排序 ✅
 
 **阶段**: 7（上下文关联）
 
@@ -111,7 +111,7 @@ loggrep -f app.log --fields timestamp,msg                          # 只看时�
 loggrep -f 'logs/*.log' --sort-time --level E     # 多文件按时间归并
 ```
 
-## P1-6: 时间窗口上下文 `--time-context` ⬜ (新增)
+## P1-6: 时间窗口上下文 `--time-context` ✅ (新增)
 
 **阶段**: 7（上下文关联）
 
@@ -125,22 +125,6 @@ loggrep -f app.log --level F --time-context 5s    # 致命错误前后5秒的所
 loggrep -f app.log --crashes --time-context 10s   # 崩溃前后10秒
 ```
 
-## P1-7: `--around` 聚焦模式 ⬜ (新增)
-
-**阶段**: 4（追踪因果链）+ 7（上下文关联）
-
-**痛点**: AI 经常需要的操作模式是「先找到一个关键事件（如崩溃），然后看它前后的完整日志」。目前需要两步：先 `--crashes` 找到时间戳，再手动用 `--since/--until` 框定范围。
-
-**方案**: `--around <EXPR>` 以匹配行为锚点，输出其前后时间窗口内的所有日志（不限原始过滤条件）。
-
-**示例**:
-```bash
-loggrep -f app.log --around 'msg ~ FATAL' --time-context 10s
-# 等价于: 先找到 FATAL，假设在 10:32:15，然后输出 10:32:05~10:32:25 的所有日志
-```
-
-**说明**: 此功能依赖 P1-6 的时间上下文能力，优先级排在其后。
-
 ---
 
 ## 优先级排序
@@ -151,5 +135,4 @@ loggrep -f app.log --around 'msg ~ FATAL' --time-context 10s
 | ★★★ | P1-3 | --histogram | AI 判断问题模式的关键信号 |
 | ★★☆ | P1-4 | --fields | 节省 token，提升 AI 处理效率 |
 | ★★☆ | P1-6 | --time-context | 因果分析的核心需求 |
-| ★☆☆ | P1-7 | --around | 依赖 P1-6，锦上添花 |
 | ★☆☆ | P1-5 | --sort-time | 多文件场景较少，可后做 |

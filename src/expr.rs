@@ -23,6 +23,8 @@ enum FieldKind {
     Tag,
     Msg,
     Pkg,
+    Pid,
+    Tid,
     Level,
 }
 
@@ -93,6 +95,8 @@ fn tokenize(input: &str) -> Result<Vec<(Token, usize)>, String> {
                     "tag" => Token::Field(FieldKind::Tag),
                     "msg" => Token::Field(FieldKind::Msg),
                     "pkg" => Token::Field(FieldKind::Pkg),
+                    "pid" => Token::Field(FieldKind::Pid),
+                    "tid" => Token::Field(FieldKind::Tid),
                     "level" => Token::Field(FieldKind::Level),
                     _ => Token::Value(word.to_string()),
                 };
@@ -114,6 +118,8 @@ pub enum Expr {
     TagMatch(Regex),
     MsgMatch(Regex),
     PkgMatch(Regex),
+    PidMatch(Regex),
+    TidMatch(Regex),
     LevelGte(Level),
 }
 
@@ -213,6 +219,8 @@ impl ExprParser {
                             FieldKind::Tag => Ok(Expr::TagMatch(re)),
                             FieldKind::Msg => Ok(Expr::MsgMatch(re)),
                             FieldKind::Pkg => Ok(Expr::PkgMatch(re)),
+                            FieldKind::Pid => Ok(Expr::PidMatch(re)),
+                            FieldKind::Tid => Ok(Expr::TidMatch(re)),
                             FieldKind::Level => unreachable!(),
                         }
                     } else {
@@ -270,6 +278,8 @@ impl Expr {
             Expr::TagMatch(re) => re.is_match(entry.tag),
             Expr::MsgMatch(re) => re.is_match(entry.msg),
             Expr::PkgMatch(re) => re.is_match(entry.tag) || re.is_match(entry.msg),
+            Expr::PidMatch(re) => re.is_match(entry.pid),
+            Expr::TidMatch(re) => re.is_match(entry.tid),
             Expr::LevelGte(min) => entry.level >= *min,
         }
     }
@@ -282,7 +292,8 @@ impl Expr {
                 b.collect_patterns(out);
             }
             Expr::Not(inner) => inner.collect_patterns(out),
-            Expr::TagMatch(re) | Expr::MsgMatch(re) | Expr::PkgMatch(re) => out.push(re),
+            Expr::TagMatch(re) | Expr::MsgMatch(re) | Expr::PkgMatch(re)
+            | Expr::PidMatch(re) | Expr::TidMatch(re) => out.push(re),
             Expr::LevelGte(_) => {}
         }
     }

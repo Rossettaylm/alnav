@@ -37,13 +37,14 @@ loggrep --file app.log --tag "crash" --count
 src/
 ├── main.rs        # CLI 入口（clap derive），输入调度（stdin/文件），主循环
 ├── parser.rs      # LogEntry 结构体 + 解析器（支持 threadtime/xlog/brief 三种格式）
-├── filter.rs      # FilterChain：多条件组合过滤（同类 OR，跨类 AND）
-├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
+├── filter.rs      # FilterChain：多条件组合过滤（同类 OR，跨类 AND），支持 pid/tid
+├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator（支持 pid/tid 字段）
 ├── multiline.rs   # MultilineMerger：多行合并迭代器适配器（合并续行如栈追踪）
 ├── crash.rs       # CrashDetector：崩溃识别 + CrashInfo 结构化提取
 ├── dedupe.rs      # Normalizer（消息归一化）+ Deduper（去重分组）
 ├── sampler.rs     # Sampler：输出采样（--tail 尾部 / --sample 均匀抽样）
-├── formatter.rs   # 输出格式化：text（彩色）/ json（NDJSON）/ csv
+├── histogram.rs   # Histogram：时间窗口聚合（--histogram 10s/1m/5m），JSON 输出
+├── formatter.rs   # 输出格式化：text（彩色）/ json / csv，支持 --fields 字段选择
 └── summary.rs     # 聚合统计：级别分布、Top tags、Top errors、崩溃计数
 ```
 
@@ -58,7 +59,7 @@ src/
 - `--level W` 匹配 W/E/F（最低级别）
 - `-e` 布尔表达式：支持 `and`/`or`/`not`/括号的任意组合
   - 语法：`FIELD ~ VALUE`、`level >= LEVEL`，用 `and`/`or`/`not`/`()` 组合
-  - FIELD = `tag` | `msg` | `pkg`；VALUE = 裸词或 `"引号字符串"`
+  - FIELD = `tag` | `msg` | `pkg` | `pid` | `tid`；VALUE = 裸词或 `"引号字符串"`
   - 多个 `-e` 之间 OR（与 grep `-e` 一致），与其他 flag AND
 
 ```bash

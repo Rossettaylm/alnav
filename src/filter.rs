@@ -60,6 +60,8 @@ pub struct FilterChain {
     tag_filters: Vec<Regex>,
     msg_filters: Vec<Regex>,
     package_filters: Vec<Regex>,
+    pid_filters: Vec<Regex>,
+    tid_filters: Vec<Regex>,
     min_level: Option<Level>,
     since: Option<TimeFilter>,
     until: Option<TimeFilter>,
@@ -83,6 +85,8 @@ impl FilterChain {
 
         let tag_filters = compile_patterns(&cli.tag, case_flag, "tag")?;
         let msg_filters = compile_patterns(&cli.msg, case_flag, "msg")?;
+        let pid_filters = compile_patterns(&cli.pid, case_flag, "pid")?;
+        let tid_filters = compile_patterns(&cli.tid, case_flag, "tid")?;
 
         let package_filters = cli
             .package
@@ -113,6 +117,8 @@ impl FilterChain {
             tag_filters,
             msg_filters,
             package_filters,
+            pid_filters,
+            tid_filters,
             min_level,
             since,
             until,
@@ -125,6 +131,8 @@ impl FilterChain {
         self.tag_filters.is_empty()
             && self.msg_filters.is_empty()
             && self.package_filters.is_empty()
+            && self.pid_filters.is_empty()
+            && self.tid_filters.is_empty()
             && self.min_level.is_none()
             && self.since.is_none()
             && self.until.is_none()
@@ -136,6 +144,8 @@ impl FilterChain {
             && self.match_time(entry)
             && self.match_group(&self.tag_filters, entry.tag)
             && self.match_group(&self.msg_filters, entry.msg)
+            && self.match_group(&self.pid_filters, entry.pid)
+            && self.match_group(&self.tid_filters, entry.tid)
             && self.match_package(entry)
             && self.match_exprs(entry)
     }
@@ -234,6 +244,12 @@ mod tests {
             crashes: false,
             tail: 0,
             sample: 0,
+            pid: vec![],
+            tid: vec![],
+            histogram: None,
+            fields: None,
+            sort_time: false,
+            time_context: None,
         };
         FilterChain::from_cli(&cli).unwrap()
     }
@@ -299,6 +315,8 @@ mod tests {
             ignore_case: false, invert: false, and: false, expr: vec![],
             context: None, after_context: None, before_context: None,
             dedupe: false, multiline: false, crashes: false, tail: 0, sample: 0,
+            pid: vec![], tid: vec![], histogram: None, fields: None,
+            sort_time: false, time_context: None,
         };
         FilterChain::from_cli(&cli).unwrap()
     }
@@ -352,6 +370,44 @@ mod tests {
         );
         let hit = "2026-03-03 23:30:00.000|1[3542]3831|3542|I|Tag|msg";
         let miss = "2026-03-04 02:00:00.000|1[3542]3831|3542|I|Tag|msg";
+        assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(miss).unwrap()));
+    }
+
+    #[test]
+    fn test_pid_filter() {
+        let cli = Cli {
+            tag: vec![], msg: vec![], level: None, package: vec![],
+            file: vec![], format: OutputFormat::Text, limit: 0, count: false,
+            summary: false, since: None, until: None, no_color: false,
+            ignore_case: false, invert: false, and: false, expr: vec![],
+            context: None, after_context: None, before_context: None,
+            dedupe: false, multiline: false, crashes: false, tail: 0, sample: 0,
+            pid: vec!["1234".to_string()], tid: vec![],
+            histogram: None, fields: None, sort_time: false, time_context: None,
+        };
+        let chain = FilterChain::from_cli(&cli).unwrap();
+        let hit = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
+        let miss = "04-02 12:34:56.789  9999  5678 D Tag     : msg";
+        assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
+        assert!(!chain.matches(&LogEntry::parse(miss).unwrap()));
+    }
+
+    #[test]
+    fn test_tid_filter() {
+        let cli = Cli {
+            tag: vec![], msg: vec![], level: None, package: vec![],
+            file: vec![], format: OutputFormat::Text, limit: 0, count: false,
+            summary: false, since: None, until: None, no_color: false,
+            ignore_case: false, invert: false, and: false, expr: vec![],
+            context: None, after_context: None, before_context: None,
+            dedupe: false, multiline: false, crashes: false, tail: 0, sample: 0,
+            pid: vec![], tid: vec!["5678".to_string()],
+            histogram: None, fields: None, sort_time: false, time_context: None,
+        };
+        let chain = FilterChain::from_cli(&cli).unwrap();
+        let hit = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
+        let miss = "04-02 12:34:56.789  1234  9999 D Tag     : msg";
         assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
         assert!(!chain.matches(&LogEntry::parse(miss).unwrap()));
     }
