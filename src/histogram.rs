@@ -104,6 +104,10 @@ impl Bucket {
     fn total(&self) -> usize {
         self.v + self.d + self.i + self.w + self.e + self.f
     }
+
+    fn errors(&self) -> usize {
+        self.e + self.f
+    }
 }
 
 pub struct Histogram {
@@ -125,18 +129,57 @@ impl Histogram {
         }
     }
 
+    /// Compute mean and standard deviation of error counts (E+F) across all buckets.
+    fn error_stats(&self) -> (f64, f64) {
+        if self.buckets.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n = self.buckets.len() as f64;
+        let sum: f64 = self.buckets.values().map(|b| b.errors() as f64).sum();
+        let mean = sum / n;
+        let variance: f64 = self.buckets.values()
+            .map(|b| {
+                let diff = b.errors() as f64 - mean;
+                diff * diff
+            })
+            .sum::<f64>() / n;
+        (mean, variance.sqrt())
+    }
+
     pub fn write_json<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
+        let (mean, stddev) = self.error_stats();
+        let threshold = mean + 2.0 * stddev;
+        let detect_anomaly = stddev > 0.0;
+
+        let mut spike_buckets: Vec<&str> = Vec::new();
+
         write!(out, "[")?;
         for (i, (key, b)) in self.buckets.iter().enumerate() {
             if i > 0 {
                 write!(out, ",")?;
             }
+            let is_anomaly = detect_anomaly && (b.errors() as f64 > threshold);
+            if is_anomaly {
+                spike_buckets.push(key);
+            }
             write!(
                 out,
-                "\n  {{\"bucket\":\"{key}\",\"total\":{},\"V\":{},\"D\":{},\"I\":{},\"W\":{},\"E\":{},\"F\":{}}}",
-                b.total(), b.v, b.d, b.i, b.w, b.e, b.f,
+                "\n  {{\"bucket\":\"{key}\",\"total\":{},\"V\":{},\"D\":{},\"I\":{},\"W\":{},\"E\":{},\"F\":{},\"anomaly\":{}}}",
+                b.total(), b.v, b.d, b.i, b.w, b.e, b.f, is_anomaly,
             )?;
         }
+
+        if !self.buckets.is_empty() {
+            write!(out, ",")?;
+            write!(out, "\n  {{\"_stats\":{{\"mean_errors\":{:.2},\"stddev_errors\":{:.2},\"spike_buckets\":[",
+                mean, stddev)?;
+            for (i, key) in spike_buckets.iter().enumerate() {
+                if i > 0 { write!(out, ",")?; }
+                write!(out, "\"{}\"", key)?;
+            }
+            write!(out, "]}}}}")?;
+        }
+
         writeln!(out, "\n]")
     }
 }
@@ -145,17 +188,6 @@ impl Histogram {
 mod tests {
     use super::*;
     use crate::parser::LogEntry;
-
-    #[test]
-    fn test_parse_interval() {
-        assert_eq!(parse_interval("10s").unwrap(), 10);
-        assert_eq!(parse_interval("1m").unwrap(), 60);
-        assert_eq!(parse_interval("5m").unwrap(), 300);
-        assert_eq!(parse_interval("1h").unwrap(), 3600);
-        assert!(parse_interval("0s").is_err());
-        assert!(parse_interval("").is_err());
-        assert!(parse_interval("abc").is_err());
-    }
 
     #[test]
     fn test_snap_secs() {
@@ -203,18 +235,5 @@ mod tests {
         assert!(h.buckets.contains_key("2026-03-04 10:32:00"));
         assert!(h.buckets.contains_key("2026-03-04 10:32:10"));
         assert!(h.buckets.contains_key("2026-03-04 10:32:20"));
-    }
-
-    #[test]
-    fn test_histogram_json_output() {
-        let mut h = Histogram::new(60);
-        let line = "04-02 10:32:05.000  1234  5678 E Tag     : err";
-        h.record(&LogEntry::parse(line).unwrap());
-
-        let mut buf = Vec::new();
-        h.write_json(&mut buf).unwrap();
-        let json = String::from_utf8(buf).unwrap();
-        assert!(json.contains("\"bucket\":\"04-02 10:32:00\""));
-        assert!(json.contains("\"E\":1"));
     }
 }

@@ -10,6 +10,10 @@ keywords = ["android", "logcat", "log", "filter", "analysis"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
+[lib]
+name = "aloggrep"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aloggrep"
 path = "src/main.rs"

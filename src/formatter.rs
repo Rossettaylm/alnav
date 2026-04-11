@@ -251,12 +251,70 @@ impl Formatter {
         writeln!(out, "{buf}")
     }
 
-    /// Write a context (non-matching) line — dimmed if color is on.
+    /// Write a context (non-matching) line — format-aware.
     pub fn write_context_line<W: Write>(&self, raw_line: &str, out: &mut W) -> std::io::Result<()> {
-        if self.use_color {
-            writeln!(out, "{}", raw_line.truecolor(110, 110, 110))
+        match self.format {
+            OutputFormat::Json => self.write_context_json(raw_line, out),
+            OutputFormat::Text => {
+                if self.use_color {
+                    writeln!(out, "{}", raw_line.truecolor(110, 110, 110))
+                } else {
+                    writeln!(out, "{raw_line}")
+                }
+            }
+            OutputFormat::Csv => writeln!(out, "{raw_line}"),
+        }
+    }
+
+    fn write_context_json<W: Write>(&self, raw_line: &str, out: &mut W) -> std::io::Result<()> {
+        if let Some(entry) = LogEntry::parse(raw_line) {
+            let f = &self.fields;
+            write!(out, "{{\"context\":true")?;
+            if f.timestamp {
+                write!(out, ",\"timestamp\":\"{}\"", entry.timestamp.trim())?;
+            }
+            if f.pid {
+                write!(out, ",\"pid\":\"{}\"", entry.pid)?;
+            }
+            if f.tid {
+                write!(out, ",\"tid\":\"{}\"", entry.tid)?;
+            }
+            if f.level {
+                write!(out, ",\"level\":\"{}\"", entry.level.as_char())?;
+            }
+            if f.tag {
+                write!(out, ",\"tag\":\"")?;
+                for ch in entry.tag.chars() {
+                    match ch {
+                        '"' => write!(out, "\\\"")?,
+                        '\\' => write!(out, "\\\\")?,
+                        _ => write!(out, "{ch}")?,
+                    }
+                }
+                write!(out, "\"")?;
+            }
+            if f.msg {
+                write!(out, ",\"msg\":\"")?;
+                for ch in entry.msg.chars() {
+                    match ch {
+                        '"' => write!(out, "\\\"")?,
+                        '\\' => write!(out, "\\\\")?,
+                        _ => write!(out, "{ch}")?,
+                    }
+                }
+                write!(out, "\"")?;
+            }
+            writeln!(out, "}}")
         } else {
-            writeln!(out, "{raw_line}")
+            write!(out, "{{\"context\":true,\"raw\":\"")?;
+            for ch in raw_line.chars() {
+                match ch {
+                    '"' => write!(out, "\\\"")?,
+                    '\\' => write!(out, "\\\\")?,
+                    _ => write!(out, "{ch}")?,
+                }
+            }
+            writeln!(out, "\"}}")
         }
     }
 

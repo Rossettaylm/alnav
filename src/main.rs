@@ -1,237 +1,21 @@
-mod crash;
-mod dedupe;
-mod expr;
-mod filter;
-mod formatter;
-mod histogram;
-mod multiline;
-mod parser;
-mod sampler;
-mod summary;
-
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, LineWriter, Write};
 use std::process;
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use glob::glob;
 
-use crash::CrashDetector;
-use dedupe::Deduper;
-use filter::FilterChain;
-use formatter::{FieldSet, Formatter};
-use histogram::Histogram;
-use multiline::MultilineMerger;
-use parser::LogEntry;
-use sampler::Sampler;
-use summary::Summary;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    Text,
-    Json,
-    Csv,
-}
-
-#[derive(Parser)]
-#[command(
-    name = "aloggrep",
-    about = "Lightweight Android logcat filter & analyzer",
-    after_long_help = "\x1b[1mExamples:\x1b[0m
-
-  \x1b[4mBasic filtering\x1b[0m
-  adb logcat | aloggrep --tag OkHttp --level W
-  aloggrep -f app.log --tag \"OkHttp|Retrofit\" --level E
-  aloggrep -f app.log --msg error -i              # case-insensitive
-  aloggrep -f app.log --tag Debug -v              # invert match
-  aloggrep -f app.log --tag A --tag B             # tag=A OR tag=B
-  aloggrep -f app.log --tag A --tag B --and       # tag=A AND tag=B
-
-  \x1b[4mBoolean expressions (-e)\x1b[0m
-  aloggrep -f app.log -e 'msg ~ timeout and level >= W'
-  aloggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
-  aloggrep -f app.log -e 'not tag ~ Debug'
-  aloggrep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit'  # multiple -e = OR
-  # Syntax: tag|msg|pkg ~ <regex>, level >= V|D|I|W|E|F
-  # Combine with: and, or, not, ( )
-
-  \x1b[4mContext lines\x1b[0m
-  aloggrep -f app.log --tag crash -C 3            # 3 lines before + after
-  aloggrep -f app.log -e 'level >= E' -B 5 -A 2  # 5 before, 2 after
-
-  \x1b[4mMulti-line merge\x1b[0m
-  aloggrep -f app.log --tag AndroidRuntime -M     # merge stack traces
-  adb logcat | aloggrep -M --level E              # merged error entries
-
-  \x1b[4mCrash extraction\x1b[0m
-  aloggrep -f app.log --crashes                   # all crashes → JSON
-  aloggrep -f app.log --crashes --tag MyApp       # filter + extract
-  aloggrep -f app.log --crashes --limit 5         # first 5 crashes
-
-  \x1b[4mSampling (manage large output)\x1b[0m
-  aloggrep -f app.log --level E --tail 50           # last 50 errors
-  aloggrep -f app.log --level E --limit 20 --tail 20 # first 20 + last 20
-  aloggrep -f app.log --sample 100                  # uniform sample of 100
-
-  \x1b[4mDeduplicate (group similar lines)\x1b[0m
-  aloggrep -f app.log --level E --dedupe          # group errors by pattern
-  aloggrep -f app.log --dedupe --limit 20         # top 20 patterns
-  aloggrep -f app.log --dedupe --format json      # JSON output for AI
-  # Numbers/hex/UUIDs are normalized: \"timeout 100ms\" ≈ \"timeout 200ms\"
-
-  \x1b[4mOutput formats\x1b[0m
-  aloggrep -f app.log --tag crash --format json --limit 50
-  aloggrep -f app.log --format csv > out.csv
-  aloggrep -f app.log --tag crash --count         # print match count only
-  aloggrep -f app.log --summary                   # stats + top errors + crash count
-
-  \x1b[4mTime range\x1b[0m
-  aloggrep -f app.log --since 10:30:00 --until 10:35:00
-  aloggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
-  aloggrep -f app.log --since '04-02 12:00:00'      # threadtime date+time
-
-  \x1b[4mPID/TID filtering\x1b[0m
-  aloggrep -f app.log --tid 5678 --level W           # track specific thread
-  aloggrep -f app.log --pid 1234 --tid 5678          # PID + TID combined
-  aloggrep -f app.log -e 'pid ~ 3542 and level >= E' # expression with pid/tid
-
-  \x1b[4mHistogram (time distribution)\x1b[0m
-  aloggrep -f app.log --histogram 1m                 # level distribution per minute
-  aloggrep -f app.log --histogram 10s --level E      # error count per 10 seconds
-
-  \x1b[4mField selection\x1b[0m
-  aloggrep -f app.log --level E --fields level,tag,msg --format json  # minimal output
-  aloggrep -f app.log --fields timestamp,msg         # time + message only
-
-  \x1b[4mTime-based context\x1b[0m
-  aloggrep -f app.log --level F --time-context 5s    # all logs within 5s of fatal errors
-  aloggrep -f app.log --tag crash --time-context 10s # 10s window around crash lines
-
-  \x1b[4mMulti-file time sort\x1b[0m
-  aloggrep -f 'logs/*.log' --sort-time --level E     # merge-sort by timestamp"
-)]
-pub struct Cli {
-    /// Filter by tag (regex, repeatable, OR logic within)
-    #[arg(short, long, value_name = "REGEX")]
-    tag: Vec<String>,
-
-    /// Filter by message content (regex, repeatable, OR logic within)
-    #[arg(short, long, value_name = "REGEX")]
-    msg: Vec<String>,
-
-    /// Minimum log level: V, D, I, W, E, F
-    #[arg(short, long, value_name = "LEVEL")]
-    level: Option<String>,
-
-    /// Filter by package name (repeatable, OR logic within)
-    #[arg(short, long, value_name = "NAME")]
-    package: Vec<String>,
-
-    /// Read from log file(s) instead of stdin (supports glob)
-    #[arg(short, long, value_name = "PATH")]
-    file: Vec<String>,
-
-    /// Output format
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    format: OutputFormat,
-
-    /// Max lines to output (0 = unlimited)
-    #[arg(long, default_value_t = 0)]
-    limit: usize,
-
-    /// Only print match count
-    #[arg(long)]
-    count: bool,
-
-    /// Print aggregated summary (JSON)
-    #[arg(long)]
-    summary: bool,
-
-    /// Start time filter (HH:MM:SS or YYYY-MM-DD HH:MM:SS or MM-DD HH:MM:SS)
-    #[arg(long, value_name = "TIME")]
-    since: Option<String>,
-
-    /// End time filter (HH:MM:SS or YYYY-MM-DD HH:MM:SS or MM-DD HH:MM:SS)
-    #[arg(long, value_name = "TIME")]
-    until: Option<String>,
-
-    /// Disable colored output
-    #[arg(long)]
-    no_color: bool,
-
-    /// Case-insensitive matching
-    #[arg(short = 'i', long)]
-    ignore_case: bool,
-
-    /// Invert match (exclude matching lines)
-    #[arg(short = 'v', long)]
-    invert: bool,
-
-    /// Use AND logic for same-type filters (default is OR)
-    #[arg(long)]
-    and: bool,
-
-    /// Boolean expression filter (repeatable, OR between multiple -e)
-    #[arg(short = 'e', long = "expr", value_name = "EXPR")]
-    expr: Vec<String>,
-
-    /// Show NUM lines of context around each match
-    #[arg(short = 'C', long = "context", value_name = "NUM")]
-    context: Option<usize>,
-
-    /// Show NUM lines after each match
-    #[arg(short = 'A', long = "after-context", value_name = "NUM")]
-    after_context: Option<usize>,
-
-    /// Show NUM lines before each match
-    #[arg(short = 'B', long = "before-context", value_name = "NUM")]
-    before_context: Option<usize>,
-
-    /// Deduplicate: group similar lines, show count + time range
-    #[arg(long)]
-    dedupe: bool,
-
-    /// Merge multi-line entries (e.g. stack traces) into one logical entry
-    #[arg(short = 'M', long)]
-    multiline: bool,
-
-    /// Extract crashes as structured JSON (implies --multiline)
-    #[arg(long)]
-    crashes: bool,
-
-    /// Show last N matched entries (combine with --limit for head+tail)
-    #[arg(long, value_name = "N", default_value_t = 0)]
-    tail: usize,
-
-    /// Uniformly sample N entries from all matches (reservoir sampling)
-    #[arg(long, value_name = "N", default_value_t = 0)]
-    sample: usize,
-
-    /// Filter by PID (regex, repeatable, OR logic within)
-    #[arg(long, value_name = "REGEX")]
-    pid: Vec<String>,
-
-    /// Filter by TID (regex, repeatable, OR logic within)
-    #[arg(long, value_name = "REGEX")]
-    tid: Vec<String>,
-
-    /// Time bucket histogram: group entries by interval (e.g. 10s, 1m, 5m)
-    #[arg(long, value_name = "INTERVAL")]
-    histogram: Option<String>,
-
-    /// Select output fields: timestamp,pid,tid,level,tag,msg (comma-separated)
-    #[arg(long, value_name = "FIELDS")]
-    fields: Option<String>,
-
-    /// Sort entries by timestamp across multiple files
-    #[arg(long)]
-    sort_time: bool,
-
-    /// Show context by time window (e.g. 5s, 10s) instead of line count
-    #[arg(long, value_name = "DURATION")]
-    time_context: Option<String>,
-}
+use aloggrep::crash::{self, CrashDetector};
+use aloggrep::dedupe::Deduper;
+use aloggrep::filter::FilterChain;
+use aloggrep::formatter::{FieldSet, Formatter};
+use aloggrep::histogram::{self, Histogram};
+use aloggrep::multiline::MultilineMerger;
+use aloggrep::parser::LogEntry;
+use aloggrep::sampler::Sampler;
+use aloggrep::summary::Summary;
+use aloggrep::{Cli, OutputFormat};
 
 /// Resolve effective before/after context from -C/-A/-B flags.
 fn context_sizes(cli: &Cli) -> (usize, usize) {
@@ -335,7 +119,11 @@ fn run_time_context<W: io::Write>(
 
         if in_window {
             if !last_printed && matched > 0 {
-                let _ = writeln!(out, "--");
+                if cli.format == OutputFormat::Json {
+                    let _ = writeln!(out, "{{\"separator\":true}}");
+                } else {
+                    let _ = writeln!(out, "--");
+                }
             }
             if let Some(entry) = LogEntry::parse(line) {
                 let _ = formatter.write_entry(&entry, line, out);
@@ -349,6 +137,60 @@ fn run_time_context<W: io::Write>(
             }
         } else {
             last_printed = false;
+        }
+    }
+
+    matched
+}
+
+/// Follow-PID/TID mode: two-pass approach.
+/// Pass 1: apply filters, collect PIDs/TIDs from matches.
+/// Pass 2: output all entries whose PID/TID is in the collected set.
+fn run_follow<W: io::Write>(
+    all_lines: &[String],
+    filter_chain: &FilterChain,
+    formatter: &Formatter,
+    cli: &Cli,
+    out: &mut W,
+) -> usize {
+    use std::collections::HashSet;
+
+    let mut pids: HashSet<String> = HashSet::new();
+    let mut tids: HashSet<String> = HashSet::new();
+
+    // Pass 1: collect PIDs/TIDs from matching entries
+    for line in all_lines {
+        if let Some(entry) = LogEntry::parse(line) {
+            let is_match = filter_chain.matches(&entry);
+            let is_match = if cli.invert { !is_match } else { is_match };
+            if is_match {
+                if cli.follow_pid && !entry.pid.is_empty() {
+                    pids.insert(entry.pid.to_string());
+                }
+                if cli.follow_tid && !entry.tid.is_empty() {
+                    tids.insert(entry.tid.to_string());
+                }
+            }
+        }
+    }
+
+    if pids.is_empty() && tids.is_empty() {
+        return 0;
+    }
+
+    // Pass 2: output all entries whose PID/TID is in the collected sets
+    let mut matched = 0usize;
+    for line in all_lines {
+        if let Some(entry) = LogEntry::parse(line) {
+            let pid_ok = !cli.follow_pid || pids.contains(entry.pid);
+            let tid_ok = !cli.follow_tid || tids.contains(entry.tid);
+            if pid_ok && tid_ok {
+                let _ = formatter.write_entry(&entry, line, out);
+                matched += 1;
+                if cli.limit > 0 && matched >= cli.limit {
+                    break;
+                }
+            }
         }
     }
 
@@ -554,7 +396,11 @@ fn run_with_context<W: io::Write>(
             let before_start = line_no.saturating_sub(before_buf.len());
             if let Some(lp) = last_printed {
                 if before_start > lp + 1 {
-                    let _ = writeln!(out, "--");
+                    if cli.format == OutputFormat::Json {
+                        let _ = writeln!(out, "{{\"separator\":true}}");
+                    } else {
+                        let _ = writeln!(out, "--");
+                    }
                 }
             }
 
@@ -685,6 +531,10 @@ fn main() {
         eprintln!("loggrep: --tail and --sample are mutually exclusive");
         process::exit(2);
     }
+    if (cli.follow_pid || cli.follow_tid) && cli.time_context.is_some() {
+        eprintln!("loggrep: --follow-pid/--follow-tid cannot be combined with --time-context");
+        process::exit(2);
+    }
     let mut sampler = Sampler::new(cli.tail, cli.sample, cli.limit);
     let needs_full_scan = sampler.needs_full_scan();
 
@@ -711,6 +561,22 @@ fn main() {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
         matched = run_time_context(&all_lines, &filter_chain, &formatter, &cli, window_secs, &mut out);
+        let _ = out.flush();
+        process::exit(if matched > 0 { 0 } else { 1 });
+    }
+
+    // --follow-pid / --follow-tid mode: two-pass, needs all lines in memory
+    if cli.follow_pid || cli.follow_tid {
+        let all_lines = if cli.file.is_empty() {
+            let stdin = io::stdin();
+            BufReader::new(stdin.lock()).lines().flatten().collect()
+        } else {
+            collect_file_lines(&cli.file)
+        };
+
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        matched = run_follow(&all_lines, &filter_chain, &formatter, &cli, &mut out);
         let _ = out.flush();
         process::exit(if matched > 0 { 0 } else { 1 });
     }
@@ -787,4 +653,80 @@ fn main() {
     }
 
     process::exit(if matched > 0 { 0 } else { 1 });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aloggrep::formatter::FieldSet;
+    use clap::Parser;
+
+    #[test]
+    fn test_follow_pid_basic() {
+        let lines: Vec<String> = vec![
+            "04-02 10:00:00.000  1234  5678 E OkHttp  : error".to_string(),
+            "04-02 10:00:01.000  1234  5679 D OkHttp  : debug same pid".to_string(),
+            "04-02 10:00:02.000  9999  1111 I Other   : different pid".to_string(),
+            "04-02 10:00:03.000  1234  9999 W Tag2    : same pid again".to_string(),
+        ];
+        let cli = Cli::parse_from(["aloggrep", "--level", "E", "--follow-pid"]);
+        let filter_chain = FilterChain::from_cli(&cli).unwrap();
+        let formatter = Formatter::new(OutputFormat::Text, false, &filter_chain, FieldSet::all());
+        let mut buf = Vec::new();
+        let matched = run_follow(&lines, &filter_chain, &formatter, &cli, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(matched, 3);
+        assert!(out.contains("error"));
+        assert!(out.contains("debug same pid"));
+        assert!(!out.contains("different pid"));
+        assert!(out.contains("same pid again"));
+    }
+
+    #[test]
+    fn test_follow_tid_basic() {
+        let lines: Vec<String> = vec![
+            "04-02 10:00:00.000  1234  5678 E OkHttp  : error".to_string(),
+            "04-02 10:00:01.000  9999  5678 D Other   : same tid".to_string(),
+            "04-02 10:00:02.000  1234  9999 I Tag2    : different tid".to_string(),
+        ];
+        let cli = Cli::parse_from(["aloggrep", "--level", "E", "--follow-tid"]);
+        let filter_chain = FilterChain::from_cli(&cli).unwrap();
+        let formatter = Formatter::new(OutputFormat::Text, false, &filter_chain, FieldSet::all());
+        let mut buf = Vec::new();
+        let matched = run_follow(&lines, &filter_chain, &formatter, &cli, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(matched, 2);
+        assert!(out.contains("error"));
+        assert!(out.contains("same tid"));
+        assert!(!out.contains("different tid"));
+    }
+
+    #[test]
+    fn test_follow_pid_and_tid() {
+        let lines: Vec<String> = vec![
+            "04-02 10:00:00.000  1234  5678 E Tag     : error".to_string(),
+            "04-02 10:00:01.000  1234  5678 D Tag     : same both".to_string(),
+            "04-02 10:00:02.000  1234  9999 I Tag     : same pid diff tid".to_string(),
+            "04-02 10:00:03.000  9999  5678 I Tag     : diff pid same tid".to_string(),
+        ];
+        let cli = Cli::parse_from(["aloggrep", "--level", "E", "--follow-pid", "--follow-tid"]);
+        let filter_chain = FilterChain::from_cli(&cli).unwrap();
+        let formatter = Formatter::new(OutputFormat::Text, false, &filter_chain, FieldSet::all());
+        let mut buf = Vec::new();
+        let matched = run_follow(&lines, &filter_chain, &formatter, &cli, &mut buf);
+        assert_eq!(matched, 2);
+    }
+
+    #[test]
+    fn test_follow_pid_no_matches() {
+        let lines: Vec<String> = vec![
+            "04-02 10:00:00.000  1234  5678 D Tag     : debug only".to_string(),
+        ];
+        let cli = Cli::parse_from(["aloggrep", "--level", "E", "--follow-pid"]);
+        let filter_chain = FilterChain::from_cli(&cli).unwrap();
+        let formatter = Formatter::new(OutputFormat::Text, false, &filter_chain, FieldSet::all());
+        let mut buf = Vec::new();
+        let matched = run_follow(&lines, &filter_chain, &formatter, &cli, &mut buf);
+        assert_eq!(matched, 0);
+    }
 }

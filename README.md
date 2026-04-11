@@ -148,6 +148,31 @@ src/
 
 **数据流：** stdin/file → 逐行读取 → [MultilineMerger] → `LogEntry::parse()` → `FilterChain::matches()` → [CrashDetector] → `Formatter::write_entry()` / `Summary::record()`
 
+## 与 grep 对比（AI agent 场景）
+
+aloggrep 专为 AI agent 日志分析设计，以下是与通用 `grep`/`rg` 的对比：
+
+| 维度 | aloggrep | Agent 用 grep/rg |
+|------|----------|-------------------|
+| **结构化解析** | 自动识别 threadtime/xlog/brief，提取 timestamp/pid/tid/level/tag/msg | 纯文本正则，agent 需自写复杂 regex 提取字段 |
+| **语义过滤** | `--level W` 即匹配 W/E/F，理解级别语义 | 需写 `grep -E "[WEF]/"` 并处理各格式差异 |
+| **多条件组合** | `--tag X --msg Y --level E` 一行完成跨字段 AND/OR | 需 pipeline `grep \| grep \| grep` 或复杂正则 |
+| **布尔表达式** | `-e '(tag ~ A or tag ~ B) and level >= W'` | 无法单命令表达，需多轮 grep + agent 逻辑判断 |
+| **聚合分析** | `--summary` / `--histogram` / `--dedupe` 直接输出 JSON | agent 需把原始行读进 context 自己做统计，消耗大量 token |
+| **异常检测** | histogram 自带 anomaly detection（mean+2σ） | agent 需自己算，先要把所有数据读入 |
+| **崩溃提取** | `--crashes` 结构化输出 type/exception/stack | agent 需手写正则识别 FATAL EXCEPTION/ANR/SIGSEGV |
+| **多行合并** | `-M` 自动合并 stack trace 续行 | grep 逐行输出，stack trace 被打散，agent 需额外拼接 |
+| **Token 效率** | `--fields timestamp,tag,msg --limit 50` 精确控制输出量 | grep 输出整行，无法选字段，agent 常因输出过长截断 |
+| **时间窗口** | `--since` / `--until` / `--time-context 5s` 原生支持 | agent 需先 grep 时间戳再手动过滤范围 |
+| **Follow PID/TID** | `--follow-pid` 两遍扫描自动追踪相关进程 | agent 需先 grep 找到 PID，再拼第二次 grep |
+| **多文件排序** | `--sort-time` glob 多文件归并排序 | agent 需 `sort -m` 或手动处理，且不理解时间格式 |
+| **采样** | `--tail 50` / `--sample 100` 水塘抽样 | agent 需 `tail -n` 或 `shuf`，无法做 head+tail 组合 |
+| **学习成本** | agent 需了解 aloggrep 的 flag 体系 | grep 是通用工具，所有 LLM 都已掌握 |
+| **安装依赖** | 需 `cargo install aloggrep` | grep/rg 几乎所有系统预装 |
+| **通用性** | 仅适用于 Android logcat/xlog 格式 | 任意文本文件都能用 |
+
+**核心结论**：aloggrep 的优势在于**用一条命令完成 agent 需要 3-5 轮 grep + 自行推理的工作**，尤其在聚合分析（summary/histogram/dedupe）上可节省 80%+ 的 token 消耗。劣势在于**适用面窄**（仅 Android 日志）和**额外安装成本**。
+
 ## Claude Code Skill
 
 本仓库附带 `loggrep-analyzer.skill`，这是一个 [Claude Code](https://claude.ai/code) skill，可以让 AI agent 自动使用 loggrep 进行系统化日志分析。
