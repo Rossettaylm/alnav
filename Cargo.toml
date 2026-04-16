@@ -1,8 +1,8 @@
 [package]
 name = "aloggrep"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
-description = "Lightweight Android logcat/xlog log filter and analyzer CLI"
+description = "Lightweight Android logcat/xlog/HarmonyOS hilog log filter and analyzer CLI"
 license = "MIT"
 authors = ["Lyman Yang"]
 repository = "https://github.com/Rossettaylm/loggrep"

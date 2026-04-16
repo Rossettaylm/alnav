@@ -30,7 +30,7 @@ cargo run -- -f app.log --tag "MyApp"  # 开发时直接运行
 ```
 src/
 ├── main.rs        # CLI 入口（clap derive），输入调度（stdin/文件），主循环
-├── parser.rs      # LogEntry 结构体 + 解析器（支持 threadtime/xlog/brief 三种格式）
+├── parser.rs      # LogEntry 结构体 + 解析器（支持 hilog/threadtime/xlog/brief 四种格式）
 ├── filter.rs      # FilterChain：多条件组合过滤（同类 OR，跨类 AND），支持 pid/tid
 ├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
 ├── multiline.rs   # MultilineMerger：多行合并迭代器适配器（合并续行如栈追踪）
@@ -46,7 +46,7 @@ src/
 
 ### Key Design Decisions
 
-- **`LogEntry<'a>` 零拷贝解析**：所有字段（timestamp, pid, tid, tag, msg）均为 `&'a str`，直接引用原始行，避免堆分配。`parse()` 依次尝试 threadtime → xlog → brief 三种格式。
+- **`LogEntry<'a>` 零拷贝解析**：所有字段（timestamp, pid, tid, tag, pkg, msg）均为 `&'a str`，直接引用原始行，避免堆分配。`parse()` 依次尝试 hilog → threadtime → xlog → brief 四种格式。
 - **`FilterChain::from_cli(&Cli)`** 是唯一的过滤器构建入口，将 CLI 参数（tag/msg/level/pid/tid/since/until/-e）统一转换为内部过滤链。
 - **main.rs `dispatch_lines!` 宏**：根据 `--multiline`/`--crashes` 标志决定是否用 `MultilineMerger` 包裹迭代器，避免运行时分支开销。
 - **输出路径分支**：`run_simple`（常规快速路径）vs `run_with_context`（-C/-A/-B 上下文行缓冲）vs `run_time_context`（--time-context 两遍扫描）vs `run_follow`（--follow-pid/tid 两遍扫描）。

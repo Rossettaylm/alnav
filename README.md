@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">aloggrep</h1>
   <p align="center">
-    轻量级 Android logcat / xlog 日志过滤与分析 CLI 工具，专为 <strong>AI agent 日志分析场景</strong> 设计
+    轻量级 Android logcat / xlog / HarmonyOS hilog 日志过滤与分析 CLI 工具，专为 <strong>AI agent 日志分析场景</strong> 设计
   </p>
   <p align="center">
     <a href="https://crates.io/crates/aloggrep"><img src="https://img.shields.io/crates/v/aloggrep.svg" alt="crates.io version"></a>
@@ -145,9 +145,12 @@ alg -f 'logs/*.log' --sort-time --level E  # 多文件按时间归并排序
 
 | 格式 | 示例 |
 |:-----|:-----|
+| **hilog** | `04-16 11:52:56.297 11114 11114 I A00201/com.tencent.mqq/QRouter: msg` |
 | **xlog** | `2026-03-04 10:23:28.872\|1[3542]3831\|3542\|I\|NTKernel\|msg` |
 | **threadtime** | `03-04 10:23:28.872  3542  3831 I NTKernel: msg` |
 | **brief** | `I/NTKernel(3542): msg` |
+
+> hilog 格式会自动分离 domain / package / tag，`--package` 和 `-e 'pkg ~ ...'` 可精确匹配 package 字段。
 
 ## 与 grep 对比（AI agent 场景）
 
@@ -158,7 +161,7 @@ aloggrep 核心优势在于**用一条命令完成 agent 需要 3–5 轮 grep +
 
 | 维度 | aloggrep | grep / rg |
 |:-----|:---------|:----------|
-| **结构化解析** | 自动识别三种格式，提取 timestamp/pid/tid/level/tag/msg | 纯文本正则，需自写复杂 regex |
+| **结构化解析** | 自动识别四种格式，提取 timestamp/pid/tid/level/tag/pkg/msg | 纯文本正则，需自写复杂 regex |
 | **语义过滤** | `--level W` 即匹配 W/E/F | 需 `grep -E "[WEF]/"` 并处理格式差异 |
 | **多条件组合** | `--tag X --msg Y --level E` 一行完成 | 需多管道 `grep \| grep \| grep` |
 | **布尔表达式** | `-e '(tag ~ A or tag ~ B) and level >= W'` | 无法单命令表达 |
@@ -204,7 +207,7 @@ Skill 引导 agent 按 **全局概览 → 定位问题区域 → 深入追踪 �
 ```
 src/
 ├── main.rs        # CLI 入口（clap derive），输入调度，主循环
-├── parser.rs      # LogEntry 解析（threadtime / xlog / brief）
+├── parser.rs      # LogEntry 解析（hilog / threadtime / xlog / brief）
 ├── filter.rs      # FilterChain：多条件组合过滤，支持 pid/tid
 ├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
 ├── multiline.rs   # 多行合并（堆栈追踪等续行）
