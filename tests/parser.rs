@@ -42,6 +42,51 @@ fn test_xlog_time_hms() {
 }
 
 #[test]
+fn test_hilog() {
+    let line = "04-16 11:52:56.297 11114 11114 I A00201/com.tencent.mqq/QRouter: qlog，registerBusinessPageBuilder";
+    let entry = LogEntry::parse(line).unwrap();
+    assert_eq!(entry.timestamp, "04-16 11:52:56.297");
+    assert_eq!(entry.pid, "11114");
+    assert_eq!(entry.tid, "11114");
+    assert_eq!(entry.level, Level::I);
+    assert_eq!(entry.tag, "QRouter");
+    assert_eq!(entry.pkg, "com.tencent.mqq");
+    assert!(entry.msg.contains("registerBusinessPageBuilder"));
+}
+
+#[test]
+fn test_hilog_domain_only() {
+    // DOMAIN/TAG without package
+    let line = "04-16 11:52:56.297 1234 5678 W A00201/SomeTag: warning message";
+    let entry = LogEntry::parse(line).unwrap();
+    assert_eq!(entry.tag, "SomeTag");
+    assert_eq!(entry.pkg, "");
+    assert_eq!(entry.level, Level::W);
+}
+
+#[test]
+fn test_hilog_time_hms() {
+    let line = "04-16 11:52:56.297 11114 11114 I A00201/com.tencent.mqq/QRouter: msg";
+    let entry = LogEntry::parse(line).unwrap();
+    assert_eq!(entry.time_hms(), Some("11:52:56"));
+}
+
+#[test]
+fn test_hilog_time_full() {
+    let line = "04-16 11:52:56.297 11114 11114 I A00201/com.tencent.mqq/QRouter: msg";
+    let entry = LogEntry::parse(line).unwrap();
+    assert_eq!(entry.time_full(), Some("04-16 11:52:56"));
+}
+
+#[test]
+fn test_threadtime_no_pkg() {
+    let line = "04-02 12:34:56.789  1234  5678 W OkHttp  : Connection timeout after 30s";
+    let entry = LogEntry::parse(line).unwrap();
+    assert_eq!(entry.pkg, "");
+    assert_eq!(entry.tag, "OkHttp");
+}
+
+#[test]
 fn test_unparseable() {
     assert!(LogEntry::parse("just some random text").is_none());
     assert!(LogEntry::parse("").is_none());

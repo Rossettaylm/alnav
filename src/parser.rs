@@ -55,15 +55,78 @@ pub struct LogEntry<'a> {
     pub tid: &'a str,
     pub level: Level,
     pub tag: &'a str,
+    pub pkg: &'a str,
     pub msg: &'a str,
 }
 
 impl<'a> LogEntry<'a> {
-    /// Parse a logcat line. Supports threadtime, xlog, and brief formats.
+    /// Parse a logcat line. Supports hilog, threadtime, xlog, and brief formats.
     pub fn parse(line: &'a str) -> Option<Self> {
-        Self::parse_threadtime(line)
+        Self::parse_hilog(line)
+            .or_else(|| Self::parse_threadtime(line))
             .or_else(|| Self::parse_xlog(line))
             .or_else(|| Self::parse_brief(line))
+    }
+
+    /// hilog: `MM-DD HH:MM:SS.mmm PID TID LEVEL DOMAIN/PKG/TAG: MSG`
+    /// Example: `04-16 11:52:56.297 11114 11114 I A00201/com.tencent.mqq/QRouter: msg`
+    /// Domain is an alphanumeric ID (e.g. A00201), followed by package and tag separated by `/`.
+    fn parse_hilog(line: &'a str) -> Option<Self> {
+        if line.len() < 28 {
+            return None;
+        }
+
+        let bytes = line.as_bytes();
+        if bytes[2] != b'-' || bytes[5] != b' ' || bytes[8] != b':' || bytes[11] != b':' || bytes[14] != b'.' {
+            return None;
+        }
+
+        let timestamp = &line[..18];
+        let rest = &line[18..];
+
+        let rest = rest.trim_start();
+        let pid_end = rest.find(|c: char| !c.is_ascii_digit())?;
+        if pid_end == 0 {
+            return None;
+        }
+        let pid = &rest[..pid_end];
+        let rest = rest[pid_end..].trim_start();
+
+        let tid_end = rest.find(|c: char| !c.is_ascii_digit())?;
+        if tid_end == 0 {
+            return None;
+        }
+        let tid = &rest[..tid_end];
+        let rest = rest[tid_end..].trim_start();
+
+        let level_char = rest.chars().next()?;
+        let level = Level::from_char(level_char)?;
+        let rest = &rest[1..].trim_start();
+
+        let colon_pos = rest.find(": ")?;
+        let full_tag = rest[..colon_pos].trim();
+        let msg = &rest[colon_pos + 2..];
+
+        // hilog tag format: DOMAIN/PKG/TAG (at least two `/` separators)
+        let first_slash = full_tag.find('/')?;
+        let domain = &full_tag[..first_slash];
+
+        // Domain must be alphanumeric (e.g. "A00201", "03C04")
+        if domain.is_empty() || !domain.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return None;
+        }
+
+        let after_domain = &full_tag[first_slash + 1..];
+        // Split remaining into pkg and tag at the last `/`
+        if let Some(last_slash) = after_domain.rfind('/') {
+            let pkg = &after_domain[..last_slash];
+            let tag = &after_domain[last_slash + 1..];
+            Some(LogEntry { timestamp, pid, tid, level, tag, pkg, msg })
+        } else {
+            // Only DOMAIN/TAG, no package
+            let tag = after_domain;
+            Some(LogEntry { timestamp, pid, tid, level, tag, pkg: "", msg })
+        }
     }
 
     /// threadtime: `MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG     : MSG`
@@ -110,7 +173,7 @@ impl<'a> LogEntry<'a> {
         let tag = rest[..colon_pos].trim();
         let msg = &rest[colon_pos + 2..];
 
-        Some(LogEntry { timestamp, pid, tid, level, tag, msg })
+        Some(LogEntry { timestamp, pid, tid, level, tag, pkg: "", msg })
     }
 
     /// xlog: `YYYY-MM-DD HH:MM:SS.mmm|...|TID|LEVEL|TAG|MSG`
@@ -145,7 +208,7 @@ impl<'a> LogEntry<'a> {
             })
             .unwrap_or("");
 
-        Some(LogEntry { timestamp, pid, tid, level, tag, msg })
+        Some(LogEntry { timestamp, pid, tid, level, tag, pkg: "", msg })
     }
 
     /// brief: `V/TAG(PID): MSG` or `V/TAG( PID): MSG`
@@ -174,6 +237,7 @@ impl<'a> LogEntry<'a> {
             tid: "",
             level,
             tag,
+            pkg: "",
             msg,
         })
     }

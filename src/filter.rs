@@ -183,7 +183,11 @@ impl FilterChain {
         if self.package_filters.is_empty() {
             return true;
         }
-        self.package_filters.iter().any(|re| re.is_match(entry.tag) || re.is_match(entry.msg))
+        if !entry.pkg.is_empty() {
+            self.package_filters.iter().any(|re| re.is_match(entry.pkg))
+        } else {
+            self.package_filters.iter().any(|re| re.is_match(entry.tag) || re.is_match(entry.msg))
+        }
     }
 
     fn match_exprs(&self, entry: &LogEntry) -> bool {

@@ -277,7 +277,13 @@ impl Expr {
             Expr::Not(inner) => !inner.matches(entry),
             Expr::TagMatch(re) => re.is_match(entry.tag),
             Expr::MsgMatch(re) => re.is_match(entry.msg),
-            Expr::PkgMatch(re) => re.is_match(entry.tag) || re.is_match(entry.msg),
+            Expr::PkgMatch(re) => {
+                if !entry.pkg.is_empty() {
+                    re.is_match(entry.pkg)
+                } else {
+                    re.is_match(entry.tag) || re.is_match(entry.msg)
+                }
+            }
             Expr::PidMatch(re) => re.is_match(entry.pid),
             Expr::TidMatch(re) => re.is_match(entry.tid),
             Expr::LevelGte(min) => entry.level >= *min,

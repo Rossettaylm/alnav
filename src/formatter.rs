@@ -15,18 +15,19 @@ pub struct FieldSet {
     pub tid: bool,
     pub level: bool,
     pub tag: bool,
+    pub pkg: bool,
     pub msg: bool,
 }
 
 impl FieldSet {
     /// All fields selected (default).
     pub fn all() -> Self {
-        Self { timestamp: true, pid: true, tid: true, level: true, tag: true, msg: true }
+        Self { timestamp: true, pid: true, tid: true, level: true, tag: true, pkg: true, msg: true }
     }
 
     /// Parse a comma-separated field list.
     pub fn parse(input: &str) -> Result<Self, String> {
-        let mut fs = Self { timestamp: false, pid: false, tid: false, level: false, tag: false, msg: false };
+        let mut fs = Self { timestamp: false, pid: false, tid: false, level: false, tag: false, pkg: false, msg: false };
         let mut any = false;
         for field in input.split(',') {
             let f = field.trim().to_ascii_lowercase();
@@ -36,9 +37,10 @@ impl FieldSet {
                 "tid" => fs.tid = true,
                 "level" | "lvl" => fs.level = true,
                 "tag" => fs.tag = true,
+                "pkg" | "package" => fs.pkg = true,
                 "msg" | "message" => fs.msg = true,
                 "" => continue,
-                _ => return Err(format!("unknown field '{}', expected: timestamp,pid,tid,level,tag,msg", f)),
+                _ => return Err(format!("unknown field '{}', expected: timestamp,pid,tid,level,tag,pkg,msg", f)),
             }
             any = true;
         }
@@ -91,7 +93,8 @@ impl Formatter {
         if !self.use_color {
             // If fields are narrowed, build custom output
             if !self.fields.timestamp || !self.fields.pid || !self.fields.tid
-                || !self.fields.level || !self.fields.tag || !self.fields.msg {
+                || !self.fields.level || !self.fields.tag || !self.fields.msg
+                || (!self.fields.pkg && !entry.pkg.is_empty()) {
                 return self.write_text_fields(entry, out);
             }
             return writeln!(out, "{raw_line}");
@@ -99,7 +102,8 @@ impl Formatter {
 
         // If fields are narrowed, build custom colored output
         if !self.fields.timestamp || !self.fields.pid || !self.fields.tid
-            || !self.fields.level || !self.fields.tag || !self.fields.msg {
+            || !self.fields.level || !self.fields.tag || !self.fields.msg
+            || (!self.fields.pkg && !entry.pkg.is_empty()) {
             return self.write_text_fields_color(entry, out);
         }
 
@@ -124,12 +128,19 @@ impl Formatter {
             self.highlight_keywords(entry.msg)
         };
 
+        let pkg_str = if !entry.pkg.is_empty() {
+            format!(" {}", entry.pkg.truecolor(180, 180, 100))
+        } else {
+            String::new()
+        };
+
         writeln!(
             out,
-            "{}{} {}{} {}",
+            "{}{} {}{}{} {}",
             ts_pid.truecolor(140, 140, 140),
             level_badge,
             entry.tag.bold().cyan(),
+            pkg_str,
             ":".truecolor(140, 140, 140),
             msg,
         )
@@ -166,6 +177,7 @@ impl Formatter {
         if f.tid { json_field!("tid", entry.tid); }
         if f.level { json_field!("level", entry.level.as_char()); }
         if f.tag { json_field_escaped!("tag", entry.tag); }
+        if f.pkg && !entry.pkg.is_empty() { json_field_escaped!("pkg", entry.pkg); }
         if f.msg { json_field_escaped!("msg", entry.msg); }
         let _ = first;
         writeln!(out, "}}")
@@ -179,6 +191,7 @@ impl Formatter {
         if f.tid { parts.push(entry.tid.to_string()); }
         if f.level { parts.push(entry.level.as_char().to_string()); }
         if f.tag { parts.push(entry.tag.to_string()); }
+        if f.pkg && !entry.pkg.is_empty() { parts.push(entry.pkg.to_string()); }
         if f.msg {
             if entry.msg.contains('"') {
                 parts.push(format!("\"{}\"", entry.msg.replace('"', "\"\"")));
@@ -212,6 +225,7 @@ impl Formatter {
         if f.tid && !entry.tid.is_empty() { parts.push(entry.tid); }
         if f.level { level_str = entry.level.as_char().to_string(); parts.push(&level_str); }
         if f.tag { parts.push(entry.tag); }
+        if f.pkg && !entry.pkg.is_empty() { parts.push(entry.pkg); }
         if f.msg { parts.push(entry.msg); }
         writeln!(out, "{}", parts.join(" "))
     }
@@ -239,6 +253,10 @@ impl Formatter {
         if f.tag {
             buf.push_str(&entry.tag.bold().cyan().to_string());
             buf.push_str(&":".truecolor(140, 140, 140).to_string());
+            buf.push(' ');
+        }
+        if f.pkg && !entry.pkg.is_empty() {
+            buf.push_str(&entry.pkg.truecolor(180, 180, 100).to_string());
             buf.push(' ');
         }
         if f.msg {
@@ -285,6 +303,17 @@ impl Formatter {
             if f.tag {
                 write!(out, ",\"tag\":\"")?;
                 for ch in entry.tag.chars() {
+                    match ch {
+                        '"' => write!(out, "\\\"")?,
+                        '\\' => write!(out, "\\\\")?,
+                        _ => write!(out, "{ch}")?,
+                    }
+                }
+                write!(out, "\"")?;
+            }
+            if f.pkg && !entry.pkg.is_empty() {
+                write!(out, ",\"pkg\":\"")?;
+                for ch in entry.pkg.chars() {
                     match ch {
                         '"' => write!(out, "\\\"")?,
                         '\\' => write!(out, "\\\\")?,
