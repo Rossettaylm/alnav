@@ -263,7 +263,7 @@ fn run_simple<W: io::Write>(
     for line in lines {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(_) => continue,
         };
         let entry = match LogEntry::parse(&line) {
             Some(e) => e,
@@ -361,7 +361,7 @@ fn run_with_context<W: io::Write>(
     for line in lines {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(_) => continue,
         };
         line_no += 1;
 
@@ -487,8 +487,94 @@ fn finish_output<W: io::Write>(
     let _ = out.flush();
 }
 
+fn print_examples() {
+    let examples = r"Examples:
+
+  Basic filtering
+  adb logcat | aloggrep --tag OkHttp --level W
+  aloggrep -f app.log --tag 'OkHttp|Retrofit' --level E
+  aloggrep -f app.log --msg error -i              # case-insensitive
+  aloggrep -f app.log --tag Debug -v              # invert match
+  aloggrep -f app.log --tag A --tag B             # tag=A OR tag=B
+  aloggrep -f app.log --tag A --tag B --and       # tag=A AND tag=B
+
+  Boolean expressions (-e)
+  aloggrep -f app.log -e 'msg ~ timeout and level >= W'
+  aloggrep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+  aloggrep -f app.log -e 'not tag ~ Debug'
+  aloggrep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit'  # multiple -e = OR
+  # Syntax: tag|msg|pkg ~ <regex>, level >= V|D|I|W|E|F
+  # Combine with: and, or, not, ( )
+
+  Context lines
+  aloggrep -f app.log --tag crash -C 3            # 3 lines before + after
+  aloggrep -f app.log -e 'level >= E' -B 5 -A 2  # 5 before, 2 after
+
+  Multi-line merge
+  aloggrep -f app.log --tag AndroidRuntime -M     # merge stack traces
+  adb logcat | aloggrep -M --level E              # merged error entries
+
+  Crash extraction
+  aloggrep -f app.log --crashes                   # all crashes => JSON
+  aloggrep -f app.log --crashes --tag MyApp       # filter + extract
+  aloggrep -f app.log --crashes --limit 5         # first 5 crashes
+
+  Sampling (manage large output)
+  aloggrep -f app.log --level E --tail 50           # last 50 errors
+  aloggrep -f app.log --level E --limit 20 --tail 20 # first 20 + last 20
+  aloggrep -f app.log --sample 100                  # uniform sample of 100
+
+  Deduplicate (group similar lines)
+  aloggrep -f app.log --level E --dedupe          # group errors by pattern
+  aloggrep -f app.log --dedupe --limit 20         # top 20 patterns
+  aloggrep -f app.log --dedupe --format json      # JSON output for AI
+  # Numbers/hex/UUIDs are normalized
+
+  Output formats
+  aloggrep -f app.log --tag crash --format json --limit 50
+  aloggrep -f app.log --format csv > out.csv
+  aloggrep -f app.log --tag crash --count         # print match count only
+  aloggrep -f app.log --summary                   # stats + top errors + crash count
+
+  Time range
+  aloggrep -f app.log --since 10:30:00 --until 10:35:00
+  aloggrep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
+  aloggrep -f app.log --since '04-02 12:00:00'      # threadtime date+time
+
+  PID/TID filtering
+  aloggrep -f app.log --tid 5678 --level W           # track specific thread
+  aloggrep -f app.log --pid 1234 --tid 5678          # PID + TID combined
+  aloggrep -f app.log -e 'pid ~ 3542 and level >= E' # expression with pid/tid
+
+  Histogram (time distribution)
+  aloggrep -f app.log --histogram 1m                 # level distribution per minute
+  aloggrep -f app.log --histogram 10s --level E      # error count per 10 seconds
+
+  Field selection
+  aloggrep -f app.log --level E --fields level,tag,msg --format json  # minimal output
+  aloggrep -f app.log --fields timestamp,msg         # time + message only
+
+  Time-based context
+  aloggrep -f app.log --level F --time-context 5s    # all logs within 5s of fatal errors
+  aloggrep -f app.log --tag crash --time-context 10s # 10s window around crash lines
+
+  Multi-file time sort
+  aloggrep -f 'logs/*.log' --sort-time --level E     # merge-sort by timestamp
+
+  Follow PID/TID
+  aloggrep -f app.log --tag OkHttp --level E --follow-pid  # all logs from error PIDs
+  aloggrep -f app.log --crashes --follow-tid                # all logs from crashed threads
+";
+    println!("{examples}");
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    if cli.example {
+        print_examples();
+        return;
+    }
 
     let filter_chain = match FilterChain::from_cli(&cli) {
         Ok(f) => f,

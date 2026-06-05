@@ -35,6 +35,15 @@ cargo install --path .
 ## 快速上手
 
 ```bash
+# 查看帮助（简洁版，仅列出参数）
+alg --help
+
+# 查看完整使用示例
+alg --example
+
+# 查看版本
+alg --version
+
 # 管道模式（配合 adb logcat）
 adb logcat | alg --tag "OkHttp" --level W
 
