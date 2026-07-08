@@ -7,6 +7,27 @@ use crate::filter::FilterChain;
 use crate::parser::{Level, LogEntry};
 use crate::OutputFormat;
 
+// (bg_r, bg_g, bg_b, fg_is_black)
+const HIGHLIGHT_COLORS: [(u8, u8, u8, bool); 8] = [
+    (255, 255, 0, true),    // yellow bg, black text
+    (0, 255, 128, true),    // green bg, black text
+    (60, 120, 255, false),  // blue bg, white text
+    (255, 80, 80, false),   // red bg, white text
+    (200, 100, 255, false), // purple bg, white text
+    (0, 220, 220, true),    // cyan bg, black text
+    (255, 165, 0, true),    // orange bg, black text
+    (255, 150, 200, true),  // pink bg, black text
+];
+
+fn apply_highlight_color(text: &str, color_idx: usize) -> String {
+    let (r, g, b, fg_black) = HIGHLIGHT_COLORS[color_idx];
+    if fg_black {
+        text.black().on_truecolor(r, g, b).bold().to_string()
+    } else {
+        text.white().on_truecolor(r, g, b).bold().to_string()
+    }
+}
+
 /// Which fields to include in output.
 #[derive(Clone, Copy)]
 pub struct FieldSet {
@@ -68,17 +89,30 @@ pub struct Formatter {
     format: OutputFormat,
     use_color: bool,
     highlight_patterns: Vec<regex::Regex>,
+    user_highlights: Vec<(regex::Regex, usize)>,
     fields: FieldSet,
 }
 
 impl Formatter {
-    pub fn new(format: OutputFormat, use_color: bool, chain: &FilterChain, fields: FieldSet) -> Self {
+    pub fn new(format: OutputFormat, use_color: bool, chain: &FilterChain, fields: FieldSet, highlight_args: &[String]) -> Self {
         let highlight_patterns = if use_color {
             chain.highlight_patterns().into_iter().cloned().collect()
         } else {
             vec![]
         };
-        Self { format, use_color, highlight_patterns, fields }
+        let user_highlights = if use_color {
+            highlight_args.iter().enumerate().filter_map(|(i, pat)| {
+                let re_pat = if pat.starts_with("(?i)") || pat.starts_with("(?-i)") {
+                    pat.clone()
+                } else {
+                    format!("(?i){pat}")
+                };
+                regex::Regex::new(&re_pat).ok().map(|re| (re, i % HIGHLIGHT_COLORS.len()))
+            }).collect()
+        } else {
+            vec![]
+        };
+        Self { format, use_color, highlight_patterns, user_highlights, fields }
     }
 
     pub fn write_entry<W: Write>(&self, entry: &LogEntry, raw_line: &str, out: &mut W) -> std::io::Result<()> {
@@ -122,10 +156,10 @@ impl Formatter {
 
         let level_badge = level_badge(entry.level);
 
-        let msg = if self.highlight_patterns.is_empty() {
-            entry.msg.to_string()
-        } else {
+        let msg = if self.has_highlights() {
             self.highlight_keywords(entry.msg)
+        } else {
+            entry.msg.to_string()
         };
 
         let pkg_str = if !entry.pkg.is_empty() {
@@ -212,7 +246,20 @@ impl Formatter {
                 result = s;
             }
         }
+        for (re, color_idx) in &self.user_highlights {
+            let idx = *color_idx;
+            let replaced = re.replace_all(&result, |caps: &regex::Captures| {
+                apply_highlight_color(&caps[0], idx)
+            });
+            if let std::borrow::Cow::Owned(s) = replaced {
+                result = s;
+            }
+        }
         result
+    }
+
+    fn has_highlights(&self) -> bool {
+        !self.highlight_patterns.is_empty() || !self.user_highlights.is_empty()
     }
 
     /// Write selected fields as plain text (no color).
@@ -260,10 +307,10 @@ impl Formatter {
             buf.push(' ');
         }
         if f.msg {
-            if self.highlight_patterns.is_empty() {
-                buf.push_str(entry.msg);
-            } else {
+            if self.has_highlights() {
                 buf.push_str(&self.highlight_keywords(entry.msg));
+            } else {
+                buf.push_str(entry.msg);
             }
         }
         writeln!(out, "{buf}")

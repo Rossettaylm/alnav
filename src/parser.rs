@@ -81,6 +81,10 @@ impl<'a> LogEntry<'a> {
             return None;
         }
 
+        // Timestamp prefix (MM-DD HH:MM:SS.mmm) must be 18 pure-ASCII bytes
+        if !line.is_char_boundary(18) {
+            return None;
+        }
         let timestamp = &line[..18];
         let rest = &line[18..];
 
@@ -143,6 +147,10 @@ impl<'a> LogEntry<'a> {
             return None;
         }
 
+        // Timestamp prefix must be 18 pure-ASCII bytes
+        if !line.is_char_boundary(18) {
+            return None;
+        }
         let timestamp = &line[..18];
         let rest = &line[18..];
 

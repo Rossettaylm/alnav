@@ -155,7 +155,19 @@ pub struct Cli {
     #[arg(long)]
     pub follow_tid: bool,
 
+    /// Highlight matching words in output (regex, case-insensitive, repeatable, each with different color)
+    #[arg(long, value_name = "REGEX")]
+    pub highlight: Vec<String>,
+
     /// Show usage examples
     #[arg(long)]
     pub example: bool,
+
+    /// Capture logs directly from hdc hilog (HarmonyOS device)
+    #[arg(long)]
+    pub hdc: bool,
+
+    /// Device serial number (for --hdc with multiple devices)
+    #[arg(long, value_name = "SERIAL")]
+    pub device: Option<String>,
 }

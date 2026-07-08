@@ -8,7 +8,7 @@ use aloggrep::Cli;
 fn make_formatter(format: OutputFormat) -> Formatter {
     let cli = Cli::parse_from(["aloggrep"]);
     let chain = FilterChain::from_cli(&cli).unwrap();
-    Formatter::new(format, false, &chain, FieldSet::all())
+    Formatter::new(format, false, &chain, FieldSet::all(), &[])
 }
 
 #[test]

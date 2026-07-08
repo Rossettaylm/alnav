@@ -137,6 +137,24 @@ alg -f app.log --sample 100               # 水塘抽样 100 条
 alg -f 'logs/*.log' --sort-time --level E  # 多文件按时间归并排序
 ```
 
+### 关键词高亮
+
+```bash
+alg -f app.log --tag OkHttp --highlight timeout                    # 单关键词高亮
+alg -f app.log --highlight timeout --highlight "error|failed"      # 多关键词，各自独立配色
+```
+
+> `--highlight` 接受正则（大小写不敏感），可重复传入，每个关键词使用不同背景色，仅在终端彩色输出下生效。
+
+### HarmonyOS 实时抓取（`--hdc`）
+
+```bash
+alg --hdc --tag AppFreeze                 # 通过 hdc hilog 实时抓取当前设备日志
+alg --hdc --device <serial> --level E     # 多设备时指定序列号
+```
+
+> `--hdc` 跳过 hilogd 的历史缓冲区，只输出从命令启动那一刻起的新日志；不可与 `-f`、`--time-context`、`--follow-pid`/`--follow-tid` 同时使用（这些依赖两遍扫描）。
+
 ## 过滤逻辑速查
 
 | 用法 | 行为 |
