@@ -1,3 +1,4 @@
+pub mod clearkey;
 pub mod crash;
 pub mod dedupe;
 pub mod expr;
