@@ -30,6 +30,7 @@ cargo run -- -f app.log --tag "MyApp"  # 开发时直接运行
 ```
 src/
 ├── main.rs        # CLI 入口（clap derive），输入调度（stdin/文件），主循环
+├── clearkey.rs    # --hdc 模式下 Ctrl-L 清屏：cbreak 模式读键盘 + KeypressGate 包装行迭代器
 ├── parser.rs      # LogEntry 结构体 + 解析器（支持 hilog/threadtime/xlog/brief 四种格式）
 ├── filter.rs      # FilterChain：多条件组合过滤（同类 OR，跨类 AND），支持 pid/tid
 ├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
@@ -50,6 +51,7 @@ src/
 - **`FilterChain::from_cli(&Cli)`** 是唯一的过滤器构建入口，将 CLI 参数（tag/msg/level/pid/tid/since/until/-e）统一转换为内部过滤链。
 - **main.rs `dispatch_lines!` 宏**：根据 `--multiline`/`--crashes` 标志决定是否用 `MultilineMerger` 包裹迭代器，避免运行时分支开销。
 - **输出路径分支**：`run_simple`（常规快速路径）vs `run_with_context`（-C/-A/-B 上下文行缓冲）vs `run_time_context`（--time-context 两遍扫描）vs `run_follow`（--follow-pid/tid 两遍扫描）。
+- **`--hdc` Ctrl-L 清屏**：仅在 stdin/stdout 都是 tty 时启用；用 cbreak 模式（保留 `ISIG`）而非标准 raw mode，避免破坏现有 Ctrl+C 依赖的 `SIGINT` 语义。按键上报走 channel + `KeypressGate` 迭代器分发，方便后续扩展其他快捷键。仅支持 Unix，Windows 上静默不可用。
 
 ## Filter Logic
 
