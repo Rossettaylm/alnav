@@ -794,6 +794,24 @@ fn main() {
             start_marker,
         };
 
+        let interactive_tty =
+            atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout);
+        let cbreak_guard = if interactive_tty {
+            aloggrep::clearkey::CbreakGuard::enable().ok()
+        } else {
+            None
+        };
+        let key_rx = if cbreak_guard.is_some() {
+            aloggrep::clearkey::spawn_key_listener()
+        } else {
+            aloggrep::clearkey::disabled_listener()
+        };
+        let lines = aloggrep::clearkey::KeypressGate::new(lines, key_rx, |byte| {
+            if byte == 0x0C {
+                aloggrep::clearkey::write_clear_screen();
+            }
+        });
+
         let interrupted = Arc::new(AtomicBool::new(false));
         let interrupted_clone = Arc::clone(&interrupted);
         ctrlc::set_handler(move || {
@@ -813,6 +831,7 @@ fn main() {
         }
 
         finish_output(&mut out, &formatter, &cli, matched, summary, deduper, hist, sampler, crash_detector.as_ref());
+        drop(cbreak_guard);
         process::exit(if matched > 0 { 0 } else { 1 });
     }
 
