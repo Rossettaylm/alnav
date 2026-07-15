@@ -21,6 +21,7 @@ dependencies = [
  "colored",
  "ctrlc",
  "glob",
+ "libc",
  "regex",
  "serde",
  "serde_json",
