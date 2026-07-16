@@ -428,12 +428,15 @@ fn handle_insert_key(
         KeyCode::Esc => {
             *input = input::InputBox::default();
             app.mode = app::Mode::Normal;
+            app.focus = app::Focus::LogList;
         }
         KeyCode::Char('/') => input.open_popup(),
         KeyCode::Enter => {
             if let Some(group) = input.build_group(ignore_case)? {
                 app.groups.groups.push(group);
                 app.rebuild_visible();
+                app.mode = app::Mode::Normal;
+                app.focus = app::Focus::LogList;
             }
         }
         KeyCode::Backspace => input.backspace(),
@@ -555,18 +558,20 @@ mod dispatch_tests {
         input.push_char('x');
         handle_insert_key(&mut app, &mut input, KeyCode::Esc, false).unwrap();
         assert_eq!(app.mode, app::Mode::Normal);
+        assert_eq!(app.focus, app::Focus::LogList, "Esc should also return focus to the log list");
         assert!(input.is_empty());
     }
 
     #[test]
-    fn test_enter_builds_group_and_stays_in_insert_mode() {
+    fn test_enter_builds_group_and_returns_focus_to_loglist() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         input.push_char('x');
         handle_insert_key(&mut app, &mut input, KeyCode::Enter, false).unwrap();
         assert_eq!(app.groups.groups.len(), 1);
-        assert_eq!(app.mode, app::Mode::Insert); // intentional: Enter does NOT return to Normal, only Esc does
+        assert_eq!(app.mode, app::Mode::Normal, "adding a group should behave like Esc: back to Normal");
+        assert_eq!(app.focus, app::Focus::LogList, "adding a group should jump focus back to the log list");
         assert!(input.chips.is_empty()); // build_group cleared it
     }
 
