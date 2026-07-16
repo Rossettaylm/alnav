@@ -33,6 +33,7 @@ pub struct App {
     pub following: bool,
     pub highlight: Option<Regex>,
     pub search_draft: Option<String>,
+    pub list_offset: usize,
 }
 
 impl App {
@@ -51,6 +52,7 @@ impl App {
             following: true,
             highlight: None,
             search_draft: None,
+            list_offset: 0,
         }
     }
 
@@ -215,6 +217,12 @@ mod tests {
         drop(tx);
         app.drain(&rx);
         assert_eq!(app.visible.len(), 2);
+    }
+
+    #[test]
+    fn test_new_app_has_zero_list_offset() {
+        let app = App::new(100);
+        assert_eq!(app.list_offset, 0);
     }
 
     #[test]
