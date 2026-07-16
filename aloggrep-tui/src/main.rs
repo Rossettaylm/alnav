@@ -26,7 +26,7 @@ use filter_model::{Group, GroupList, TimeBound};
 struct Cli {
     /// Log file to browse
     #[arg(short, long)]
-    file: String,
+    file: Option<String>,
 
     #[arg(short, long, value_name = "REGEX")]
     tag: Vec<String>,
@@ -58,6 +58,14 @@ struct Cli {
     /// Max in-memory lines before the oldest are evicted (streaming modes)
     #[arg(long, default_value_t = 100_000)]
     max_lines: usize,
+
+    /// Capture logs directly from hdc hilog (HarmonyOS device)
+    #[arg(long)]
+    hdc: bool,
+
+    /// Device serial number (for --hdc with multiple devices)
+    #[arg(long, value_name = "SERIAL")]
+    device: Option<String>,
 }
 
 fn initial_group(cli: &Cli) -> Result<GroupList, String> {
@@ -136,7 +144,23 @@ mod tests {
 }
 
 fn main() -> Result<(), String> {
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        default_panic(info);
+    }));
+
     let cli = Cli::parse();
+
+    if cli.hdc && cli.file.is_some() {
+        eprintln!("aloggrep-tui: --hdc cannot be combined with -f");
+        std::process::exit(2);
+    }
+    if !cli.hdc && cli.file.is_none() {
+        eprintln!("aloggrep-tui: either -f FILE or --hdc is required");
+        std::process::exit(2);
+    }
 
     if !io::stdout().is_terminal() {
         eprintln!("aloggrep-tui: stdout is not a terminal, refusing to start");
@@ -147,7 +171,14 @@ fn main() -> Result<(), String> {
     let mut app = App::new(cli.max_lines);
     app.groups = groups;
 
-    let rx = ingest::spawn_file_ingest(cli.file.clone()).map_err(|e| e.to_string())?;
+    let (rx, hdc_child) = if cli.hdc {
+        let session = aloggrep::hdc::spawn_hilog(cli.device.as_deref())?;
+        let (rx, child) = ingest::spawn_hdc_ingest(session);
+        (rx, Some(child))
+    } else {
+        let rx = ingest::spawn_file_ingest(cli.file.clone().unwrap()).map_err(|e| e.to_string())?;
+        (rx, None)
+    };
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let setup: Result<Terminal<CrosstermBackend<io::Stdout>>, String> = (|| {
@@ -159,6 +190,10 @@ fn main() -> Result<(), String> {
         Ok(t) => t,
         Err(e) => {
             let _ = disable_raw_mode();
+            if let Some(mut child) = hdc_child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             return Err(e);
         }
     };
@@ -168,6 +203,11 @@ fn main() -> Result<(), String> {
 
     disable_raw_mode().map_err(|e| e.to_string())?;
     execute!(io::stdout(), LeaveAlternateScreen).map_err(|e| e.to_string())?;
+
+    if let Some(mut child) = hdc_child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     result
 }
@@ -212,6 +252,10 @@ fn run<B: ratatui::backend::Backend>(
             continue;
         }
         let Event::Key(key) = event::read().map_err(|e| e.to_string())? else { continue };
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            app.should_quit = true;
+            continue;
+        }
 
         match app.mode {
             Mode::Normal => handle_normal_key(app, input, key.code),
