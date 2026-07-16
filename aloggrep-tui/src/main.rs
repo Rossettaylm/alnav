@@ -1,6 +1,7 @@
 mod app;
 mod filter_model;
 mod ingest;
+mod input;
 mod model;
 mod ui;
 
