@@ -37,12 +37,15 @@ impl App {
     fn push_row(&mut self, row: EntryRow) {
         if self.rows.len() >= self.max_lines {
             self.rows.pop_front();
-            // indices shift down by one; drop now-invalid 0 and shift the rest
-            self.visible.retain(|&i| i > 0);
+            // `visible` stays sorted ascending, so only index 0 can ever need removing.
+            let evicted_was_visible = self.visible.first() == Some(&0);
+            if evicted_was_visible {
+                self.visible.remove(0);
+            }
             for i in self.visible.iter_mut() {
                 *i -= 1;
             }
-            if self.cursor > 0 {
+            if evicted_was_visible && self.cursor > 0 {
                 self.cursor -= 1;
             }
         }
@@ -91,6 +94,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter_model::Group;
+    use aloggrep::expr::Expr;
     use std::sync::mpsc;
 
     fn row(tag: &str) -> EntryRow {
@@ -135,5 +140,35 @@ mod tests {
         assert_eq!(app.cursor, 0);
         app.move_cursor(5);
         assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn test_cursor_unaffected_when_evicted_row_was_already_filtered_out() {
+        let mut app = App::new(3);
+        app.groups = GroupList {
+            groups: vec![Group {
+                label: "x".into(),
+                expr: Some(Expr::parse("tag~X", false).unwrap()),
+                time: None,
+            }],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(row("N1")).unwrap(); // filtered out, not in `visible`
+        tx.send(row("X1")).unwrap();
+        tx.send(row("X2")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.visible, vec![1, 2]);
+        app.cursor = 1; // pointing at X2
+        let selected_tag_before = app.rows[app.visible[app.cursor]].tag.clone();
+
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        tx2.send(row("X3")).unwrap(); // triggers eviction of N1
+        drop(tx2);
+        app.drain(&rx2);
+
+        let selected_tag_after = app.rows[app.visible[app.cursor]].tag.clone();
+        assert_eq!(selected_tag_before, selected_tag_after, "cursor should still point at the same logical row");
+        assert_eq!(selected_tag_after, "X2");
     }
 }
