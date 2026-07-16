@@ -169,7 +169,7 @@ fn main() -> Result<(), String> {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, event::DisableMouseCapture);
         default_panic(info);
     }));
 
@@ -205,7 +205,7 @@ fn main() -> Result<(), String> {
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let setup: Result<Terminal<CrosstermBackend<io::Stdout>>, String> = (|| {
-        execute!(io::stdout(), EnterAlternateScreen).map_err(|e| e.to_string())?;
+        execute!(io::stdout(), EnterAlternateScreen, event::EnableMouseCapture).map_err(|e| e.to_string())?;
         let backend = CrosstermBackend::new(io::stdout());
         Terminal::new(backend).map_err(|e| e.to_string())
     })();
@@ -221,7 +221,7 @@ fn main() -> Result<(), String> {
     let result = run(&mut terminal, &mut app, &mut input, &rx, cli.ignore_case);
 
     disable_raw_mode().map_err(|e| e.to_string())?;
-    execute!(io::stdout(), LeaveAlternateScreen).map_err(|e| e.to_string())?;
+    execute!(io::stdout(), LeaveAlternateScreen, event::DisableMouseCapture).map_err(|e| e.to_string())?;
 
     result
     // _hdc_child_guard drops here at end of main(), killing the child if not already killed
@@ -274,7 +274,15 @@ fn run<B: ratatui::backend::Backend>(
         if !event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
             continue;
         }
-        let Event::Key(key) = event::read().map_err(|e| e.to_string())? else { continue };
+        let read_event = event::read().map_err(|e| e.to_string())?;
+        let key = match read_event {
+            Event::Key(key) => key,
+            Event::Mouse(mouse) => {
+                handle_mouse_event(app, mouse);
+                continue;
+            }
+            _ => continue,
+        };
 
         // The `/` search draft is checked before Ctrl+C (and before the
         // Normal/Insert dispatch below) so that Ctrl+C while typing a search
