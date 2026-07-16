@@ -163,7 +163,8 @@ fn main() -> Result<(), String> {
         }
     };
 
-    let result = run(&mut terminal, &mut app, &rx);
+    let mut input = input::InputBox::default();
+    let result = run(&mut terminal, &mut app, &mut input, &rx, cli.ignore_case);
 
     disable_raw_mode().map_err(|e| e.to_string())?;
     execute!(io::stdout(), LeaveAlternateScreen).map_err(|e| e.to_string())?;
@@ -174,33 +175,113 @@ fn main() -> Result<(), String> {
 fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
+    input: &mut input::InputBox,
     rx: &std::sync::mpsc::Receiver<model::EntryRow>,
+    ignore_case: bool,
 ) -> Result<(), String> {
+    use app::Mode;
+
     while !app.should_quit {
         app.drain(rx);
 
         terminal
             .draw(|frame| {
-                let [list_area, status_area] =
-                    Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+                let [chip_area, list_area, input_area, status_area] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .areas(frame.area());
+                ui::render_chip_strip(app, frame, chip_area);
                 ui::render_log_list(app, frame, list_area);
+                ui::render_input_box(input, app.mode, frame, input_area);
                 let status = format!("{}/{}", app.cursor + 1, app.visible.len());
                 frame.render_widget(ratatui::widgets::Paragraph::new(status), status_area);
             })
             .map_err(|e| e.to_string())?;
 
-        if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
-            if let Event::Key(key) = event::read().map_err(|e| e.to_string())? {
-                match key.code {
-                    KeyCode::Char('q') => app.should_quit = true,
-                    KeyCode::Char('j') => app.move_cursor(1),
-                    KeyCode::Char('k') => app.move_cursor(-1),
-                    KeyCode::Char('g') => app.jump_top(),
-                    KeyCode::Char('G') => app.jump_bottom(),
-                    _ => {}
-                }
+        if !event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
+            continue;
+        }
+        let Event::Key(key) = event::read().map_err(|e| e.to_string())? else { continue };
+
+        match app.mode {
+            Mode::Normal => handle_normal_key(app, input, key.code),
+            Mode::Insert => handle_insert_key(app, input, key.code, ignore_case)?,
+        }
+    }
+    Ok(())
+}
+
+fn handle_normal_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) {
+    use app::Focus;
+
+    if code != KeyCode::Char('d') {
+        app.pending_dd = false;
+    }
+
+    match (app.focus, code) {
+        (_, KeyCode::Char('q')) => app.should_quit = true,
+        (_, KeyCode::Tab) => app.cycle_focus_forward(),
+        (_, KeyCode::BackTab) => app.cycle_focus_backward(),
+        (Focus::LogList, KeyCode::Char('j')) => app.move_cursor(1),
+        (Focus::LogList, KeyCode::Char('k')) => app.move_cursor(-1),
+        (Focus::LogList, KeyCode::Char('g')) => app.jump_top(),
+        (Focus::LogList, KeyCode::Char('G')) => app.jump_bottom(),
+        (Focus::ChipStrip, KeyCode::Char('h')) => app.move_group_cursor(-1),
+        (Focus::ChipStrip, KeyCode::Char('l')) => app.move_group_cursor(1),
+        (Focus::ChipStrip, KeyCode::Char('d')) => {
+            if app.pending_dd {
+                app.delete_focused_group();
+                app.pending_dd = false;
+            } else {
+                app.pending_dd = true;
             }
         }
+        (_, KeyCode::Char('a') | KeyCode::Char('i') | KeyCode::Char('o')) => {
+            app.focus = Focus::Input;
+            app.mode = app::Mode::Insert;
+            let _ = input;
+        }
+        _ => {}
+    }
+}
+
+fn handle_insert_key(
+    app: &mut App,
+    input: &mut input::InputBox,
+    code: KeyCode,
+    ignore_case: bool,
+) -> Result<(), String> {
+    if input.popup.is_some() {
+        match code {
+            KeyCode::Up => input.popup.as_mut().unwrap().move_selection(-1),
+            KeyCode::Down => input.popup.as_mut().unwrap().move_selection(1),
+            KeyCode::Enter | KeyCode::Tab => input.confirm_popup(),
+            KeyCode::Esc => input.cancel_popup(),
+            KeyCode::Backspace => input.popup.as_mut().unwrap().backspace(),
+            KeyCode::Char(c) => input.popup.as_mut().unwrap().push_char(c),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    match code {
+        KeyCode::Esc => {
+            *input = input::InputBox::default();
+            app.mode = app::Mode::Normal;
+        }
+        KeyCode::Char('/') => input.open_popup(),
+        KeyCode::Enter => {
+            if let Some(group) = input.build_group(ignore_case)? {
+                app.groups.groups.push(group);
+                app.rebuild_visible();
+            }
+        }
+        KeyCode::Backspace => input.backspace(),
+        KeyCode::Char(c) => input.push_char(c),
+        _ => {}
     }
     Ok(())
 }

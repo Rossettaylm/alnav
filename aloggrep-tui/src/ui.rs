@@ -1,10 +1,11 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, Mode};
+use crate::input::InputBox;
 use aloggrep::parser::Level;
 
 fn level_color(level: Level) -> Color {
@@ -36,6 +37,65 @@ pub fn render_log_list(app: &App, frame: &mut Frame, area: Rect) {
         state.select(Some(app.cursor));
     }
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+pub fn render_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
+    let text = if app.groups.groups.is_empty() {
+        "(no filter)".to_string()
+    } else {
+        app.groups
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                if i == app.group_cursor && app.focus == crate::app::Focus::ChipStrip {
+                    format!("[{}]", g.label)
+                } else {
+                    format!(" {} ", g.label)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    frame.render_widget(Paragraph::new(text), area);
+}
+
+pub fn render_input_box(input: &InputBox, mode: Mode, frame: &mut Frame, area: Rect) {
+    let mut text = String::from("> ");
+    for chip in &input.chips {
+        text.push_str(&format!("{}:{} ", chip.field.keyword(), chip.value));
+    }
+    if let Some(field) = input.draft_field {
+        text.push_str(&format!("{}:", field.keyword()));
+    }
+    text.push_str(&input.draft);
+    if mode == Mode::Insert {
+        text.push('_');
+    }
+    frame.render_widget(Paragraph::new(text), area);
+
+    if let Some(popup) = &input.popup {
+        let field_color = |f: crate::input::ChipField| match f {
+            crate::input::ChipField::Tag => Color::Cyan,
+            crate::input::ChipField::Msg => Color::Green,
+            crate::input::ChipField::Pkg => Color::Blue,
+            crate::input::ChipField::Pid => Color::Magenta,
+            crate::input::ChipField::Tid => Color::LightMagenta,
+            crate::input::ChipField::Level => Color::Yellow,
+        };
+        let spans: Vec<Span> = popup
+            .matches()
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, f)| {
+                let style = Style::default().fg(field_color(f));
+                let style = if i == popup.selected { style.add_modifier(Modifier::REVERSED) } else { style };
+                vec![Span::styled(format!(" {} ", f.keyword()), style)]
+            })
+            .collect();
+        let popup_area = Rect { x: area.x, y: area.y.saturating_sub(1), width: area.width, height: 1 };
+        frame.render_widget(Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::NONE)), popup_area);
+    }
 }
 
 #[cfg(test)]
