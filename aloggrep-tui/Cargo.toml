@@ -1,0 +1,17 @@
+[package]
+name = "aloggrep-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Interactive vim-style TUI for aloggrep"
+license = "MIT"
+
+[[bin]]
+name = "aloggrep-tui"
+path = "src/main.rs"
+
+[dependencies]
+aloggrep-core = { path = "../aloggrep-core" }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+crossterm = "0.29"
+regex = "1"
