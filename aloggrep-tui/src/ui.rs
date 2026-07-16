@@ -21,12 +21,16 @@ pub fn render_log_list(app: &App, frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = app
         .visible_rows()
         .map(|row| {
+            let msg_style = match &app.highlight {
+                Some(re) if re.is_match(&row.msg) => Style::default().bg(Color::Magenta).fg(Color::Black),
+                _ => Style::default(),
+            };
             let line = Line::from(vec![
                 Span::raw(format!("{:<18} ", row.timestamp)),
                 Span::styled(format!("{} ", row.level.as_char()), Style::default().fg(level_color(row.level))),
                 Span::raw(format!("{:<16} ", row.tag)),
                 Span::raw(format!("[{}:{}] ", row.pid, row.tid)),
-                Span::raw(row.msg.to_string()),
+                Span::styled(row.msg.to_string(), msg_style),
             ]);
             ListItem::new(line)
         })

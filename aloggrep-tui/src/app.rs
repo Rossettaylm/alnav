@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 
+use regex::Regex;
+
 use crate::filter_model::GroupList;
 use crate::model::EntryRow;
 
@@ -29,6 +31,8 @@ pub struct App {
     pub group_cursor: usize,
     pub pending_dd: bool,
     pub following: bool,
+    pub highlight: Option<Regex>,
+    pub search_draft: Option<String>,
 }
 
 impl App {
@@ -45,6 +49,8 @@ impl App {
             group_cursor: 0,
             pending_dd: false,
             following: true,
+            highlight: None,
+            search_draft: None,
         }
     }
 
@@ -174,6 +180,21 @@ impl App {
             self.group_cursor = self.groups.groups.len().saturating_sub(1);
         }
         self.rebuild_visible();
+    }
+
+    /// Independent of the chip filter system: never hides rows, only marks
+    /// which ones should be highlighted when rendered.
+    pub fn set_highlight(&mut self, pattern: &str) -> Result<(), String> {
+        if pattern.is_empty() {
+            self.highlight = None;
+            return Ok(());
+        }
+        self.highlight = Some(Regex::new(pattern).map_err(|e| e.to_string())?);
+        Ok(())
+    }
+
+    pub fn clear_highlight(&mut self) {
+        self.highlight = None;
     }
 }
 
@@ -372,5 +393,31 @@ mod follow_tests {
         app.rebuild_visible();
         assert_eq!(app.visible, vec![0, 1]); // both now visible, set grew
         assert_eq!(app.cursor, 1); // still following: cursor pinned to new bottom (B), not stuck at old position
+    }
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    #[test]
+    fn test_set_highlight_compiles_regex() {
+        let mut app = App::new(100);
+        app.set_highlight("time.*out").unwrap();
+        assert!(app.highlight.is_some());
+    }
+
+    #[test]
+    fn test_set_highlight_empty_clears() {
+        let mut app = App::new(100);
+        app.set_highlight("x").unwrap();
+        app.set_highlight("").unwrap();
+        assert!(app.highlight.is_none());
+    }
+
+    #[test]
+    fn test_set_highlight_bad_regex_errors() {
+        let mut app = App::new(100);
+        assert!(app.set_highlight("(unclosed").is_err());
     }
 }

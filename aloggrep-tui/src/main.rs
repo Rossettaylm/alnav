@@ -247,12 +247,16 @@ fn run<B: ratatui::backend::Backend>(
                 ui::render_log_list(app, frame, list_area);
                 ui::render_input_box(input, app.mode, frame, input_area);
                 ui::render_popup(input, frame, popup_area);
-                let status = format!(
-                    "{}/{}{}",
-                    app.cursor + 1,
-                    app.visible.len(),
-                    if app.following { "  -- FOLLOWING --" } else { "" }
-                );
+                let status = if let Some(draft) = &app.search_draft {
+                    format!("/{}", draft)
+                } else {
+                    format!(
+                        "{}/{}{}",
+                        app.cursor + 1,
+                        app.visible.len(),
+                        if app.following { "  -- FOLLOWING --" } else { "" }
+                    )
+                };
                 frame.render_widget(ratatui::widgets::Paragraph::new(status), status_area);
             })
             .map_err(|e| e.to_string())?;
@@ -261,6 +265,28 @@ fn run<B: ratatui::backend::Backend>(
             continue;
         }
         let Event::Key(key) = event::read().map_err(|e| e.to_string())? else { continue };
+
+        // The `/` search draft is checked before Ctrl+C (and before the
+        // Normal/Insert dispatch below) so that Ctrl+C while typing a search
+        // query cancels the draft like Esc does, instead of falling through
+        // to the Ctrl+C handling below and quitting the app in Mode::Normal.
+        if let Some(draft) = &mut app.search_draft {
+            let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Enter => {
+                    let pattern = draft.clone();
+                    app.search_draft = None;
+                    app.set_highlight(&pattern)?;
+                }
+                KeyCode::Esc => app.search_draft = None,
+                _ if is_ctrl_c => app.search_draft = None,
+                KeyCode::Backspace => { draft.pop(); }
+                KeyCode::Char(c) => draft.push(c),
+                _ => {}
+            }
+            continue;
+        }
+
         // Ctrl+C: quit from Normal (like `q`), but only cancel in-progress
         // input from Insert (like Esc) — mirrors the shell/readline
         // "abort current line" convention instead of nuking the session.
@@ -324,6 +350,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             app.focus = Focus::Input;
             app.mode = app::Mode::Insert;
         }
+        (_, KeyCode::Char('/')) => app.search_draft = Some(String::new()),
         _ => {}
     }
 }
