@@ -213,6 +213,7 @@ fn main() -> Result<(), String> {
         Ok(t) => t,
         Err(e) => {
             let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, event::DisableMouseCapture);
             return Err(e); // _hdc_child_guard drops here, killing the child if any
         }
     };
@@ -220,8 +221,9 @@ fn main() -> Result<(), String> {
     let mut input = input::InputBox::default();
     let result = run(&mut terminal, &mut app, &mut input, &rx, cli.ignore_case);
 
-    disable_raw_mode().map_err(|e| e.to_string())?;
-    execute!(io::stdout(), LeaveAlternateScreen, event::DisableMouseCapture).map_err(|e| e.to_string())?;
+    let disable_result = disable_raw_mode().map_err(|e| e.to_string());
+    let leave_result = execute!(io::stdout(), LeaveAlternateScreen, event::DisableMouseCapture).map_err(|e| e.to_string());
+    disable_result.and(leave_result)?;
 
     result
     // _hdc_child_guard drops here at end of main(), killing the child if not already killed
@@ -277,6 +279,8 @@ fn run<B: ratatui::backend::Backend>(
         let read_event = event::read().map_err(|e| e.to_string())?;
         let key = match read_event {
             Event::Key(key) => key,
+            // Mouse wheel always scrolls the log list, independent of `app.focus` —
+            // see `handle_mouse_event`'s doc comment for why (no click-to-focus yet).
             Event::Mouse(mouse) => {
                 handle_mouse_event(app, mouse);
                 continue;
