@@ -3,6 +3,7 @@ mod filter_model;
 mod ingest;
 mod input;
 mod model;
+mod theme;
 mod ui;
 
 use std::io::{self, IsTerminal};
@@ -13,7 +14,7 @@ use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::Terminal;
 
 use aloggrep::expr::Expr;
@@ -226,6 +227,16 @@ fn main() -> Result<(), String> {
     // _hdc_child_guard drops here at end of main(), killing the child if not already killed
 }
 
+/// Anchors the field-candidate dropdown right below the input box's bottom
+/// border, clamped so it never draws past the terminal's actual height.
+fn popup_rect(input_area: Rect, frame_area: Rect, match_count: usize) -> Rect {
+    let below = input_area.y + input_area.height;
+    let max_height = frame_area.height.saturating_sub(below).max(1);
+    let height = (match_count.clamp(1, 6) as u16 + 2).min(max_height);
+    let width = input_area.width.clamp(12, 28);
+    Rect { x: input_area.x, y: below, width, height }
+}
+
 fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -240,29 +251,23 @@ fn run<B: ratatui::backend::Backend>(
 
         terminal
             .draw(|frame| {
-                let [chip_area, list_area, popup_area, input_area, status_area] = Layout::vertical([
-                    Constraint::Length(1),
+                let [chip_area, log_area, input_area, search_area, status_area] = Layout::vertical([
+                    Constraint::Length(3),
                     Constraint::Fill(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
                     Constraint::Length(1),
                 ])
                 .areas(frame.area());
                 ui::render_chip_strip(app, frame, chip_area);
-                ui::render_log_list(app, frame, list_area);
-                ui::render_input_box(input, app.mode, frame, input_area);
-                ui::render_popup(input, frame, popup_area);
-                let status = if let Some(draft) = &app.search_draft {
-                    format!("/{}", draft)
-                } else {
-                    format!(
-                        "{}/{}{}",
-                        app.cursor + 1,
-                        app.visible.len(),
-                        if app.following { "  -- FOLLOWING --" } else { "" }
-                    )
-                };
-                frame.render_widget(ratatui::widgets::Paragraph::new(status), status_area);
+                ui::render_log_list(app, frame, log_area);
+                ui::render_input_box(input, app.mode, app.focus == app::Focus::Input, frame, input_area);
+                ui::render_search_box(app, frame, search_area);
+                ui::render_status_bar(app, frame, status_area);
+                if let Some(popup) = &input.popup {
+                    let rect = popup_rect(input_area, frame.area(), popup.matches().len());
+                    ui::render_popup(input, frame, rect);
+                }
             })
             .map_err(|e| e.to_string())?;
 
@@ -367,6 +372,9 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (_, KeyCode::Char('q')) => app.should_quit = true,
         (_, KeyCode::Tab) => app.cycle_focus_forward(),
         (_, KeyCode::BackTab) => app.cycle_focus_backward(),
+        (_, KeyCode::Char('1')) => app.focus = Focus::ChipStrip,
+        (_, KeyCode::Char('2')) => app.focus = Focus::LogList,
+        (_, KeyCode::Char('3')) => app.focus = Focus::Input,
         (Focus::LogList, KeyCode::Char('j')) => app.move_cursor_manual(1),
         (Focus::LogList, KeyCode::Char('k')) => app.move_cursor_manual(-1),
         (Focus::LogList, KeyCode::Char('g')) => { app.following = false; app.jump_top(); }
@@ -438,12 +446,37 @@ mod dispatch_tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     #[test]
+    fn test_popup_rect_anchors_below_input_and_clamps_to_frame_height() {
+        let input_area = Rect { x: 0, y: 10, width: 40, height: 3 };
+        let frame_area = Rect { x: 0, y: 0, width: 80, height: 14 };
+        let rect = popup_rect(input_area, frame_area, 20); // way more matches than fit
+        assert_eq!(rect.y, 13, "popup should start right below the input box's bottom border");
+        assert!(rect.y + rect.height <= frame_area.height, "popup must not draw past the frame");
+    }
+
+    #[test]
     fn test_a_enters_insert_mode() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         assert_eq!(app.mode, app::Mode::Insert);
         assert_eq!(app.focus, app::Focus::Input);
+    }
+
+    #[test]
+    fn test_number_keys_switch_focus_without_entering_insert() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('3'));
+        assert_eq!(app.focus, app::Focus::Input);
+        assert_eq!(app.mode, app::Mode::Normal, "number keys must not start editing");
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('1'));
+        assert_eq!(app.focus, app::Focus::ChipStrip);
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('2'));
+        assert_eq!(app.focus, app::Focus::LogList);
     }
 
     #[test]

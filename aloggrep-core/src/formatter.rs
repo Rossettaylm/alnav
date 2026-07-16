@@ -4,23 +4,12 @@ use colored::Colorize;
 
 use crate::dedupe::DedupGroup;
 use crate::filter::FilterChain;
+use crate::logcolor::{self, Badge};
 use crate::parser::{Level, LogEntry};
 use crate::OutputFormat;
 
-// (bg_r, bg_g, bg_b, fg_is_black)
-const HIGHLIGHT_COLORS: [(u8, u8, u8, bool); 8] = [
-    (255, 255, 0, true),    // yellow bg, black text
-    (0, 255, 128, true),    // green bg, black text
-    (60, 120, 255, false),  // blue bg, white text
-    (255, 80, 80, false),   // red bg, white text
-    (200, 100, 255, false), // purple bg, white text
-    (0, 220, 220, true),    // cyan bg, black text
-    (255, 165, 0, true),    // orange bg, black text
-    (255, 150, 200, true),  // pink bg, black text
-];
-
 fn apply_highlight_color(text: &str, color_idx: usize) -> String {
-    let (r, g, b, fg_black) = HIGHLIGHT_COLORS[color_idx];
+    let ((r, g, b), fg_black) = logcolor::USER_HIGHLIGHT[color_idx];
     if fg_black {
         text.black().on_truecolor(r, g, b).bold().to_string()
     } else {
@@ -75,13 +64,16 @@ impl FieldSet {
 /// Colored level badge string (e.g. " E " on red background).
 fn level_badge(level: Level) -> String {
     let ch = level.as_char();
-    match level {
-        Level::V => format!(" {ch} ").white().on_truecolor(100, 100, 100).to_string(),
-        Level::D => format!(" {ch} ").black().on_blue().to_string(),
-        Level::I => format!(" {ch} ").black().on_green().to_string(),
-        Level::W => format!(" {ch} ").black().on_yellow().to_string(),
-        Level::E => format!(" {ch} ").white().on_red().to_string(),
-        Level::F => format!(" {ch} ").white().on_red().bold().to_string(),
+    match logcolor::level_badge(level) {
+        Badge::Gray => {
+            let (r, g, b) = logcolor::VERBOSE_BG;
+            format!(" {ch} ").white().on_truecolor(r, g, b).to_string()
+        }
+        Badge::Blue => format!(" {ch} ").black().on_blue().to_string(),
+        Badge::Green => format!(" {ch} ").black().on_green().to_string(),
+        Badge::Yellow => format!(" {ch} ").black().on_yellow().to_string(),
+        Badge::Red => format!(" {ch} ").white().on_red().to_string(),
+        Badge::RedBold => format!(" {ch} ").white().on_red().bold().to_string(),
     }
 }
 
@@ -107,7 +99,7 @@ impl Formatter {
                 } else {
                     format!("(?i){pat}")
                 };
-                regex::Regex::new(&re_pat).ok().map(|re| (re, i % HIGHLIGHT_COLORS.len()))
+                regex::Regex::new(&re_pat).ok().map(|re| (re, i % logcolor::USER_HIGHLIGHT.len()))
             }).collect()
         } else {
             vec![]
@@ -163,7 +155,7 @@ impl Formatter {
         };
 
         let pkg_str = if !entry.pkg.is_empty() {
-            format!(" {}", entry.pkg.truecolor(180, 180, 100))
+            format!(" {}", entry.pkg.truecolor(logcolor::PKG.0, logcolor::PKG.1, logcolor::PKG.2))
         } else {
             String::new()
         };
@@ -171,11 +163,11 @@ impl Formatter {
         writeln!(
             out,
             "{}{} {}{}{} {}",
-            ts_pid.truecolor(140, 140, 140),
+            ts_pid.truecolor(logcolor::MUTED.0, logcolor::MUTED.1, logcolor::MUTED.2),
             level_badge,
             entry.tag.bold().cyan(),
             pkg_str,
-            ":".truecolor(140, 140, 140),
+            ":".truecolor(logcolor::MUTED.0, logcolor::MUTED.1, logcolor::MUTED.2),
             msg,
         )
     }
@@ -240,7 +232,7 @@ impl Formatter {
         let mut result = text.to_string();
         for re in &self.highlight_patterns {
             let replaced = re.replace_all(&result, |caps: &regex::Captures| {
-                caps[0].bold().on_truecolor(180, 140, 50).to_string()
+                caps[0].bold().on_truecolor(logcolor::FILTER_MATCH.0, logcolor::FILTER_MATCH.1, logcolor::FILTER_MATCH.2).to_string()
             });
             if let std::borrow::Cow::Owned(s) = replaced {
                 result = s;
@@ -282,15 +274,15 @@ impl Formatter {
         let f = &self.fields;
         let mut buf = String::new();
         if f.timestamp && !entry.timestamp.is_empty() {
-            buf.push_str(&entry.timestamp.trim().truecolor(140, 140, 140).to_string());
+            buf.push_str(&entry.timestamp.trim().truecolor(logcolor::MUTED.0, logcolor::MUTED.1, logcolor::MUTED.2).to_string());
             buf.push(' ');
         }
         if f.pid && !entry.pid.is_empty() {
-            buf.push_str(&entry.pid.truecolor(140, 140, 140).to_string());
+            buf.push_str(&entry.pid.truecolor(logcolor::MUTED.0, logcolor::MUTED.1, logcolor::MUTED.2).to_string());
             buf.push(' ');
         }
         if f.tid && !entry.tid.is_empty() {
-            buf.push_str(&entry.tid.truecolor(140, 140, 140).to_string());
+            buf.push_str(&entry.tid.truecolor(logcolor::MUTED.0, logcolor::MUTED.1, logcolor::MUTED.2).to_string());
             buf.push(' ');
         }
         if f.level {
@@ -299,11 +291,11 @@ impl Formatter {
         }
         if f.tag {
             buf.push_str(&entry.tag.bold().cyan().to_string());
-            buf.push_str(&":".truecolor(140, 140, 140).to_string());
+            buf.push_str(&":".truecolor(logcolor::MUTED.0, logcolor::MUTED.1, logcolor::MUTED.2).to_string());
             buf.push(' ');
         }
         if f.pkg && !entry.pkg.is_empty() {
-            buf.push_str(&entry.pkg.truecolor(180, 180, 100).to_string());
+            buf.push_str(&entry.pkg.truecolor(logcolor::PKG.0, logcolor::PKG.1, logcolor::PKG.2).to_string());
             buf.push(' ');
         }
         if f.msg {
@@ -427,7 +419,7 @@ impl Formatter {
                 count_colored,
                 badge,
                 g.tag.bold().cyan(),
-                ":".truecolor(140, 140, 140),
+                ":".truecolor(logcolor::MUTED.0, logcolor::MUTED.1, logcolor::MUTED.2),
                 g.pattern,
                 time_range.truecolor(110, 110, 110),
             )

@@ -6,6 +6,7 @@ pub mod filter;
 pub mod formatter;
 pub mod hdc;
 pub mod histogram;
+pub mod logcolor;
 pub mod multiline;
 pub mod parser;
 pub mod sampler;
