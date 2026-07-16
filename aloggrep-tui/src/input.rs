@@ -1,3 +1,6 @@
+use aloggrep::expr::Expr;
+use crate::filter_model::Group;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChipField {
     Tag,
@@ -24,6 +27,14 @@ impl ChipField {
 pub const CHIP_FIELDS: [ChipField; 6] = [
     ChipField::Tag, ChipField::Msg, ChipField::Pkg, ChipField::Pid, ChipField::Tid, ChipField::Level,
 ];
+
+fn chip_to_clause(chip: &Chip) -> String {
+    if chip.field == ChipField::Level {
+        return format!("level>={}", chip.value);
+    }
+    let quote = if chip.value.contains('"') { '\'' } else { '"' };
+    format!("{}~{}{}{}", chip.field.keyword(), quote, chip.value, quote)
+}
 
 #[derive(Debug, Clone)]
 pub struct Chip {
@@ -97,6 +108,28 @@ impl InputBox {
 
     pub fn cancel_popup(&mut self) {
         self.popup = None;
+    }
+
+    /// Enter: commit the in-progress token, compile all chips into one
+    /// AND-expr (reusing `Expr::parse` instead of a second matcher), and
+    /// clear the buffer. Returns `Ok(None)` if there's nothing to compile
+    /// (design doc: empty Enter is a no-op, not a "clear all" — `dd` on the
+    /// chip strip is the only way to remove an already-confirmed group).
+    pub fn build_group(&mut self, case_insensitive: bool) -> Result<Option<Group>, String> {
+        self.commit_draft_as_chip();
+        if self.chips.is_empty() {
+            return Ok(None);
+        }
+        let text = self.chips.iter().map(chip_to_clause).collect::<Vec<_>>().join(" and ");
+        let expr = Expr::parse(&text, case_insensitive)?;
+        let label = self
+            .chips
+            .iter()
+            .map(|c| format!("{}:{}", c.field.keyword(), c.value))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        self.chips.clear();
+        Ok(Some(Group { label, expr: Some(expr), time: None }))
     }
 }
 
@@ -249,5 +282,46 @@ mod popup_tests {
         assert!(popup.matches().is_empty());
         popup.move_selection(1); // must not panic
         assert_eq!(popup.selected, 0);
+    }
+}
+
+#[cfg(test)]
+mod build_group_tests {
+    use super::*;
+    use crate::model::EntryRow;
+
+    fn row(tag: &str, msg: &str, level_line: &str) -> EntryRow {
+        EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 {level_line} {tag}   : {msg}")).unwrap()
+    }
+
+    #[test]
+    fn test_build_group_and_within_chips() {
+        let mut input = InputBox::default();
+        input.set_field(ChipField::Tag);
+        input.push_char('A');
+        input.open_popup(); // commits tag:A, opens popup
+        input.popup.as_mut().unwrap().push_char('l');
+        input.confirm_popup(); // picks Level
+        input.push_char('W');
+
+        let group = input.build_group(false).unwrap().unwrap();
+        assert_eq!(group.label, "tag:A AND level:W");
+        assert!(group.matches(&row("A", "m", "E")));
+        assert!(!group.matches(&row("A", "m", "I")));
+        assert!(!group.matches(&row("B", "m", "E")));
+    }
+
+    #[test]
+    fn test_build_group_empty_is_none() {
+        let mut input = InputBox::default();
+        assert!(input.build_group(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_build_group_clears_chips() {
+        let mut input = InputBox::default();
+        input.push_char('x');
+        input.build_group(false).unwrap();
+        assert!(input.chips.is_empty());
     }
 }
