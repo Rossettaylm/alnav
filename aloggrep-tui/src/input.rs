@@ -28,14 +28,6 @@ pub const CHIP_FIELDS: [ChipField; 6] = [
     ChipField::Tag, ChipField::Msg, ChipField::Pkg, ChipField::Pid, ChipField::Tid, ChipField::Level,
 ];
 
-fn chip_to_clause(chip: &Chip) -> String {
-    if chip.field == ChipField::Level {
-        return format!("level>={}", chip.value);
-    }
-    let quote = if chip.value.contains('"') { '\'' } else { '"' };
-    format!("{}~{}{}{}", chip.field.keyword(), quote, chip.value, quote)
-}
-
 #[derive(Debug, Clone)]
 pub struct Chip {
     pub field: ChipField,
@@ -110,18 +102,35 @@ impl InputBox {
         self.popup = None;
     }
 
-    /// Enter: commit the in-progress token, compile all chips into one
-    /// AND-expr (reusing `Expr::parse` instead of a second matcher), and
-    /// clear the buffer. Returns `Ok(None)` if there's nothing to compile
-    /// (design doc: empty Enter is a no-op, not a "clear all" — `dd` on the
-    /// chip strip is the only way to remove an already-confirmed group).
+    /// Enter: commit the in-progress token, compile all chips into a `Group`
+    /// via `Expr::from_filters` (same-field chips OR'd via its
+    /// `compile_joined` helper, cross-field AND'd — matches this project's
+    /// documented filter semantics), and clear the buffer. Returns
+    /// `Ok(None)` if there's nothing to compile (design doc: empty Enter is
+    /// a no-op, not a "clear all" — `dd` on the chip strip is the only way
+    /// to remove an already-confirmed group).
     pub fn build_group(&mut self, case_insensitive: bool) -> Result<Option<Group>, String> {
         self.commit_draft_as_chip();
         if self.chips.is_empty() {
             return Ok(None);
         }
-        let text = self.chips.iter().map(chip_to_clause).collect::<Vec<_>>().join(" and ");
-        let expr = Expr::parse(&text, case_insensitive)?;
+        let mut tag = Vec::new();
+        let mut msg = Vec::new();
+        let mut pkg = Vec::new();
+        let mut pid = Vec::new();
+        let mut tid = Vec::new();
+        let mut level: Option<&str> = None; // last Level chip wins if more than one
+        for chip in &self.chips {
+            match chip.field {
+                ChipField::Tag => tag.push(chip.value.clone()),
+                ChipField::Msg => msg.push(chip.value.clone()),
+                ChipField::Pkg => pkg.push(chip.value.clone()),
+                ChipField::Pid => pid.push(chip.value.clone()),
+                ChipField::Tid => tid.push(chip.value.clone()),
+                ChipField::Level => level = Some(chip.value.as_str()),
+            }
+        }
+        let expr = Expr::from_filters(&tag, &msg, &pkg, &pid, &tid, level, case_insensitive)?;
         let label = self
             .chips
             .iter()
@@ -129,7 +138,7 @@ impl InputBox {
             .collect::<Vec<_>>()
             .join(" AND ");
         self.chips.clear();
-        Ok(Some(Group { label, expr: Some(expr), time: None }))
+        Ok(Some(Group { label, expr, time: None }))
     }
 }
 
@@ -323,5 +332,34 @@ mod build_group_tests {
         input.push_char('x');
         input.build_group(false).unwrap();
         assert!(input.chips.is_empty());
+    }
+
+    #[test]
+    fn test_build_group_same_field_chips_are_ored() {
+        let mut input = InputBox::default();
+        input.set_field(ChipField::Tag);
+        input.push_char('A');
+        input.open_popup();
+        input.popup.as_mut().unwrap().push_char('t');
+        input.confirm_popup(); // picks Tag again
+        input.push_char('B');
+
+        let group = input.build_group(false).unwrap().unwrap();
+        let row = |tag: &str| EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I {tag}   : m")).unwrap();
+        assert!(group.matches(&row("A")));
+        assert!(group.matches(&row("B")));
+        assert!(!group.matches(&row("C")));
+    }
+
+    #[test]
+    fn test_build_group_handles_value_with_both_quote_characters() {
+        let mut input = InputBox::default();
+        input.push_char('c'); input.push_char('a'); input.push_char('n');
+        input.push_char('\''); input.push_char('t'); input.push_char(' ');
+        input.push_char('"'); input.push_char('h'); input.push_char('i'); input.push_char('"');
+        // draft is now: can't "hi"  (defaults to msg field)
+        let group = input.build_group(false).unwrap().unwrap();
+        let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag   : can't \"hi\" there").unwrap();
+        assert!(group.matches(&row));
     }
 }
