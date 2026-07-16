@@ -241,4 +241,13 @@ mod popup_tests {
         assert!(input.popup.is_none());
         assert!(input.draft_field.is_none());
     }
+
+    #[test]
+    fn test_popup_move_selection_noop_when_no_matches() {
+        let mut popup = Popup::default();
+        popup.push_char('z'); // no field keyword starts with "z"
+        assert!(popup.matches().is_empty());
+        popup.move_selection(1); // must not panic
+        assert_eq!(popup.selected, 0);
+    }
 }
