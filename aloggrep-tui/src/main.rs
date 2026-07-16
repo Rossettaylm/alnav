@@ -1,4 +1,5 @@
 mod filter_model;
+mod ingest;
 mod model;
 
 use std::io;

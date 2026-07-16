@@ -43,6 +43,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "regex",
+ "tempfile",
 ]
 
 [[package]]
