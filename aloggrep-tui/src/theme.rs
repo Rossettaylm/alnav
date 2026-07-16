@@ -123,3 +123,22 @@ pub fn caret(is_editing: bool) -> Span<'static> {
         Span::styled("█", Style::default().fg(ACCENT))
     }
 }
+
+/// Selected-row background in the log list — a quiet, low-contrast gray
+/// instead of a full reverse-video block. Only applied while the log list
+/// itself has keyboard focus; see `ui::render_log_list`.
+pub fn log_selection_style() -> Style {
+    Style::default().bg(Color::DarkGray)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_selection_style_is_soft_gray_no_reverse() {
+        let style = log_selection_style();
+        assert_eq!(style.bg, Some(Color::DarkGray));
+        assert!(!style.add_modifier.contains(Modifier::REVERSED));
+    }
+}
