@@ -181,6 +181,9 @@ impl App {
         if self.group_cursor >= self.groups.groups.len() {
             self.group_cursor = self.groups.groups.len().saturating_sub(1);
         }
+        if self.groups.groups.is_empty() {
+            self.focus = Focus::LogList;
+        }
         self.rebuild_visible();
     }
 
@@ -327,6 +330,27 @@ mod focus_tests {
         app.delete_focused_group();
         assert_eq!(app.groups.groups.len(), 1);
         assert_eq!(app.groups.groups[0].label, "g1");
+    }
+
+    #[test]
+    fn test_delete_focused_group_returns_focus_to_loglist_when_list_becomes_empty() {
+        let mut app = App::new(100);
+        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.focus = Focus::ChipStrip;
+        app.delete_focused_group();
+        assert!(app.groups.groups.is_empty());
+        assert_eq!(app.focus, Focus::LogList);
+    }
+
+    #[test]
+    fn test_delete_focused_group_keeps_focus_when_groups_remain() {
+        let mut app = App::new(100);
+        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.groups.groups.push(Group { label: "g1".into(), expr: None, time: None });
+        app.focus = Focus::ChipStrip;
+        app.delete_focused_group();
+        assert!(!app.groups.groups.is_empty());
+        assert_eq!(app.focus, Focus::ChipStrip, "focus should stay put while groups remain");
     }
 
     #[test]
