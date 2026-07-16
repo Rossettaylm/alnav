@@ -1,6 +1,8 @@
+mod app;
 mod filter_model;
 mod ingest;
 mod model;
+mod ui;
 
 use std::io;
 
