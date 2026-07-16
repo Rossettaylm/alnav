@@ -164,7 +164,7 @@ fn render_entry_lines(row: &EntryRow, highlight: &Option<Regex>, area_width: usi
         .collect()
 }
 
-pub fn render_log_list(app: &App, frame: &mut Frame, area: Rect) {
+pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let active = app.focus == Focus::LogList;
     let block = rounded_block(theme::numbered_title(2, "Log", active), active);
     let inner_width = block.inner(area).width.max(1) as usize;
@@ -173,12 +173,14 @@ pub fn render_log_list(app: &App, frame: &mut Frame, area: Rect) {
         .visible_rows()
         .map(|row| ListItem::new(render_entry_lines(row, &app.highlight, inner_width)))
         .collect();
-    let list = List::new(items).block(block).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut state = ListState::default();
+    let highlight_style = if active { theme::log_selection_style() } else { Style::default() };
+    let list = List::new(items).block(block).highlight_style(highlight_style);
+    let mut state = ListState::default().with_offset(app.list_offset);
     if !app.visible.is_empty() {
         state.select(Some(app.cursor));
     }
     frame.render_stateful_widget(list, area, &mut state);
+    app.list_offset = state.offset();
 }
 
 pub fn render_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
@@ -330,7 +332,7 @@ mod tests {
         let backend = TestBackend::new(80, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_log_list(&app, frame, frame.area()))
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
             .unwrap();
 
         let content = cell_text(terminal.backend().buffer());
@@ -339,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_log_list_highlights_selected_row() {
+    fn test_render_log_list_highlights_selected_row_with_soft_gray_when_focused() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I RowOne  : first").unwrap()).unwrap();
@@ -351,7 +353,7 @@ mod tests {
         let backend = TestBackend::new(80, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_log_list(&app, frame, frame.area()))
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
             .unwrap();
 
         // Row 0 is the block's top border; content starts at y=1 (one row
@@ -360,11 +362,68 @@ mod tests {
         let buf = terminal.backend().buffer();
         let selected_style = buf[(1, 2)].style();
         let unselected_style = buf[(1, 1)].style();
-        assert_ne!(
-            selected_style, unselected_style,
-            "selected row (y=2) should be styled differently from the unselected row (y=1)"
+        assert_eq!(selected_style.bg, Some(Color::DarkGray), "focused selection must use the soft gray background");
+        assert_ne!(unselected_style.bg, Some(Color::DarkGray), "unselected rows must not get the selection background");
+        assert!(
+            !selected_style.add_modifier.contains(Modifier::REVERSED),
+            "must not use the old reverse-video style"
         );
-        assert!(selected_style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn test_render_log_list_no_highlight_when_log_list_unfocused() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I RowOne  : first").unwrap()).unwrap();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I RowTwo  : second").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 1;
+        app.focus = Focus::Input; // LogList no longer has keyboard focus
+
+        let backend = TestBackend::new(80, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let selected_style = buf[(1, 2)].style();
+        let unselected_style = buf[(1, 1)].style();
+        assert_eq!(
+            selected_style, unselected_style,
+            "with LogList unfocused, the previously-selected row must look identical to any other row"
+        );
+    }
+
+    #[test]
+    fn test_render_log_list_persists_scroll_offset_when_cursor_moves_within_viewport() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..30 {
+            tx.send(crate::model::EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I Tag     : line{i}")).unwrap())
+                .unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+
+        // Backend height 7 minus 2 border rows leaves a 5-row inner viewport.
+        let backend = TestBackend::new(80, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        app.cursor = 20;
+        terminal.draw(|frame| render_log_list(&mut app, frame, frame.area())).unwrap();
+        let offset_at_edge = app.list_offset;
+        assert!(offset_at_edge > 0, "cursor near the bottom of a 30-row list in a 5-row viewport must have scrolled");
+
+        app.cursor -= 2; // moves, but stays inside the already-scrolled viewport
+        terminal.draw(|frame| render_log_list(&mut app, frame, frame.area())).unwrap();
+
+        assert_eq!(
+            app.list_offset, offset_at_edge,
+            "moving within the visible window must not re-scroll the viewport"
+        );
     }
 
     #[test]
