@@ -143,6 +143,22 @@ mod tests {
     }
 }
 
+/// Ensures the `--hdc` child process is killed no matter which exit path
+/// `main()` takes, including an early `?` bail-out between binding this
+/// guard and the end of `main()`. Manual kill/wait calls threaded into every
+/// fallible line are easy to miss when new fallible calls are added later;
+/// `Drop` closes that gap structurally instead.
+struct HdcChildGuard(Option<std::process::Child>);
+
+impl Drop for HdcChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn main() -> Result<(), String> {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -179,6 +195,7 @@ fn main() -> Result<(), String> {
         let rx = ingest::spawn_file_ingest(cli.file.clone().unwrap()).map_err(|e| e.to_string())?;
         (rx, None)
     };
+    let _hdc_child_guard = HdcChildGuard(hdc_child);
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let setup: Result<Terminal<CrosstermBackend<io::Stdout>>, String> = (|| {
@@ -190,11 +207,7 @@ fn main() -> Result<(), String> {
         Ok(t) => t,
         Err(e) => {
             let _ = disable_raw_mode();
-            if let Some(mut child) = hdc_child {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            return Err(e);
+            return Err(e); // _hdc_child_guard drops here, killing the child if any
         }
     };
 
@@ -204,12 +217,8 @@ fn main() -> Result<(), String> {
     disable_raw_mode().map_err(|e| e.to_string())?;
     execute!(io::stdout(), LeaveAlternateScreen).map_err(|e| e.to_string())?;
 
-    if let Some(mut child) = hdc_child {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-
     result
+    // _hdc_child_guard drops here at end of main(), killing the child if not already killed
 }
 
 fn run<B: ratatui::backend::Backend>(
@@ -252,8 +261,11 @@ fn run<B: ratatui::backend::Backend>(
             continue;
         }
         let Event::Key(key) = event::read().map_err(|e| e.to_string())? else { continue };
+        // Ctrl+C: quit from Normal (like `q`), but only cancel in-progress
+        // input from Insert (like Esc) — mirrors the shell/readline
+        // "abort current line" convention instead of nuking the session.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
-            app.should_quit = true;
+            handle_ctrl_c(app, input);
             continue;
         }
 
@@ -263,6 +275,18 @@ fn run<B: ratatui::backend::Backend>(
         }
     }
     Ok(())
+}
+
+fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
+    use app::Mode;
+
+    match app.mode {
+        Mode::Normal => app.should_quit = true,
+        Mode::Insert => {
+            *input = input::InputBox::default();
+            app.mode = Mode::Normal;
+        }
+    }
 }
 
 fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
@@ -351,6 +375,27 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         assert_eq!(app.mode, app::Mode::Insert);
         assert_eq!(app.focus, app::Focus::Input);
+    }
+
+    #[test]
+    fn test_ctrl_c_in_normal_mode_quits() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_ctrl_c(&mut app, &mut input);
+        assert!(app.should_quit);
+        assert_eq!(app.mode, app::Mode::Normal);
+    }
+
+    #[test]
+    fn test_ctrl_c_in_insert_mode_cancels_input_instead_of_quitting() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x');
+        handle_ctrl_c(&mut app, &mut input);
+        assert!(!app.should_quit);
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert!(input.is_empty());
     }
 
     #[test]
