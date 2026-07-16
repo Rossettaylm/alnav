@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem};
+use ratatui::widgets::{List, ListItem, ListState};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -30,7 +30,12 @@ pub fn render_log_list(app: &App, frame: &mut Frame, area: Rect) {
             ListItem::new(line)
         })
         .collect();
-    frame.render_widget(List::new(items), area);
+    let list = List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default();
+    if !app.visible.is_empty() {
+        state.select(Some(app.cursor));
+    }
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 #[cfg(test)]
@@ -67,5 +72,31 @@ mod tests {
         let content = cell_text(terminal.backend().buffer());
         assert!(content.contains("MyTag"));
         assert!(content.contains("hello world"));
+    }
+
+    #[test]
+    fn test_render_log_list_highlights_selected_row() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I RowOne  : first").unwrap()).unwrap();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I RowTwo  : second").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 1; // select the second row
+
+        let backend = TestBackend::new(80, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_log_list(&app, frame, frame.area()))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let selected_style = buf[(0, 1)].style();
+        let unselected_style = buf[(0, 0)].style();
+        assert_ne!(
+            selected_style, unselected_style,
+            "selected row (y=1) should be styled differently from the unselected row (y=0)"
+        );
+        assert!(selected_style.add_modifier.contains(Modifier::REVERSED));
     }
 }

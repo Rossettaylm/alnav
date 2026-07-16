@@ -72,11 +72,66 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
     let mut label_parts = Vec::new();
     if !cli.tag.is_empty() { label_parts.push(format!("tag:{}", cli.tag.join("|"))); }
     if !cli.msg.is_empty() { label_parts.push(format!("msg:{}", cli.msg.join("|"))); }
+    if !cli.pkg.is_empty() { label_parts.push(format!("pkg:{}", cli.pkg.join("|"))); }
+    if !cli.pid.is_empty() { label_parts.push(format!("pid:{}", cli.pid.join("|"))); }
+    if !cli.tid.is_empty() { label_parts.push(format!("tid:{}", cli.tid.join("|"))); }
     if let Some(l) = &cli.level { label_parts.push(format!("level:{l}")); }
     if let Some(s) = &cli.since { label_parts.push(format!("since:{s}")); }
     if let Some(u) = &cli.until { label_parts.push(format!("until:{u}")); }
     let label = if label_parts.is_empty() { "(startup filter)".to_string() } else { label_parts.join(" AND ") };
     Ok(GroupList { groups: vec![Group { label, expr, time }] })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Cli {
+        let mut full = vec!["aloggrep-tui"];
+        full.extend_from_slice(args);
+        Cli::parse_from(full)
+    }
+
+    #[test]
+    fn test_initial_group_empty_cli_yields_empty_group_list() {
+        let c = cli(&["-f", "app.log"]);
+        let groups = initial_group(&c).unwrap();
+        assert!(groups.groups.is_empty());
+    }
+
+    #[test]
+    fn test_initial_group_pid_only_label_contains_pid() {
+        let c = cli(&["-f", "app.log", "--pid", "1234"]);
+        let groups = initial_group(&c).unwrap();
+        assert_eq!(groups.groups.len(), 1);
+        assert!(groups.groups[0].label.contains("pid:1234"), "label was: {}", groups.groups[0].label);
+    }
+
+    #[test]
+    fn test_initial_group_multiple_fields_label_contains_all() {
+        let c = cli(&[
+            "-f", "app.log",
+            "-t", "TagA",
+            "-m", "boom",
+            "--pkg", "com.example",
+            "--pid", "111",
+            "--tid", "222",
+            "-l", "E",
+            "--since", "10:00:00",
+            "--until", "10:01:00",
+        ]);
+        let groups = initial_group(&c).unwrap();
+        assert_eq!(groups.groups.len(), 1);
+        let label = &groups.groups[0].label;
+        assert!(label.contains("tag:TagA"), "label was: {label}");
+        assert!(label.contains("msg:boom"), "label was: {label}");
+        assert!(label.contains("pkg:com.example"), "label was: {label}");
+        assert!(label.contains("pid:111"), "label was: {label}");
+        assert!(label.contains("tid:222"), "label was: {label}");
+        assert!(label.contains("level:E"), "label was: {label}");
+        assert!(label.contains("since:10:00:00"), "label was: {label}");
+        assert!(label.contains("until:10:01:00"), "label was: {label}");
+    }
 }
 
 fn main() -> Result<(), String> {
@@ -94,9 +149,18 @@ fn main() -> Result<(), String> {
     let rx = ingest::spawn_file_ingest(cli.file.clone()).map_err(|e| e.to_string())?;
 
     enable_raw_mode().map_err(|e| e.to_string())?;
-    execute!(io::stdout(), EnterAlternateScreen).map_err(|e| e.to_string())?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+    let setup: Result<Terminal<CrosstermBackend<io::Stdout>>, String> = (|| {
+        execute!(io::stdout(), EnterAlternateScreen).map_err(|e| e.to_string())?;
+        let backend = CrosstermBackend::new(io::stdout());
+        Terminal::new(backend).map_err(|e| e.to_string())
+    })();
+    let mut terminal = match setup {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = disable_raw_mode();
+            return Err(e);
+        }
+    };
 
     let result = run(&mut terminal, &mut app, &rx);
 
