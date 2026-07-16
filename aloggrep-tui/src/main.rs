@@ -198,7 +198,12 @@ fn run<B: ratatui::backend::Backend>(
                 ui::render_log_list(app, frame, list_area);
                 ui::render_input_box(input, app.mode, frame, input_area);
                 ui::render_popup(input, frame, popup_area);
-                let status = format!("{}/{}", app.cursor + 1, app.visible.len());
+                let status = format!(
+                    "{}/{}{}",
+                    app.cursor + 1,
+                    app.visible.len(),
+                    if app.following { "  -- FOLLOWING --" } else { "" }
+                );
                 frame.render_widget(ratatui::widgets::Paragraph::new(status), status_area);
             })
             .map_err(|e| e.to_string())?;
@@ -227,10 +232,10 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (_, KeyCode::Char('q')) => app.should_quit = true,
         (_, KeyCode::Tab) => app.cycle_focus_forward(),
         (_, KeyCode::BackTab) => app.cycle_focus_backward(),
-        (Focus::LogList, KeyCode::Char('j')) => app.move_cursor(1),
-        (Focus::LogList, KeyCode::Char('k')) => app.move_cursor(-1),
-        (Focus::LogList, KeyCode::Char('g')) => app.jump_top(),
-        (Focus::LogList, KeyCode::Char('G')) => app.jump_bottom(),
+        (Focus::LogList, KeyCode::Char('j')) => app.move_cursor_manual(1),
+        (Focus::LogList, KeyCode::Char('k')) => app.move_cursor_manual(-1),
+        (Focus::LogList, KeyCode::Char('g')) => { app.following = false; app.jump_top(); }
+        (Focus::LogList, KeyCode::Char('G')) => app.jump_bottom_resume_follow(),
         (Focus::ChipStrip, KeyCode::Char('h')) => app.move_group_cursor(-1),
         (Focus::ChipStrip, KeyCode::Char('l')) => app.move_group_cursor(1),
         (Focus::ChipStrip, KeyCode::Char('d')) => {

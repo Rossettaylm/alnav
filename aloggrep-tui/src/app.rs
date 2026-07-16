@@ -28,6 +28,7 @@ pub struct App {
     pub mode: Mode,
     pub group_cursor: usize,
     pub pending_dd: bool,
+    pub following: bool,
 }
 
 impl App {
@@ -43,6 +44,7 @@ impl App {
             mode: Mode::Normal,
             group_cursor: 0,
             pending_dd: false,
+            following: true,
         }
     }
 
@@ -75,6 +77,7 @@ impl App {
         if matches {
             self.visible.push(self.rows.len() - 1);
         }
+        self.follow_tick();
     }
 
     /// Full rescan, used when the filter groups themselves change.
@@ -105,6 +108,27 @@ impl App {
 
     pub fn jump_bottom(&mut self) {
         self.cursor = self.visible.len().saturating_sub(1);
+    }
+
+    /// Call after any new rows are appended in `drain`/`push_row`'s path: if
+    /// following, keep the cursor pinned to the last visible row.
+    pub fn follow_tick(&mut self) {
+        if self.following {
+            self.jump_bottom();
+        }
+    }
+
+    /// Manual upward movement pauses following; jumping to bottom resumes it.
+    pub fn move_cursor_manual(&mut self, delta: isize) {
+        if delta < 0 {
+            self.following = false;
+        }
+        self.move_cursor(delta);
+    }
+
+    pub fn jump_bottom_resume_follow(&mut self) {
+        self.following = true;
+        self.jump_bottom();
     }
 
     pub fn visible_rows(&self) -> impl Iterator<Item = &EntryRow> {
@@ -220,6 +244,7 @@ mod tests {
         app.drain(&rx);
         assert_eq!(app.visible, vec![1, 2]);
         app.cursor = 1; // pointing at X2
+        app.following = false;
         let selected_tag_before = app.rows[app.visible[app.cursor]].tag.clone();
 
         let (tx2, rx2) = std::sync::mpsc::channel();
@@ -269,5 +294,57 @@ mod focus_tests {
         assert_eq!(app.group_cursor, 0);
         app.move_group_cursor(5);
         assert_eq!(app.group_cursor, 0);
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn row(tag: &str) -> EntryRow {
+        EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I {tag}   : m")).unwrap()
+    }
+
+    #[test]
+    fn test_follow_pins_cursor_to_latest() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.cursor, 1); // pinned to last row
+    }
+
+    #[test]
+    fn test_manual_up_navigation_pauses_follow() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+
+        app.move_cursor_manual(-1);
+        assert!(!app.following);
+
+        let (tx2, rx2) = mpsc::channel();
+        tx2.send(row("C")).unwrap();
+        drop(tx2);
+        app.drain(&rx2);
+        assert_eq!(app.cursor, 0); // did not jump to the new bottom
+    }
+
+    #[test]
+    fn test_jump_bottom_resumes_follow() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.move_cursor_manual(-1);
+        app.jump_bottom_resume_follow();
+        assert!(app.following);
     }
 }
