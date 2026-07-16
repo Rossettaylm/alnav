@@ -36,6 +36,7 @@ pub struct InputBox {
     pub chips: Vec<Chip>,
     pub draft: String,
     pub draft_field: Option<ChipField>,
+    pub popup: Option<Popup>,
 }
 
 impl InputBox {
@@ -76,6 +77,64 @@ impl InputBox {
 
     pub fn is_empty(&self) -> bool {
         self.chips.is_empty() && self.draft.is_empty() && self.draft_field.is_none()
+    }
+
+    /// `/`: finish the in-progress token, then open the field popup.
+    pub fn open_popup(&mut self) {
+        self.commit_draft_as_chip();
+        self.popup = Some(Popup::default());
+    }
+
+    /// Enter/Tab inside the popup: pick the highlighted field and close it.
+    pub fn confirm_popup(&mut self) {
+        if let Some(popup) = &self.popup {
+            if let Some(field) = popup.selected_field() {
+                self.set_field(field);
+            }
+        }
+        self.popup = None;
+    }
+
+    pub fn cancel_popup(&mut self) {
+        self.popup = None;
+    }
+}
+
+#[derive(Default)]
+pub struct Popup {
+    pub query: String,
+    pub selected: usize,
+}
+
+impl Popup {
+    pub fn matches(&self) -> Vec<ChipField> {
+        CHIP_FIELDS
+            .into_iter()
+            .filter(|f| f.keyword().starts_with(self.query.to_ascii_lowercase().as_str()))
+            .collect()
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.query.push(c);
+        self.selected = 0;
+    }
+
+    pub fn backspace(&mut self) {
+        self.query.pop();
+        self.selected = 0;
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.matches().len();
+        if len == 0 {
+            return;
+        }
+        let new = self.selected as isize + delta;
+        self.selected = new.clamp(0, len as isize - 1) as usize;
+    }
+
+    pub fn selected_field(&self) -> Option<ChipField> {
+        self.matches().get(self.selected).copied()
     }
 }
 
@@ -133,5 +192,53 @@ mod tests {
         input.commit_draft_as_chip();
         input.backspace(); // pops the committed chip
         assert!(input.chips.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::*;
+
+    #[test]
+    fn test_popup_filters_by_prefix() {
+        let mut popup = Popup::default();
+        popup.push_char('t');
+        let matches = popup.matches();
+        assert!(matches.contains(&ChipField::Tag));
+        assert!(matches.contains(&ChipField::Tid));
+        assert!(!matches.contains(&ChipField::Msg));
+    }
+
+    #[test]
+    fn test_popup_move_selection_clamps() {
+        let mut popup = Popup::default();
+        popup.move_selection(-5);
+        assert_eq!(popup.selected, 0);
+    }
+
+    #[test]
+    fn test_open_confirm_popup_sets_draft_field() {
+        let mut input = InputBox::default();
+        input.push_char('x'); // in-progress msg draft
+        input.open_popup();
+        assert!(input.chips[0].value == "x"); // draft was committed as msg:x
+        assert!(input.popup.is_some());
+
+        input.popup.as_mut().unwrap().push_char('t');
+        input.popup.as_mut().unwrap().push_char('a');
+        input.popup.as_mut().unwrap().push_char('g');
+        input.confirm_popup();
+
+        assert_eq!(input.draft_field, Some(ChipField::Tag));
+        assert!(input.popup.is_none());
+    }
+
+    #[test]
+    fn test_cancel_popup_leaves_draft_field_unset() {
+        let mut input = InputBox::default();
+        input.open_popup();
+        input.cancel_popup();
+        assert!(input.popup.is_none());
+        assert!(input.draft_field.is_none());
     }
 }
