@@ -4,6 +4,19 @@ use std::sync::mpsc::Receiver;
 use crate::filter_model::GroupList;
 use crate::model::EntryRow;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    ChipStrip,
+    LogList,
+    Input,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Insert,
+}
+
 pub struct App {
     pub rows: VecDeque<EntryRow>,
     pub visible: Vec<usize>,
@@ -11,6 +24,10 @@ pub struct App {
     pub cursor: usize,
     pub max_lines: usize,
     pub should_quit: bool,
+    pub focus: Focus,
+    pub mode: Mode,
+    pub group_cursor: usize,
+    pub pending_dd: bool,
 }
 
 impl App {
@@ -22,6 +39,10 @@ impl App {
             cursor: 0,
             max_lines,
             should_quit: false,
+            focus: Focus::LogList,
+            mode: Mode::Normal,
+            group_cursor: 0,
+            pending_dd: false,
         }
     }
 
@@ -88,6 +109,45 @@ impl App {
 
     pub fn visible_rows(&self) -> impl Iterator<Item = &EntryRow> {
         self.visible.iter().map(move |&i| &self.rows[i])
+    }
+
+    pub fn cycle_focus_forward(&mut self) {
+        self.focus = match self.focus {
+            Focus::ChipStrip => Focus::LogList,
+            Focus::LogList => Focus::Input,
+            Focus::Input => Focus::ChipStrip,
+        };
+    }
+
+    pub fn cycle_focus_backward(&mut self) {
+        self.focus = match self.focus {
+            Focus::ChipStrip => Focus::Input,
+            Focus::LogList => Focus::ChipStrip,
+            Focus::Input => Focus::LogList,
+        };
+    }
+
+    pub fn move_group_cursor(&mut self, delta: isize) {
+        let len = self.groups.groups.len();
+        if len == 0 {
+            return;
+        }
+        let new = self.group_cursor as isize + delta;
+        self.group_cursor = new.clamp(0, len as isize - 1) as usize;
+    }
+
+    /// First `d` arms `pending_dd`; a second `d` within the same keypress
+    /// dispatch deletes the focused group and re-filters. Any other key
+    /// clears `pending_dd` (handled by the caller in Task 17's key dispatch).
+    pub fn delete_focused_group(&mut self) {
+        if self.groups.groups.is_empty() {
+            return;
+        }
+        self.groups.groups.remove(self.group_cursor);
+        if self.group_cursor >= self.groups.groups.len() {
+            self.group_cursor = self.groups.groups.len().saturating_sub(1);
+        }
+        self.rebuild_visible();
     }
 }
 
@@ -170,5 +230,44 @@ mod tests {
         let selected_tag_after = app.rows[app.visible[app.cursor]].tag.clone();
         assert_eq!(selected_tag_before, selected_tag_after, "cursor should still point at the same logical row");
         assert_eq!(selected_tag_after, "X2");
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use crate::filter_model::Group;
+
+    #[test]
+    fn test_cycle_focus_forward_wraps() {
+        let mut app = App::new(100);
+        assert_eq!(app.focus, Focus::LogList);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, Focus::Input);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, Focus::ChipStrip);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, Focus::LogList);
+    }
+
+    #[test]
+    fn test_delete_focused_group_removes_and_rescans() {
+        let mut app = App::new(100);
+        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.groups.groups.push(Group { label: "g1".into(), expr: None, time: None });
+        app.group_cursor = 0;
+        app.delete_focused_group();
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.groups.groups[0].label, "g1");
+    }
+
+    #[test]
+    fn test_move_group_cursor_clamps() {
+        let mut app = App::new(100);
+        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.move_group_cursor(-5);
+        assert_eq!(app.group_cursor, 0);
+        app.move_group_cursor(5);
+        assert_eq!(app.group_cursor, 0);
     }
 }
