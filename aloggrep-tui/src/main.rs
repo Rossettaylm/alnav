@@ -375,8 +375,11 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (_, KeyCode::Char('1')) => app.focus = Focus::ChipStrip,
         (_, KeyCode::Char('2')) => app.focus = Focus::LogList,
         (_, KeyCode::Char('3')) => app.focus = Focus::Input,
+        (_, KeyCode::Esc) => app.focus = Focus::LogList,
         (Focus::LogList, KeyCode::Char('j')) => app.move_cursor_manual(1),
         (Focus::LogList, KeyCode::Char('k')) => app.move_cursor_manual(-1),
+        (Focus::LogList, KeyCode::Char('J')) => app.move_cursor_manual(7),
+        (Focus::LogList, KeyCode::Char('K')) => app.move_cursor_manual(-7),
         (Focus::LogList, KeyCode::Char('g')) => { app.following = false; app.jump_top(); }
         (Focus::LogList, KeyCode::Char('G')) => app.jump_bottom_resume_follow(),
         (Focus::ChipStrip, KeyCode::Char('h')) => app.move_group_cursor(-1),
@@ -477,6 +480,36 @@ mod dispatch_tests {
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('2'));
         assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn test_esc_in_normal_mode_returns_focus_to_loglist() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.focus = app::Focus::ChipStrip;
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn test_shift_j_and_shift_k_move_cursor_by_seven() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..20 {
+            tx.send(crate::model::EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I Tag     : line{i}")).unwrap())
+                .unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 10;
+        app.following = false;
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('K'));
+        assert_eq!(app.cursor, 3);
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('J'));
+        assert_eq!(app.cursor, 10);
     }
 
     #[test]
