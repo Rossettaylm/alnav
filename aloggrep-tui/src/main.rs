@@ -283,8 +283,12 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     match app.mode {
         Mode::Normal => app.should_quit = true,
         Mode::Insert => {
-            *input = input::InputBox::default();
-            app.mode = Mode::Normal;
+            if input.popup.is_some() {
+                input.cancel_popup();
+            } else {
+                *input = input::InputBox::default();
+                app.mode = Mode::Normal;
+            }
         }
     }
 }
@@ -314,8 +318,8 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                 app.pending_dd = true;
             }
         }
-        // input is always already-empty here: Esc is the only Insert->Normal
-        // transition, and it always resets *input first.
+        // Esc and Ctrl+C (when no popup is open) are the two Insert->Normal
+        // transitions; both reset *input first.
         (_, KeyCode::Char('a') | KeyCode::Char('i') | KeyCode::Char('o')) => {
             app.focus = Focus::Input;
             app.mode = app::Mode::Insert;
@@ -396,6 +400,20 @@ mod dispatch_tests {
         assert!(!app.should_quit);
         assert_eq!(app.mode, app::Mode::Normal);
         assert!(input.is_empty());
+    }
+
+    #[test]
+    fn test_ctrl_c_with_popup_open_only_closes_popup() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x');
+        input.open_popup(); // commits "x" as a msg chip, opens popup
+        assert_eq!(input.chips.len(), 1);
+        handle_ctrl_c(&mut app, &mut input);
+        assert!(input.popup.is_none());
+        assert_eq!(input.chips.len(), 1, "chip built before opening the popup should survive Ctrl+C");
+        assert_eq!(app.mode, app::Mode::Insert, "should stay in Insert, not quit or fully reset");
     }
 
     #[test]
