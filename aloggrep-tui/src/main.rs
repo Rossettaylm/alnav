@@ -339,6 +339,24 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     }
 }
 
+/// Mouse wheel step size for the log list, independent of `PAGE_SIZE`
+/// (Ctrl-d/Ctrl-u) and the `Shift+J`/`Shift+K` fast-move binding — a wheel
+/// "notch" is a smaller, more frequent unit than either of those.
+const MOUSE_SCROLL_STEP: isize = 3;
+
+/// Only scroll wheel events move the log list; clicks/drags/moves are
+/// ignored in this pass (no click-to-focus yet — see the design doc's
+/// "Mouse wheel scrolling" section for why that's out of scope here). The
+/// wheel always targets the log list regardless of which region currently
+/// has keyboard focus.
+fn handle_mouse_event(app: &mut App, mouse: event::MouseEvent) {
+    match mouse.kind {
+        event::MouseEventKind::ScrollDown => app.move_cursor_manual(MOUSE_SCROLL_STEP),
+        event::MouseEventKind::ScrollUp => app.move_cursor_manual(-MOUSE_SCROLL_STEP),
+        _ => {}
+    }
+}
+
 /// Independent of `handle_normal_key`/`handle_insert_key`/`handle_ctrl_c`:
 /// dispatched before any of them while `app.search_draft` is `Some`. Ctrl+C
 /// here cancels the draft (like Esc), not quit — same "abort current line"
@@ -669,5 +687,63 @@ mod dispatch_tests {
         app.search_draft = Some("y".to_string());
         handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false);
         assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn test_mouse_scroll_down_and_up_move_cursor_by_three() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..20 {
+            tx.send(crate::model::EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I Tag     : line{i}")).unwrap())
+                .unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 10;
+        app.following = false;
+
+        handle_mouse_event(
+            &mut app,
+            event::MouseEvent {
+                kind: event::MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.cursor, 7);
+
+        handle_mouse_event(
+            &mut app,
+            event::MouseEvent {
+                kind: event::MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.cursor, 10);
+    }
+
+    #[test]
+    fn test_mouse_click_is_ignored() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : a").unwrap()).unwrap();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I Tag     : b").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        let cursor_before = app.cursor;
+
+        handle_mouse_event(
+            &mut app,
+            event::MouseEvent {
+                kind: event::MouseEventKind::Down(event::MouseButton::Left),
+                column: 5,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.cursor, cursor_before, "clicks are ignored in this pass");
     }
 }
