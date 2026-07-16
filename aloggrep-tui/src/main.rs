@@ -1,3 +1,5 @@
+mod model;
+
 use std::io;
 
 use crossterm::execute;
