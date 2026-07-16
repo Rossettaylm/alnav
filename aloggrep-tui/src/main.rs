@@ -1,3 +1,4 @@
+mod filter_model;
 mod model;
 
 use std::io;
