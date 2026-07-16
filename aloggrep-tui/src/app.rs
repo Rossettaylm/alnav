@@ -138,7 +138,7 @@ impl App {
 
     /// First `d` arms `pending_dd`; a second `d` within the same keypress
     /// dispatch deletes the focused group and re-filters. Any other key
-    /// clears `pending_dd` (handled by the caller in Task 17's key dispatch).
+    /// clears `pending_dd` (handled by the caller in Task 14's key dispatch).
     pub fn delete_focused_group(&mut self) {
         if self.groups.groups.is_empty() {
             return;
