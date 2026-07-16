@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
@@ -73,29 +73,29 @@ pub fn render_input_box(input: &InputBox, mode: Mode, frame: &mut Frame, area: R
         text.push('_');
     }
     frame.render_widget(Paragraph::new(text), area);
+}
 
-    if let Some(popup) = &input.popup {
-        let field_color = |f: crate::input::ChipField| match f {
-            crate::input::ChipField::Tag => Color::Cyan,
-            crate::input::ChipField::Msg => Color::Green,
-            crate::input::ChipField::Pkg => Color::Blue,
-            crate::input::ChipField::Pid => Color::Magenta,
-            crate::input::ChipField::Tid => Color::LightMagenta,
-            crate::input::ChipField::Level => Color::Yellow,
-        };
-        let spans: Vec<Span> = popup
-            .matches()
-            .into_iter()
-            .enumerate()
-            .flat_map(|(i, f)| {
-                let style = Style::default().fg(field_color(f));
-                let style = if i == popup.selected { style.add_modifier(Modifier::REVERSED) } else { style };
-                vec![Span::styled(format!(" {} ", f.keyword()), style)]
-            })
-            .collect();
-        let popup_area = Rect { x: area.x, y: area.y.saturating_sub(1), width: area.width, height: 1 };
-        frame.render_widget(Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::NONE)), popup_area);
-    }
+pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
+    let Some(popup) = &input.popup else { return };
+    let field_color = |f: crate::input::ChipField| match f {
+        crate::input::ChipField::Tag => Color::Cyan,
+        crate::input::ChipField::Msg => Color::Green,
+        crate::input::ChipField::Pkg => Color::Blue,
+        crate::input::ChipField::Pid => Color::Magenta,
+        crate::input::ChipField::Tid => Color::LightMagenta,
+        crate::input::ChipField::Level => Color::Yellow,
+    };
+    let spans: Vec<Span> = popup
+        .matches()
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, f)| {
+            let style = Style::default().fg(field_color(f));
+            let style = if i == popup.selected { style.add_modifier(Modifier::REVERSED) } else { style };
+            vec![Span::styled(format!(" {} ", f.keyword()), style)]
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 #[cfg(test)]

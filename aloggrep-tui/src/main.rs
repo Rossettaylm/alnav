@@ -186,9 +186,10 @@ fn run<B: ratatui::backend::Backend>(
 
         terminal
             .draw(|frame| {
-                let [chip_area, list_area, input_area, status_area] = Layout::vertical([
+                let [chip_area, list_area, popup_area, input_area, status_area] = Layout::vertical([
                     Constraint::Length(1),
                     Constraint::Fill(1),
+                    Constraint::Length(1),
                     Constraint::Length(1),
                     Constraint::Length(1),
                 ])
@@ -196,6 +197,7 @@ fn run<B: ratatui::backend::Backend>(
                 ui::render_chip_strip(app, frame, chip_area);
                 ui::render_log_list(app, frame, list_area);
                 ui::render_input_box(input, app.mode, frame, input_area);
+                ui::render_popup(input, frame, popup_area);
                 let status = format!("{}/{}", app.cursor + 1, app.visible.len());
                 frame.render_widget(ratatui::widgets::Paragraph::new(status), status_area);
             })
@@ -214,7 +216,7 @@ fn run<B: ratatui::backend::Backend>(
     Ok(())
 }
 
-fn handle_normal_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) {
+fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
     use app::Focus;
 
     if code != KeyCode::Char('d') {
@@ -239,10 +241,11 @@ fn handle_normal_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) 
                 app.pending_dd = true;
             }
         }
+        // input is always already-empty here: Esc is the only Insert->Normal
+        // transition, and it always resets *input first.
         (_, KeyCode::Char('a') | KeyCode::Char('i') | KeyCode::Char('o')) => {
             app.focus = Focus::Input;
             app.mode = app::Mode::Insert;
-            let _ = input;
         }
         _ => {}
     }
@@ -267,6 +270,8 @@ fn handle_insert_key(
         return Ok(());
     }
 
+    // Tab/BackTab intentionally do nothing mid-Insert; Esc is the only way to
+    // change focus while typing.
     match code {
         KeyCode::Esc => {
             *input = input::InputBox::default();
@@ -284,4 +289,54 @@ fn handle_insert_key(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn test_a_enters_insert_mode() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        assert_eq!(app.mode, app::Mode::Insert);
+        assert_eq!(app.focus, app::Focus::Input);
+    }
+
+    #[test]
+    fn test_esc_in_insert_mode_resets_input_and_returns_to_normal() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x');
+        handle_insert_key(&mut app, &mut input, KeyCode::Esc, false).unwrap();
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn test_enter_builds_group_and_stays_in_insert_mode() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x');
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter, false).unwrap();
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.mode, app::Mode::Insert); // intentional: Enter does NOT return to Normal, only Esc does
+        assert!(input.chips.is_empty()); // build_group cleared it
+    }
+
+    #[test]
+    fn test_dd_chord_requires_two_consecutive_d_presses() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.focus = app::Focus::ChipStrip;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+        assert!(app.pending_dd);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('j')); // unrelated key in between
+        assert!(!app.pending_dd, "pending_dd should clear on a non-d key");
+        assert_eq!(app.groups.groups.len(), 1, "group should NOT be deleted");
+    }
 }
