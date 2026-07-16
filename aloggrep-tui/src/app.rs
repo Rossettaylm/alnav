@@ -89,7 +89,9 @@ impl App {
             .filter(|(_, row)| self.groups.matches(row))
             .map(|(i, _)| i)
             .collect();
-        if self.cursor >= self.visible.len() {
+        if self.following {
+            self.jump_bottom();
+        } else if self.cursor >= self.visible.len() {
             self.cursor = self.visible.len().saturating_sub(1);
         }
     }
@@ -300,6 +302,8 @@ mod focus_tests {
 #[cfg(test)]
 mod follow_tests {
     use super::*;
+    use crate::filter_model::Group;
+    use aloggrep::expr::Expr;
     use std::sync::mpsc;
 
     fn row(tag: &str) -> EntryRow {
@@ -346,5 +350,27 @@ mod follow_tests {
         app.move_cursor_manual(-1);
         app.jump_bottom_resume_follow();
         assert!(app.following);
+    }
+
+    #[test]
+    fn test_rebuild_visible_follows_when_following_and_visible_set_grows() {
+        let mut app = App::new(100);
+        app.groups = GroupList {
+            groups: vec![
+                Group { label: "a".into(), expr: Some(Expr::parse("tag~A", false).unwrap()), time: None },
+            ],
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap(); // doesn't match "a" group, filtered out
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.visible, vec![0]); // only A is visible
+        assert!(app.following);
+
+        app.groups.groups.clear(); // simulates deleting the last filter group -> empty GroupList matches everything
+        app.rebuild_visible();
+        assert_eq!(app.visible, vec![0, 1]); // both now visible, set grew
+        assert_eq!(app.cursor, 1); // still following: cursor pinned to new bottom (B), not stuck at old position
     }
 }
