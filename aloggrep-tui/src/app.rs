@@ -192,10 +192,6 @@ impl App {
         self.highlight = Some(Regex::new(pattern).map_err(|e| e.to_string())?);
         Ok(())
     }
-
-    pub fn clear_highlight(&mut self) {
-        self.highlight = None;
-    }
 }
 
 #[cfg(test)]

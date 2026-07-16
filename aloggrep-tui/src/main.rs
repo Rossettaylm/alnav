@@ -270,20 +270,8 @@ fn run<B: ratatui::backend::Backend>(
         // Normal/Insert dispatch below) so that Ctrl+C while typing a search
         // query cancels the draft like Esc does, instead of falling through
         // to the Ctrl+C handling below and quitting the app in Mode::Normal.
-        if let Some(draft) = &mut app.search_draft {
-            let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
-            match key.code {
-                KeyCode::Enter => {
-                    let pattern = draft.clone();
-                    app.search_draft = None;
-                    app.set_highlight(&pattern)?;
-                }
-                KeyCode::Esc => app.search_draft = None,
-                _ if is_ctrl_c => app.search_draft = None,
-                KeyCode::Backspace => { draft.pop(); }
-                KeyCode::Char(c) => draft.push(c),
-                _ => {}
-            }
+        if app.search_draft.is_some() {
+            handle_search_draft_key(app, key);
             continue;
         }
 
@@ -316,6 +304,29 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
                 app.mode = Mode::Normal;
             }
         }
+    }
+}
+
+/// Independent of `handle_normal_key`/`handle_insert_key`/`handle_ctrl_c`:
+/// dispatched before any of them while `app.search_draft` is `Some`. Ctrl+C
+/// here cancels the draft (like Esc), not quit — same "abort current line"
+/// convention as `handle_ctrl_c`. An invalid regex on Enter is silently
+/// ignored rather than propagated, so a search-box typo can't end the
+/// session or affect the previously active highlight (if any).
+fn handle_search_draft_key(app: &mut App, key: event::KeyEvent) {
+    let Some(draft) = &mut app.search_draft else { return };
+    let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Enter => {
+            let pattern = draft.clone();
+            app.search_draft = None;
+            let _ = app.set_highlight(&pattern);
+        }
+        KeyCode::Esc => app.search_draft = None,
+        _ if is_ctrl_c => app.search_draft = None,
+        KeyCode::Backspace => { draft.pop(); }
+        KeyCode::Char(c) => draft.push(c),
+        _ => {}
     }
 }
 
@@ -398,6 +409,7 @@ fn handle_insert_key(
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
+    use crossterm::event::{KeyEvent, KeyModifiers};
 
     #[test]
     fn test_a_enters_insert_mode() {
@@ -477,5 +489,33 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('j')); // unrelated key in between
         assert!(!app.pending_dd, "pending_dd should clear on a non-d key");
         assert_eq!(app.groups.groups.len(), 1, "group should NOT be deleted");
+    }
+
+    #[test]
+    fn test_search_draft_enter_applies_highlight_and_clears_draft() {
+        let mut app = App::new(100);
+        app.search_draft = Some("hello".to_string());
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.search_draft.is_none());
+        assert!(app.highlight.is_some());
+    }
+
+    #[test]
+    fn test_search_draft_ctrl_c_cancels_without_applying() {
+        let mut app = App::new(100);
+        app.search_draft = Some("hello".to_string());
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.search_draft.is_none());
+        assert!(app.highlight.is_none(), "Ctrl+C should cancel, not apply, the draft");
+    }
+
+    #[test]
+    fn test_search_draft_invalid_regex_does_not_crash_or_change_highlight() {
+        let mut app = App::new(100);
+        app.set_highlight("existing").unwrap();
+        app.search_draft = Some("(unclosed".to_string());
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.search_draft.is_none());
+        assert!(app.highlight.is_some(), "invalid pattern should be ignored, not crash or clear the prior highlight");
     }
 }
