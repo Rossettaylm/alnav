@@ -111,6 +111,7 @@ fn tokenize(input: &str) -> Result<Vec<(Token, usize)>, String> {
 
 // ── AST ──────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
@@ -302,6 +303,116 @@ impl Expr {
             | Expr::PidMatch(re) | Expr::TidMatch(re) => out.push(re),
             Expr::LevelGte(_) => {}
         }
+    }
+
+    /// Combine scalar CLI-style field filters into one AND-expression,
+    /// matching `FilterChain`'s existing semantics: multiple values for the
+    /// *same* field are joined into one regex alternation (OR), different
+    /// fields are AND'd together. Returns `Ok(None)` if every input is empty
+    /// (no filter to apply).
+    pub fn from_filters(
+        tag: &[String],
+        msg: &[String],
+        pkg: &[String],
+        pid: &[String],
+        tid: &[String],
+        level: Option<&str>,
+        case_insensitive: bool,
+    ) -> Result<Option<Expr>, String> {
+        let mut nodes: Vec<Expr> = Vec::new();
+
+        if let Some(re) = Self::compile_joined(tag, case_insensitive, "tag")? {
+            nodes.push(Expr::TagMatch(re));
+        }
+        if let Some(re) = Self::compile_joined(msg, case_insensitive, "msg")? {
+            nodes.push(Expr::MsgMatch(re));
+        }
+        if let Some(re) = Self::compile_joined(pkg, case_insensitive, "pkg")? {
+            nodes.push(Expr::PkgMatch(re));
+        }
+        if let Some(re) = Self::compile_joined(pid, case_insensitive, "pid")? {
+            nodes.push(Expr::PidMatch(re));
+        }
+        if let Some(re) = Self::compile_joined(tid, case_insensitive, "tid")? {
+            nodes.push(Expr::TidMatch(re));
+        }
+        if let Some(l) = level {
+            let lvl = Level::from_str(l)
+                .ok_or_else(|| format!("unknown level '{}', expected V/D/I/W/E/F", l))?;
+            nodes.push(Expr::LevelGte(lvl));
+        }
+
+        let mut iter = nodes.into_iter();
+        let Some(first) = iter.next() else {
+            return Ok(None);
+        };
+        Ok(Some(iter.fold(first, |acc, next| Expr::And(Box::new(acc), Box::new(next)))))
+    }
+
+    fn compile_joined(values: &[String], case_insensitive: bool, label: &str) -> Result<Option<Regex>, String> {
+        if values.is_empty() {
+            return Ok(None);
+        }
+        let joined = values.join("|");
+        let pattern = if case_insensitive { format!("(?i){joined}") } else { joined.clone() };
+        Regex::new(&pattern).map(Some).map_err(|e| format!("bad {label} pattern '{}': {}", joined, e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry<'a>(tag: &'a str, msg: &'a str, level: Level) -> LogEntry<'a> {
+        LogEntry { timestamp: "", pid: "", tid: "", level, tag, pkg: "", msg }
+    }
+
+    #[test]
+    fn test_from_filters_empty_returns_none() {
+        let result = Expr::from_filters(&[], &[], &[], &[], &[], None, false).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_from_filters_single_field() {
+        let expr = Expr::from_filters(&["MyTag".to_string()], &[], &[], &[], &[], None, false)
+            .unwrap()
+            .unwrap();
+        assert!(expr.matches(&entry("MyTag", "hello", Level::I)));
+        assert!(!expr.matches(&entry("Other", "hello", Level::I)));
+    }
+
+    #[test]
+    fn test_from_filters_multi_value_same_field_is_or() {
+        let expr = Expr::from_filters(
+            &["A".to_string(), "B".to_string()],
+            &[], &[], &[], &[], None, false,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expr.matches(&entry("A", "m", Level::I)));
+        assert!(expr.matches(&entry("B", "m", Level::I)));
+        assert!(!expr.matches(&entry("C", "m", Level::I)));
+    }
+
+    #[test]
+    fn test_from_filters_cross_field_is_and() {
+        let expr = Expr::from_filters(
+            &["MyTag".to_string()], &["timeout".to_string()], &[], &[], &[],
+            Some("W"), false,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expr.matches(&entry("MyTag", "timeout occurred", Level::E)));
+        assert!(!expr.matches(&entry("MyTag", "all good", Level::E)));
+        assert!(!expr.matches(&entry("Other", "timeout occurred", Level::E)));
+        assert!(!expr.matches(&entry("MyTag", "timeout occurred", Level::D)));
+    }
+
+    #[test]
+    fn test_from_filters_unknown_level_errors() {
+        let err = Expr::from_filters(&[], &[], &[], &[], &[], Some("bogus"), false).unwrap_err();
+        assert!(err.contains("bogus"));
     }
 }
 
