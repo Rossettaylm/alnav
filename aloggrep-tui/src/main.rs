@@ -333,6 +333,7 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
             } else {
                 *input = input::InputBox::default();
                 app.mode = Mode::Normal;
+                app.focus = app::Focus::LogList;
             }
         }
     }
@@ -542,6 +543,17 @@ mod dispatch_tests {
         assert!(!app.should_quit);
         assert_eq!(app.mode, app::Mode::Normal);
         assert!(input.is_empty());
+    }
+
+    #[test]
+    fn test_ctrl_c_in_insert_mode_also_returns_focus_to_loglist() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x');
+        handle_ctrl_c(&mut app, &mut input);
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert_eq!(app.focus, app::Focus::LogList, "Ctrl+C should behave like Esc: also return focus to the log list");
     }
 
     #[test]
