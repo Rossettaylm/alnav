@@ -164,6 +164,10 @@ fn render_entry_lines(row: &EntryRow, highlight: &Option<Regex>, area_width: usi
         .collect()
 }
 
+/// Takes `&mut App` (unlike sibling `render_*` functions) so ratatui's
+/// scroll offset can be persisted across frames via `App.list_offset` —
+/// do not revert this to `&App`, that's exactly what caused the old
+/// viewport-snap bug.
 pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let active = app.focus == Focus::LogList;
     let block = rounded_block(theme::numbered_title(2, "Log", active), active);
