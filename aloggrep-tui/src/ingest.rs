@@ -3,6 +3,8 @@ use std::io::{self, BufRead, BufReader};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+use aloggrep::hdc::HdcSession;
+
 use crate::model::EntryRow;
 
 /// Open `path` synchronously and, on success, spawn a background thread
@@ -29,6 +31,26 @@ pub fn spawn_file_ingest(path: String) -> io::Result<Receiver<EntryRow>> {
         }
     });
     Ok(rx)
+}
+
+/// Continuously read `session.lines`, sending each parsed row until the
+/// underlying iterator ends (child exited) or the receiver is dropped.
+/// Used by `--hdc`; unlike `spawn_file_ingest` this channel never closes on
+/// its own while the device keeps producing output.
+pub fn spawn_hdc_ingest(mut session: HdcSession) -> (Receiver<EntryRow>, std::process::Child) {
+    let (tx, rx) = mpsc::channel();
+    let child = session.child;
+    thread::spawn(move || {
+        for line in session.lines.by_ref() {
+            let Ok(line) = line else { continue };
+            if let Some(row) = EntryRow::from_line(&line) {
+                if tx.send(row).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    (rx, child)
 }
 
 #[cfg(test)]
@@ -60,5 +82,33 @@ mod tests {
     fn test_spawn_file_ingest_missing_file_errors_immediately() {
         let result = spawn_file_ingest("/nonexistent/path/that/does/not/exist.log".to_string());
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod hdc_ingest_tests {
+    use super::*;
+    use aloggrep::hdc::{HdcLiveFilter, HdcSession};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    #[test]
+    fn test_spawn_hdc_ingest_forwards_parsed_lines() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf '04-02 10:00:00.000  1  1 I TagA    : hello\\n'; sleep 0.2")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let lines = HdcLiveFilter { inner: std::io::BufReader::new(stdout).lines(), start_marker: None };
+        let session = HdcSession { child, lines, used_history_fallback: true };
+
+        let (rx, mut real_child) = spawn_hdc_ingest(session);
+        let row = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(row.tag, "TagA");
+
+        let _ = real_child.kill();
+        let _ = real_child.wait();
     }
 }
