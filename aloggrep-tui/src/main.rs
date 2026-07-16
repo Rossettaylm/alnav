@@ -352,9 +352,16 @@ fn handle_search_draft_key(app: &mut App, key: event::KeyEvent, ignore_case: boo
             let pattern = draft.clone();
             app.search_draft = None;
             let _ = app.set_highlight(&pattern, ignore_case);
+            app.focus = app::Focus::LogList;
         }
-        KeyCode::Esc => app.search_draft = None,
-        _ if is_ctrl_c => app.search_draft = None,
+        KeyCode::Esc => {
+            app.search_draft = None;
+            app.focus = app::Focus::LogList;
+        }
+        _ if is_ctrl_c => {
+            app.search_draft = None;
+            app.focus = app::Focus::LogList;
+        }
         KeyCode::Backspace => { draft.pop(); }
         KeyCode::Char(c) => draft.push(c),
         _ => {}
@@ -636,5 +643,19 @@ mod dispatch_tests {
         assert!(app.search_draft.is_none());
         let re = app.highlight.as_ref().unwrap();
         assert!(re.is_match("an error occurred"));
+    }
+
+    #[test]
+    fn test_search_draft_esc_and_enter_return_focus_to_loglist() {
+        let mut app = App::new(100);
+        app.focus = app::Focus::Input;
+        app.search_draft = Some("x".to_string());
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), false);
+        assert_eq!(app.focus, app::Focus::LogList);
+
+        app.focus = app::Focus::ChipStrip;
+        app.search_draft = Some("y".to_string());
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false);
+        assert_eq!(app.focus, app::Focus::LogList);
     }
 }
