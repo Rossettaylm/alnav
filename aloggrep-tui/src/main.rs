@@ -422,8 +422,9 @@ fn handle_insert_key(
         return Ok(());
     }
 
-    // Tab/BackTab intentionally do nothing mid-Insert; Esc is the only way to
-    // change focus while typing.
+    // Tab/BackTab intentionally do nothing mid-Insert. Esc always returns
+    // focus to the log list; Enter does the same, but only when it actually
+    // completes a filter group (build_group returns Some).
     match code {
         KeyCode::Esc => {
             *input = input::InputBox::default();
@@ -573,6 +574,17 @@ mod dispatch_tests {
         assert_eq!(app.mode, app::Mode::Normal, "adding a group should behave like Esc: back to Normal");
         assert_eq!(app.focus, app::Focus::LogList, "adding a group should jump focus back to the log list");
         assert!(input.chips.is_empty()); // build_group cleared it
+    }
+
+    #[test]
+    fn test_enter_with_empty_draft_does_not_change_mode_or_focus() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter, false).unwrap();
+        assert!(app.groups.groups.is_empty(), "empty draft must not build a group");
+        assert_eq!(app.mode, app::Mode::Insert, "empty-Enter no-op must not touch mode");
+        assert_eq!(app.focus, app::Focus::Input, "empty-Enter no-op must not touch focus");
     }
 
     #[test]
