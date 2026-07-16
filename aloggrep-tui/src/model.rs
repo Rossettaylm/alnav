@@ -2,6 +2,7 @@ use aloggrep::parser::{Level, LogEntry};
 
 #[derive(Debug, Clone)]
 pub struct EntryRow {
+    #[allow(dead_code)] // reserved for a future row-detail overlay (explicitly out of scope for v1, see design doc YAGNI list)
     pub raw: String,
     pub timestamp: String,
     pub pid: String,

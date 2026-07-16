@@ -21,6 +21,11 @@ use aloggrep::expr::Expr;
 use app::App;
 use filter_model::{Group, GroupList, TimeBound};
 
+/// Page size for Ctrl-d/Ctrl-u paging in the log list. `App` doesn't track
+/// the rendered viewport height (that's `ui.rs`'s job at render time), so a
+/// fixed page size is the simplest correct approach.
+const PAGE_SIZE: isize = 10;
+
 #[derive(Parser)]
 #[command(name = "aloggrep-tui", about = "Interactive vim-style viewer for aloggrep")]
 struct Cli {
@@ -271,7 +276,7 @@ fn run<B: ratatui::backend::Backend>(
         // query cancels the draft like Esc does, instead of falling through
         // to the Ctrl+C handling below and quitting the app in Mode::Normal.
         if app.search_draft.is_some() {
-            handle_search_draft_key(app, key);
+            handle_search_draft_key(app, key, ignore_case);
             continue;
         }
 
@@ -281,6 +286,27 @@ fn run<B: ratatui::backend::Backend>(
         if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
             handle_ctrl_c(app, input);
             continue;
+        }
+
+        // Ctrl-d/Ctrl-u page the log list when it has focus in Normal mode.
+        // Intercepted here (like Ctrl+C above) rather than threading the full
+        // KeyEvent into `handle_normal_key`, which deliberately only takes a
+        // bare `KeyCode`.
+        if key.modifiers.contains(event::KeyModifiers::CONTROL)
+            && app.mode == Mode::Normal
+            && app.focus == app::Focus::LogList
+        {
+            match key.code {
+                KeyCode::Char('d') => {
+                    app.move_cursor_manual(PAGE_SIZE);
+                    continue;
+                }
+                KeyCode::Char('u') => {
+                    app.move_cursor_manual(-PAGE_SIZE);
+                    continue;
+                }
+                _ => {}
+            }
         }
 
         match app.mode {
@@ -313,14 +339,14 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
 /// convention as `handle_ctrl_c`. An invalid regex on Enter is silently
 /// ignored rather than propagated, so a search-box typo can't end the
 /// session or affect the previously active highlight (if any).
-fn handle_search_draft_key(app: &mut App, key: event::KeyEvent) {
+fn handle_search_draft_key(app: &mut App, key: event::KeyEvent, ignore_case: bool) {
     let Some(draft) = &mut app.search_draft else { return };
     let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Enter => {
             let pattern = draft.clone();
             app.search_draft = None;
-            let _ = app.set_highlight(&pattern);
+            let _ = app.set_highlight(&pattern, ignore_case);
         }
         KeyCode::Esc => app.search_draft = None,
         _ if is_ctrl_c => app.search_draft = None,
@@ -495,7 +521,7 @@ mod dispatch_tests {
     fn test_search_draft_enter_applies_highlight_and_clears_draft() {
         let mut app = App::new(100);
         app.search_draft = Some("hello".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false);
         assert!(app.search_draft.is_none());
         assert!(app.highlight.is_some());
     }
@@ -504,7 +530,7 @@ mod dispatch_tests {
     fn test_search_draft_ctrl_c_cancels_without_applying() {
         let mut app = App::new(100);
         app.search_draft = Some("hello".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), false);
         assert!(app.search_draft.is_none());
         assert!(app.highlight.is_none(), "Ctrl+C should cancel, not apply, the draft");
     }
@@ -512,10 +538,20 @@ mod dispatch_tests {
     #[test]
     fn test_search_draft_invalid_regex_does_not_crash_or_change_highlight() {
         let mut app = App::new(100);
-        app.set_highlight("existing").unwrap();
+        app.set_highlight("existing", false).unwrap();
         app.search_draft = Some("(unclosed".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false);
         assert!(app.search_draft.is_none());
         assert!(app.highlight.is_some(), "invalid pattern should be ignored, not crash or clear the prior highlight");
+    }
+
+    #[test]
+    fn test_search_draft_ignore_case_true_matches_case_insensitively() {
+        let mut app = App::new(100);
+        app.search_draft = Some("ERROR".to_string());
+        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), true);
+        assert!(app.search_draft.is_none());
+        let re = app.highlight.as_ref().unwrap();
+        assert!(re.is_match("an error occurred"));
     }
 }

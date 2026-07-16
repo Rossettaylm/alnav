@@ -184,12 +184,13 @@ impl App {
 
     /// Independent of the chip filter system: never hides rows, only marks
     /// which ones should be highlighted when rendered.
-    pub fn set_highlight(&mut self, pattern: &str) -> Result<(), String> {
+    pub fn set_highlight(&mut self, pattern: &str, ignore_case: bool) -> Result<(), String> {
         if pattern.is_empty() {
             self.highlight = None;
             return Ok(());
         }
-        self.highlight = Some(Regex::new(pattern).map_err(|e| e.to_string())?);
+        let pattern = if ignore_case { format!("(?i){pattern}") } else { pattern.to_string() };
+        self.highlight = Some(Regex::new(&pattern).map_err(|e| e.to_string())?);
         Ok(())
     }
 }
@@ -242,6 +243,21 @@ mod tests {
         app.move_cursor(-5);
         assert_eq!(app.cursor, 0);
         app.move_cursor(5);
+        assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn test_move_cursor_manual_large_delta_clamps_like_paging() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.move_cursor_manual(-10); // simulates Ctrl-u paging past the top
+        assert_eq!(app.cursor, 0);
+        assert!(!app.following, "negative delta should pause following");
+        app.move_cursor_manual(10); // simulates Ctrl-d paging past the bottom
         assert_eq!(app.cursor, 1);
     }
 
@@ -399,21 +415,30 @@ mod highlight_tests {
     #[test]
     fn test_set_highlight_compiles_regex() {
         let mut app = App::new(100);
-        app.set_highlight("time.*out").unwrap();
+        app.set_highlight("time.*out", false).unwrap();
         assert!(app.highlight.is_some());
     }
 
     #[test]
     fn test_set_highlight_empty_clears() {
         let mut app = App::new(100);
-        app.set_highlight("x").unwrap();
-        app.set_highlight("").unwrap();
+        app.set_highlight("x", false).unwrap();
+        app.set_highlight("", false).unwrap();
         assert!(app.highlight.is_none());
     }
 
     #[test]
     fn test_set_highlight_bad_regex_errors() {
         let mut app = App::new(100);
-        assert!(app.set_highlight("(unclosed").is_err());
+        assert!(app.set_highlight("(unclosed", false).is_err());
+    }
+
+    #[test]
+    fn test_set_highlight_ignore_case_matches_regardless_of_case() {
+        let mut app = App::new(100);
+        app.set_highlight("ERROR", true).unwrap();
+        let re = app.highlight.as_ref().unwrap();
+        assert!(re.is_match("an error occurred"));
+        assert!(re.is_match("AN ERROR OCCURRED"));
     }
 }
