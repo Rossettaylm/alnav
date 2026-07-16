@@ -4,6 +4,7 @@ pub mod dedupe;
 pub mod expr;
 pub mod filter;
 pub mod formatter;
+pub mod hdc;
 pub mod histogram;
 pub mod multiline;
 pub mod parser;
