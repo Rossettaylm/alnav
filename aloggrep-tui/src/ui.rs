@@ -190,32 +190,36 @@ fn wrap_ranges(text: &str, width: usize) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Match segment with its progressive highlight color index.
-type ColoredMatch = (usize, usize, usize); // start, end, color_idx
+/// Match segment: start, end, progressive color index, globally-active underline.
+type ColoredMatch = (usize, usize, usize, bool);
+
+/// Paint pattern: regex, color index, whether this is the globally active search.
+type PaintPattern<'a> = (&'a Regex, usize, bool);
 
 /// Collect all pattern matches; later patterns overwrite overlapping ranges
-/// (same order as `active_patterns`).
-fn collect_matches(msg: &str, patterns: &[(&Regex, usize)]) -> Vec<ColoredMatch> {
-    let mut marked: Vec<Option<usize>> = vec![None; msg.len()];
-    for &(re, color_idx) in patterns {
+/// (same order as `paint_patterns`).
+fn collect_matches(msg: &str, patterns: &[PaintPattern<'_>]) -> Vec<ColoredMatch> {
+    // Per-byte: (color_idx, is_active)
+    let mut marked: Vec<Option<(usize, bool)>> = vec![None; msg.len()];
+    for &(re, color_idx, is_active) in patterns {
         for m in re.find_iter(msg) {
             for i in m.start()..m.end() {
-                marked[i] = Some(color_idx);
+                marked[i] = Some((color_idx, is_active));
             }
         }
     }
     let mut out = Vec::new();
     let mut i = 0;
     while i < marked.len() {
-        if let Some(color) = marked[i] {
+        if let Some((color, active)) = marked[i] {
             let start = i;
             i += 1;
-            while i < marked.len() && marked[i] == Some(color) {
+            while i < marked.len() && marked[i] == Some((color, active)) {
                 i += 1;
             }
             // Only emit on char boundaries — marked is per-byte; regex matches
             // are already on char boundaries for UTF-8.
-            out.push((start, i, color));
+            out.push((start, i, color, active));
         } else {
             i += 1;
         }
@@ -228,7 +232,7 @@ fn spans_for_range(msg: &str, range: (usize, usize), matches: &[ColoredMatch]) -
     let (start, end) = range;
     let mut spans = Vec::new();
     let mut cursor = start;
-    for &(m_start, m_end, color_idx) in matches {
+    for &(m_start, m_end, color_idx, is_active) in matches {
         if m_end <= start || m_start >= end {
             continue;
         }
@@ -237,10 +241,12 @@ fn spans_for_range(msg: &str, range: (usize, usize), matches: &[ColoredMatch]) -
         if seg_start > cursor {
             spans.push(Span::raw(msg[cursor..seg_start].to_string()));
         }
-        spans.push(Span::styled(
-            msg[seg_start..seg_end].to_string(),
-            theme::highlight_style(color_idx),
-        ));
+        let style = if is_active {
+            theme::highlight_style_active(color_idx)
+        } else {
+            theme::highlight_style(color_idx)
+        };
+        spans.push(Span::styled(msg[seg_start..seg_end].to_string(), style));
         cursor = seg_end;
     }
     if cursor < end {
@@ -258,7 +264,7 @@ fn spans_for_range(msg: &str, range: (usize, usize), matches: &[ColoredMatch]) -
 /// width used for right-aligned padding.
 fn render_entry_lines(
     row: &EntryRow,
-    patterns: &[(&Regex, usize)],
+    patterns: &[PaintPattern<'_>],
     area_width: usize,
     lineno: usize,
     lineno_width: usize,
@@ -316,7 +322,7 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let block = rounded_block(theme::numbered_title(3, "Log", active), active);
     let inner_width = block.inner(area).width.max(1) as usize;
     let selection = app.selection_range();
-    let patterns = app.search_groups.active_patterns();
+    let patterns = app.search_groups.paint_patterns(app.active_search);
 
     let lineno_width = app.visible.len().max(1).to_string().len();
     let items: Vec<ListItem> = app
@@ -382,10 +388,15 @@ fn filter_group_spans(g: &Group, selected: bool) -> Vec<Span<'static>> {
     spans
 }
 
-fn search_group_spans(g: &SearchGroup, color_idx: usize, selected: bool) -> Vec<Span<'static>> {
+fn search_group_spans(
+    g: &SearchGroup,
+    color_idx: usize,
+    selected: bool,
+    active_global: bool,
+) -> Vec<Span<'static>> {
     let mut spans = vec![group_dot_span(g.enabled, selected)];
     spans.push(Span::raw(" ".repeat(DOT_PILL_GAP as usize)));
-    let (text, body) = theme::search_pill_style(&g.pattern, color_idx, !g.enabled);
+    let (text, body) = theme::search_pill_style(&g.pattern, color_idx, !g.enabled, active_global);
     spans.push(Span::styled(text, body));
     spans
 }
@@ -498,7 +509,12 @@ fn search_strip_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
             } else {
                 0
             };
-            search_group_spans(g, idx, i == app.search_cursor && active)
+            search_group_spans(
+                g,
+                idx,
+                i == app.search_cursor && active,
+                Some(i) == app.active_search,
+            )
         })
         .collect();
     flow_wrap_groups(groups, inner_width)
@@ -914,7 +930,7 @@ mod tests {
     fn test_render_entry_lines_highlights_only_matched_keyword() {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred here").unwrap();
         let re = Regex::new("(?i)error").unwrap();
-        let patterns = [(&re, 0usize)];
+        let patterns = [(&re, 0usize, false)];
         let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         assert_eq!(lines.len(), 1);
         let matched: Vec<&Span> = lines[0].spans.iter().filter(|s| s.content.as_ref() == "error").collect();
@@ -932,12 +948,14 @@ mod tests {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : foo and bar here").unwrap();
         let re0 = Regex::new("(?i)foo").unwrap();
         let re1 = Regex::new("(?i)bar").unwrap();
-        let patterns = [(&re0, 0usize), (&re1, 1usize)];
+        let patterns = [(&re0, 0usize, true), (&re1, 1usize, false)];
         let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         let foo = lines[0].spans.iter().find(|s| s.content.as_ref() == "foo").unwrap();
         let bar = lines[0].spans.iter().find(|s| s.content.as_ref() == "bar").unwrap();
-        assert_eq!(foo.style, theme::highlight_style(0));
+        assert_eq!(foo.style, theme::highlight_style_active(0));
         assert_eq!(bar.style, theme::highlight_style(1));
+        assert!(foo.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!bar.style.add_modifier.contains(Modifier::UNDERLINED));
         assert_ne!(foo.style.bg, bar.style.bg);
     }
 
@@ -988,8 +1006,11 @@ mod tests {
         assert_eq!(body.bg, Some(theme::ACCENT));
         let (_, disabled) = theme::chip_pill_style(crate::input::ChipField::Msg, "x", true);
         assert_eq!(disabled, theme::disabled_chip_style());
-        let (_, search) = theme::search_pill_style("error", 0, false);
+        let (_, search) = theme::search_pill_style("error", 0, false, false);
         assert_eq!(search, theme::highlight_style(0));
+        let (_, active) = theme::search_pill_style("error", 0, false, true);
+        assert_eq!(active, theme::highlight_style_active(0));
+        assert!(active.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
@@ -1120,9 +1141,7 @@ mod tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.search_groups
-            .groups
-            .push(SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
 
         let backend = TestBackend::new(40, 1);
         let mut terminal = Terminal::new(backend).unwrap();

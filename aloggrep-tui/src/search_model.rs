@@ -1,7 +1,8 @@
 use regex::Regex;
 
 /// One committed search group: a single pattern highlighted in the log list.
-/// Multiple searches = multiple groups (OR across groups for `n`/`N` / paint).
+/// Multiple searches = multiple groups (all enabled patterns paint; `n`/`N`
+/// and underline follow `App.active_search` only).
 pub struct SearchGroup {
     /// Original pattern string (for display + dedup); matching uses `re`.
     pub pattern: String,
@@ -42,13 +43,23 @@ pub struct SearchGroupList {
 impl SearchGroupList {
     /// Flatten enabled groups' patterns with progressive color indices.
     pub fn active_patterns(&self) -> Vec<(&Regex, usize)> {
+        self.paint_patterns(None)
+            .into_iter()
+            .map(|(re, idx, _)| (re, idx))
+            .collect()
+    }
+
+    /// Like [`Self::active_patterns`], plus whether each pattern is the
+    /// globally active search group (for underline / `n`/`N` paint).
+    pub fn paint_patterns(&self, active_group: Option<usize>) -> Vec<(&Regex, usize, bool)> {
         let mut out = Vec::new();
         let mut idx = 0usize;
-        for g in &self.groups {
+        for (i, g) in self.groups.iter().enumerate() {
             if !g.enabled {
                 continue;
             }
-            out.push((&g.re, idx));
+            let is_active = Some(i) == active_group;
+            out.push((&g.re, idx, is_active));
             idx += 1;
         }
         out

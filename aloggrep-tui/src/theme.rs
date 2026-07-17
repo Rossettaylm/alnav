@@ -46,6 +46,11 @@ pub fn highlight_style(idx: usize) -> Style {
     Style::default().fg(fg).bg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)
 }
 
+/// [`highlight_style`] plus underline for the globally active search pattern.
+pub fn highlight_style_active(idx: usize) -> Style {
+    highlight_style(idx).add_modifier(Modifier::UNDERLINED)
+}
+
 /// Soft-disabled chip/group label (`di`): dim gray, distinct from focus and
 /// from normal labels.
 pub fn disabled_chip_style() -> Style {
@@ -123,12 +128,23 @@ pub fn chip_pill_style(field: ChipField, value: &str, disabled: bool) -> (String
 }
 
 /// Body style for a search pill — same single-row fill model as [`chip_pill_style`].
-pub fn search_pill_style(pattern: &str, color_idx: usize, disabled: bool) -> (String, Style) {
+/// `active_global` underlines the globally active (n/N) search chip.
+pub fn search_pill_style(
+    pattern: &str,
+    color_idx: usize,
+    disabled: bool,
+    active_global: bool,
+) -> (String, Style) {
     let text = format!(" {pattern} ");
     if disabled {
         return (text, disabled_chip_style());
     }
-    (text, highlight_style(color_idx))
+    let style = if active_global {
+        highlight_style_active(color_idx)
+    } else {
+        highlight_style(color_idx)
+    };
+    (text, style)
 }
 
 /// Thin editing caret (Insert / search editing). Idle block caret is unused.

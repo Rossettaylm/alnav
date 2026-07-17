@@ -1388,9 +1388,7 @@ mod dispatch_tests {
         );
         app.following = false;
         app.cursor = 0;
-        app.search_groups
-            .groups
-            .push(search_model::SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_search_group(search_model::SearchGroup::from_pattern("hit").unwrap());
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 1);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));

@@ -3,7 +3,7 @@ use std::sync::mpsc::Receiver;
 
 use crate::filter_model::GroupList;
 use crate::model::EntryRow;
-use crate::search_model::{SearchBox, SearchGroupList};
+use crate::search_model::{SearchBox, SearchGroup, SearchGroupList};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -61,6 +61,9 @@ pub struct App {
     pub groups: GroupList,
     pub search_groups: SearchGroupList,
     pub search_box: SearchBox,
+    /// Globally active search group for `n`/`N`, match stats, and underline.
+    /// Independent of [`Self::search_cursor`] (SearchStrip keyboard focus).
+    pub active_search: Option<usize>,
     pub cursor: usize,
     pub max_lines: usize,
     pub should_quit: bool,
@@ -90,6 +93,7 @@ impl App {
             groups: GroupList::default(),
             search_groups: SearchGroupList::default(),
             search_box: SearchBox::default(),
+            active_search: None,
             cursor: 0,
             max_lines,
             should_quit: false,
@@ -283,10 +287,42 @@ impl App {
                 if self.search_cursor >= self.search_groups.groups.len() {
                     self.search_cursor = self.search_groups.groups.len().saturating_sub(1);
                 }
+                self.fix_active_search_after_delete(cursor);
                 if self.search_groups.groups.is_empty() {
                     self.focus = Focus::LogList;
                 }
             }
+        }
+    }
+
+    /// After removing search group at `removed`, keep `active_search` valid.
+    /// Deleting the active group (or emptying the list) falls back to the
+    /// newest remaining group; deleting a group left of active shifts the index.
+    fn fix_active_search_after_delete(&mut self, removed: usize) {
+        let len = self.search_groups.groups.len();
+        if len == 0 {
+            self.active_search = None;
+            return;
+        }
+        match self.active_search {
+            Some(active) if active == removed => {
+                self.active_search = Some(len - 1);
+            }
+            Some(active) if active > removed => {
+                self.active_search = Some(active - 1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Enabled search group currently marked as global active, if any.
+    pub fn active_search_group(&self) -> Option<&SearchGroup> {
+        let idx = self.active_search?;
+        let g = self.search_groups.groups.get(idx)?;
+        if g.enabled {
+            Some(g)
+        } else {
+            None
         }
     }
 
@@ -383,9 +419,17 @@ impl App {
     }
 
     /// Jump to the next (`dir > 0`) or previous (`dir < 0`) visible row whose
-    /// `msg` matches any enabled search pattern. Wraps like vim `wrapscan`.
+    /// `msg` matches the globally active search group. Wraps like vim `wrapscan`.
     pub fn find_match(&mut self, dir: i8) -> bool {
-        if self.search_groups.active_patterns().is_empty() {
+        let Some(active_idx) = self.active_search else {
+            return false;
+        };
+        if !self
+            .search_groups
+            .groups
+            .get(active_idx)
+            .is_some_and(|g| g.enabled)
+        {
             return false;
         }
         let n = self.visible.len();
@@ -396,8 +440,9 @@ impl App {
         let start = self.cursor as isize;
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            let row = &self.rows[self.visible[idx]];
-            if self.search_groups.any_match(&row.msg) {
+            let row_idx = self.visible[idx];
+            let hit = self.search_groups.groups[active_idx].matches_msg(&self.rows[row_idx].msg);
+            if hit {
                 self.following = false;
                 self.cursor = idx;
                 return true;
@@ -444,26 +489,31 @@ impl App {
     }
 
     /// Push a search group, or return the index of an existing equivalent.
+    /// Always marks the returned index as the globally active search.
     /// Caller always jumps to that group's first match.
     pub fn push_or_find_search_group(&mut self, group: crate::search_model::SearchGroup) -> usize {
-        if let Some(idx) = self.search_groups.find_equivalent(&group.pattern) {
-            return idx;
-        }
-        self.search_groups.groups.push(group);
-        self.search_groups.groups.len() - 1
+        let idx = if let Some(idx) = self.search_groups.find_equivalent(&group.pattern) {
+            idx
+        } else {
+            self.search_groups.groups.push(group);
+            self.search_groups.groups.len() - 1
+        };
+        self.active_search = Some(idx);
+        idx
     }
 
-    /// Search hit position among visible rows: `None` when no enabled pattern;
-    /// otherwise `(current_1based_or_none, total_hits)`. `current` is `None`
-    /// when the cursor is not on a matching row.
+    /// Search hit position among visible rows for the globally active group:
+    /// `None` when there is no active enabled group; otherwise
+    /// `(current_1based_or_none, total_hits)`. `current` is `None` when the
+    /// cursor is not on a matching row.
     pub fn search_match_stats(&self) -> Option<(Option<usize>, usize)> {
-        if self.search_groups.active_patterns().is_empty() {
+        let Some(group) = self.active_search_group() else {
             return None;
-        }
+        };
         let mut total = 0usize;
         let mut current = None;
         for (idx, &row_idx) in self.visible.iter().enumerate() {
-            if self.search_groups.any_match(&self.rows[row_idx].msg) {
+            if group.matches_msg(&self.rows[row_idx].msg) {
                 total += 1;
                 if idx == self.cursor {
                     current = Some(total);
@@ -831,9 +881,7 @@ mod search_tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.search_groups
-            .groups
-            .push(SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
 
         assert!(app.find_match(1));
         assert_eq!(app.cursor, 1);
@@ -869,9 +917,7 @@ mod search_tests {
         app.cursor = 3;
         assert!(app.search_match_stats().is_none());
 
-        app.search_groups
-            .groups
-            .push(SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
         app.cursor = 0; // non-hit row
         assert_eq!(app.search_match_stats(), Some((None, 2)));
 
@@ -895,9 +941,7 @@ mod search_tests {
         drop(tx);
         app.drain(&rx);
         app.cursor = 0;
-        app.search_groups
-            .groups
-            .push(SearchGroup::from_pattern("zzz").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("zzz").unwrap());
         assert!(!app.jump_first_match());
         assert_eq!(app.cursor, 0);
         assert_eq!(app.search_match_stats(), Some((None, 0)));
@@ -915,12 +959,9 @@ mod search_tests {
         app.following = false;
         app.cursor = 0;
 
-        app.search_groups
-            .groups
-            .push(SearchGroup::from_pattern("foo").unwrap());
-        app.search_groups
-            .groups
-            .push(SearchGroup::from_pattern("bar").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
+        assert_eq!(app.active_search, Some(1));
 
         assert!(app.jump_first_match());
         // Must land on newest group ("bar"), not the earlier "foo" at index 0.
@@ -937,9 +978,7 @@ mod search_tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.search_groups
-            .groups
-            .push(SearchGroup::from_pattern("ERROR").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("ERROR").unwrap());
         assert!(app.search_groups.any_match("an error occurred"));
     }
 
@@ -950,10 +989,10 @@ mod search_tests {
         tx.send(row_with_msg("T", "hit")).unwrap();
         drop(tx);
         app.drain(&rx);
-        let mut g = SearchGroup::from_pattern("hit").unwrap();
-        g.enabled = false;
-        app.search_groups.groups.push(g);
+        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
+        app.search_groups.groups[0].enabled = false;
         assert!(!app.find_match(1));
+        assert!(app.search_match_stats().is_none());
     }
 
     #[test]
@@ -961,9 +1000,51 @@ mod search_tests {
         let mut app = App::new(100);
         let idx0 = app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
         assert_eq!(idx0, 0);
+        assert_eq!(app.active_search, Some(0));
+        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
+        assert_eq!(app.active_search, Some(1));
         let idx1 = app.push_or_find_search_group(SearchGroup::from_pattern("FOO").unwrap());
         assert_eq!(idx1, 0);
-        assert_eq!(app.search_groups.groups.len(), 1);
+        assert_eq!(app.active_search, Some(0));
+        assert_eq!(app.search_groups.groups.len(), 2);
+    }
+
+    #[test]
+    fn test_find_match_only_uses_active_search_group() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "foo early")).unwrap();
+        tx.send(row_with_msg("T", "bar mid")).unwrap();
+        tx.send(row_with_msg("T", "foo late")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+        app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
+        // active is "bar" — n must not land on "foo"
+        assert!(app.find_match(1));
+        assert_eq!(app.rows[app.visible[app.cursor]].msg, "bar mid");
+        assert!(app.find_match(1)); // wrap to same hit
+        assert_eq!(app.rows[app.visible[app.cursor]].msg, "bar mid");
+    }
+
+    #[test]
+    fn test_delete_active_search_falls_back_to_newest() {
+        let mut app = App::new(100);
+        app.push_or_find_search_group(SearchGroup::from_pattern("a").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("b").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("c").unwrap());
+        assert_eq!(app.active_search, Some(2));
+        app.search_cursor = 2;
+        app.focus = Focus::SearchStrip;
+        app.delete_focused_strip_group(StripKind::Search);
+        assert_eq!(app.search_groups.groups.len(), 2);
+        assert_eq!(app.active_search, Some(1)); // newest remaining ("b")
+        app.search_cursor = 0;
+        app.delete_focused_strip_group(StripKind::Search); // remove "a", active was 1 -> shifts to 0
+        assert_eq!(app.active_search, Some(0));
+        assert_eq!(app.search_groups.groups[0].pattern, "b");
     }
 }
 
