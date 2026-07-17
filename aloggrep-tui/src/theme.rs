@@ -132,8 +132,14 @@ pub fn search_pill_style(pattern: &str, color_idx: usize, disabled: bool) -> (St
 }
 
 /// Thin editing caret (Insert / search editing). Idle block caret is unused.
+///
+/// Uses [`Style::reset`] so a preceding filled pill cannot leave its `bg` on
+/// the caret cell (`Cell::set_style` only applies `Some(_)` fields).
 pub fn caret_bar() -> Span<'static> {
-    Span::styled("▏", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+    Span::styled(
+        "▏",
+        Style::reset().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )
 }
 
 /// Border color for a bordered region: bright accent when it currently has
@@ -225,5 +231,17 @@ mod tests {
         let (text, body) = chip_pill_style(ChipField::Tag, "MyTag", false);
         assert!(text.contains("MyTag"));
         assert_eq!(body.bg, Some(ACCENT));
+    }
+
+    #[test]
+    fn test_caret_bar_resets_background() {
+        let caret = caret_bar();
+        assert_eq!(caret.content.as_ref(), "▏");
+        assert_eq!(caret.style.fg, Some(ACCENT));
+        assert_eq!(
+            caret.style.bg,
+            Some(Color::Reset),
+            "caret must clear pill bg via Style::reset"
+        );
     }
 }

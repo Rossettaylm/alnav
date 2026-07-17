@@ -461,6 +461,9 @@ pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut
     let block = rounded_block(theme::numbered_title(4, "Input", focused), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // Clear leftovers so a previous longer pill row cannot stain draft/caret cells
+    // (Span styles with `bg: None` do not overwrite an existing background).
+    frame.render_widget(Clear, inner);
 
     let mut spans = Vec::new();
     for (i, chip) in input.chips.iter().enumerate() {
@@ -470,13 +473,17 @@ pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut
         let (text, body) = theme::chip_pill_style(chip.field, &chip.value, false);
         spans.push(Span::styled(text, body));
     }
+    // Gap + reset after pills so draft/caret never sit inside the pill fill.
+    if !input.chips.is_empty() {
+        spans.push(Span::styled(" ".repeat(PILL_GAP as usize), Style::reset()));
+    }
     if let Some(field) = input.draft_field {
         spans.push(Span::styled(
             format!("{}:", field.keyword()),
-            Style::default().fg(theme::field_color(field)),
+            Style::reset().fg(theme::field_color(field)),
         ));
     }
-    spans.push(Span::raw(input.draft.clone()));
+    spans.push(Span::styled(input.draft.clone(), Style::reset()));
     if mode == Mode::Insert {
         spans.push(theme::caret_bar());
     }
@@ -488,15 +495,19 @@ pub fn render_search_box(search: &SearchBox, frame: &mut Frame, area: Rect) {
     let block = rounded_block(theme::plain_title("Search", editing), editing);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    frame.render_widget(Clear, inner);
 
     let mut spans = Vec::new();
     if editing {
-        spans.push(Span::styled("/", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
-        spans.push(Span::raw(search.draft.clone()));
+        spans.push(Span::styled(
+            "/",
+            Style::reset().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(search.draft.clone(), Style::reset()));
         spans.push(theme::caret_bar());
     } else if !search.is_empty() {
         // Transient: draft cleared on submit; keep branch for safety.
-        spans.push(Span::raw(search.draft.clone()));
+        spans.push(Span::styled(search.draft.clone(), Style::reset()));
     } else {
         spans.push(Span::styled("(no search)", Style::default().add_modifier(Modifier::DIM)));
     }
@@ -841,6 +852,50 @@ mod tests {
         assert_eq!(disabled, theme::disabled_chip_style());
         let (_, search) = theme::search_pill_style("error", 0, false);
         assert_eq!(search, theme::highlight_style(0));
+    }
+
+    #[test]
+    fn test_render_input_box_shows_caret_after_committed_pill() {
+        use crate::input::{Chip, ChipField};
+
+        let mut input = InputBox::default();
+        input.chips.push(Chip {
+            field: ChipField::Tag,
+            value: "MyTag".into(),
+        });
+        // Continue typing after the pill — the historical bug skipped caret
+        // entirely once chips were non-empty.
+        input.draft = "x".into();
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_input_box(&input, Mode::Insert, true, frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let content = cell_text(buf);
+        assert!(
+            content.contains('▏'),
+            "Insert caret must remain visible after a committed pill, got: {content:?}"
+        );
+        assert!(content.contains("MyTag"));
+        assert!(content.contains('x'));
+
+        // Caret cell must not inherit the pill's filled background.
+        let mut found_caret = false;
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, 1)];
+            if cell.symbol() == "▏" {
+                found_caret = true;
+                assert_eq!(cell.fg, theme::ACCENT);
+                assert_ne!(
+                    cell.bg,
+                    theme::ACCENT,
+                    "caret must not sit on the Tag pill's cyan fill"
+                );
+            }
+        }
+        assert!(found_caret, "caret glyph missing from content row");
     }
 
     #[test]
