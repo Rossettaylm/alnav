@@ -150,16 +150,25 @@ fn spans_for_range(msg: &str, range: (usize, usize), matches: &[ColoredMatch]) -
 }
 
 /// Renders one log entry as one or more physical `Line`s: a header
-/// (timestamp/level/tag/pid:tid) followed by the message, word-wrapped to
-/// `area_width` instead of being truncated. Fields use natural character
+/// (visible lineno/timestamp/level/tag) followed by the message, word-wrapped
+/// to `area_width` instead of being truncated. Fields use natural character
 /// widths (no fixed column padding); continuation lines indent with spaces
 /// matching the header width so the message column stays aligned.
-fn render_entry_lines(row: &EntryRow, patterns: &[(&Regex, usize)], area_width: usize) -> Vec<Line<'static>> {
+/// `lineno` is 1-based within the visible set; `lineno_width` is the digit
+/// width used for right-aligned padding.
+fn render_entry_lines(
+    row: &EntryRow,
+    patterns: &[(&Regex, usize)],
+    area_width: usize,
+    lineno: usize,
+    lineno_width: usize,
+) -> Vec<Line<'static>> {
+    let lineno_s = format!("{lineno:>lineno_width$} ");
     let ts = format!("{} ", row.timestamp);
     let level_badge = format!(" {} ", row.level.as_char());
     let tag = format!("{} ", row.tag);
-    let ids = format!("[{}:{}] ", row.pid, row.tid);
-    let header_width = ts.chars().count() + level_badge.chars().count() + tag.chars().count() + ids.chars().count();
+    let header_width =
+        lineno_s.chars().count() + ts.chars().count() + level_badge.chars().count() + tag.chars().count();
     let cont_prefix: String = " ".repeat(header_width);
 
     let first_width = area_width.saturating_sub(header_width).max(8);
@@ -182,10 +191,13 @@ fn render_entry_lines(row: &EntryRow, patterns: &[(&Regex, usize)], area_width: 
         .map(|(i, range)| {
             let mut spans = Vec::new();
             if i == 0 {
+                spans.push(Span::styled(
+                    lineno_s.clone(),
+                    theme::muted().add_modifier(Modifier::DIM),
+                ));
                 spans.push(Span::styled(ts.clone(), theme::muted()));
                 spans.push(Span::styled(level_badge.clone(), theme::level_badge_style(row.level)));
                 spans.push(Span::styled(tag.clone(), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(ids.clone(), theme::muted()));
             } else {
                 spans.push(Span::styled(cont_prefix.clone(), Style::default().add_modifier(Modifier::DIM)));
             }
@@ -209,7 +221,8 @@ fn render_group_strip_labels(
         .iter()
         .enumerate()
         .map(|(i, (label, enabled))| {
-            let text = format!(" {label} ");
+            let dot = if *enabled { '●' } else { '○' };
+            let text = format!(" {dot} {label} ");
             if i == cursor && active {
                 Span::styled(text, theme::focus_style())
             } else if !*enabled {
@@ -232,11 +245,12 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let selection = app.selection_range();
     let patterns = app.search_groups.active_patterns();
 
+    let lineno_width = app.visible.len().max(1).to_string().len();
     let items: Vec<ListItem> = app
         .visible_rows()
         .enumerate()
         .map(|(i, row)| {
-            let mut item = ListItem::new(render_entry_lines(row, &patterns, inner_width));
+            let mut item = ListItem::new(render_entry_lines(row, &patterns, inner_width, i + 1, lineno_width));
             if let Some((lo, hi)) = selection {
                 if i >= lo && i <= hi {
                     item = item.style(theme::log_visual_style());
@@ -379,6 +393,14 @@ pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         format!("{}/{}", app.cursor + 1, app.visible.len()),
         Style::default().add_modifier(Modifier::DIM),
     )];
+    if let Some((current, total)) = app.search_match_stats() {
+        let k = current.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("[{k}/{total}]"),
+            theme::search_match_status_style(),
+        ));
+    }
     if app.following {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge("FOLLOWING", theme::SUCCESS));
@@ -591,7 +613,7 @@ mod tests {
             "04-02 10:00:00.000  1  1 I Tag     : this message is long enough that it must wrap across more than one physical line when the column width is narrow",
         )
         .unwrap();
-        let lines = render_entry_lines(&row, &[], 40);
+        let lines = render_entry_lines(&row, &[], 40, 1, 1);
         assert!(lines.len() > 1, "a long message should wrap into multiple lines, got {}", lines.len());
     }
 
@@ -600,7 +622,7 @@ mod tests {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred here").unwrap();
         let re = Regex::new("(?i)error").unwrap();
         let patterns = [(&re, 0usize)];
-        let lines = render_entry_lines(&row, &patterns, 200);
+        let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         assert_eq!(lines.len(), 1);
         let matched: Vec<&Span> = lines[0].spans.iter().filter(|s| s.content.as_ref() == "error").collect();
         assert_eq!(matched.len(), 1, "exactly the matched keyword should be its own span");
@@ -618,7 +640,7 @@ mod tests {
         let re0 = Regex::new("(?i)foo").unwrap();
         let re1 = Regex::new("(?i)bar").unwrap();
         let patterns = [(&re0, 0usize), (&re1, 1usize)];
-        let lines = render_entry_lines(&row, &patterns, 200);
+        let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         let foo = lines[0].spans.iter().find(|s| s.content.as_ref() == "foo").unwrap();
         let bar = lines[0].spans.iter().find(|s| s.content.as_ref() == "bar").unwrap();
         assert_eq!(foo.style, theme::highlight_style(0));
@@ -629,7 +651,7 @@ mod tests {
     #[test]
     fn test_render_entry_lines_uses_natural_tag_width_no_fixed_padding() {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Ab   : msg").unwrap();
-        let lines = render_entry_lines(&row, &[], 200);
+        let lines = render_entry_lines(&row, &[], 200, 1, 1);
         let tag_span = lines[0]
             .spans
             .iter()
@@ -644,11 +666,68 @@ mod tests {
             "04-02 10:00:00.000  1  1 I Short : this message is long enough that it must wrap across more than one physical line when the column width is narrow",
         )
         .unwrap();
-        let lines = render_entry_lines(&row, &[], 40);
+        let lines = render_entry_lines(&row, &[], 40, 1, 1);
         assert!(lines.len() > 1);
+        // lineno + timestamp + level + tag
         let header_width: usize = lines[0].spans.iter().take(4).map(|s| s.content.chars().count()).sum();
         let cont = lines[1].spans[0].content.as_ref();
         assert!(cont.chars().all(|c| c == ' '), "continuation prefix should be spaces");
         assert_eq!(cont.chars().count(), header_width);
+    }
+
+    #[test]
+    fn test_render_entry_lines_shows_lineno_without_pid_tid() {
+        let row = EntryRow::from_line("04-02 10:00:00.000  1234  5678 I MyTag   : hello").unwrap();
+        let lines = render_entry_lines(&row, &[], 200, 12, 3);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains(" 12 "), "lineno should be right-aligned to width 3");
+        assert!(text.contains("MyTag"));
+        assert!(text.contains("hello"));
+        assert!(!text.contains("1234"), "pid must not appear in default display");
+        assert!(!text.contains("5678"), "tid must not appear in default display");
+        assert!(text.contains(" I "), "level badge must remain");
+    }
+
+    #[test]
+    fn test_render_group_strip_labels_enable_disable_dots() {
+        let labels = vec![("foo".into(), true), ("bar".into(), false)];
+        let spans = render_group_strip_labels(&labels, 0, false, "(empty)");
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].content.as_ref().contains('●'));
+        assert!(spans[0].content.as_ref().contains("foo"));
+        assert!(spans[1].content.as_ref().contains('○'));
+        assert!(spans[1].content.as_ref().contains("bar"));
+        assert_eq!(spans[1].style, theme::disabled_chip_style());
+    }
+
+    #[test]
+    fn test_render_status_bar_shows_search_match_stats() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap()).unwrap();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : hit one").unwrap()).unwrap();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:02.000  1  1 I T   : hit two").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["hit".into()]).unwrap());
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("[-/2]"), "cursor not on hit: got {content:?}");
+
+        app.cursor = 1;
+        terminal
+            .draw(|frame| render_status_bar(&app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("[1/2]"), "first hit ordinal: got {content:?}");
     }
 }

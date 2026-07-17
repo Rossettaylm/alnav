@@ -53,6 +53,12 @@ pub fn disabled_chip_style() -> Style {
     Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
 }
 
+/// Status-bar search hit counter `[k/N]`: accent foreground only (no reverse
+/// badge), so it reads as related-but-distinct from the dim filter `cursor/total`.
+pub fn search_match_status_style() -> Style {
+    Style::default().fg(ACCENT)
+}
+
 /// Chip field -> accent color, shared by the input box, popup, and (once
 /// committed) the chip strip so a field always reads the same color
 /// everywhere it appears.

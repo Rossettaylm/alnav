@@ -409,6 +409,7 @@ fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
                 Ok(Some(group)) => {
                     app.search_groups.groups.push(group);
                     app.search_box.clear();
+                    let _ = app.jump_first_match();
                     app.focus = app::Focus::LogList;
                 }
                 Ok(None) => {
@@ -882,6 +883,28 @@ mod dispatch_tests {
         assert!(!app.search_box.editing);
         assert_eq!(app.search_groups.groups.len(), 1);
         assert!(app.search_groups.any_match("an error occurred"));
+    }
+
+    #[test]
+    fn test_search_box_enter_jumps_to_first_match() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap()).unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : findme here").unwrap()).unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:02.000  1  1 I T   : findme two").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = true;
+        app.cursor = 2;
+
+        app.search_box.editing = true;
+        for c in "findme".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.cursor, 1);
+        assert!(!app.following);
+        assert_eq!(app.focus, app::Focus::LogList);
     }
 
     #[test]

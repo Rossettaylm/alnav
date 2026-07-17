@@ -123,6 +123,13 @@ impl App {
             let evicted_was_visible = self.visible.first() == Some(&0);
             if evicted_was_visible {
                 self.visible.remove(0);
+                // `list_offset` is an index into `visible`; dropping the front
+                // item must shift the viewport with the content, otherwise the
+                // list appears to scroll up even when no new visible rows arrive
+                // (common under a tight filter while the ring buffer fills).
+                if self.list_offset > 0 {
+                    self.list_offset -= 1;
+                }
             }
             for i in self.visible.iter_mut() {
                 *i -= 1;
@@ -397,6 +404,46 @@ impl App {
         }
         false
     }
+
+    /// Jump to the first visible row matching the newest search group.
+    /// Used after committing a new search group. Returns false if none match.
+    pub fn jump_first_match(&mut self) -> bool {
+        let Some(group_idx) = self.search_groups.groups.len().checked_sub(1) else {
+            return false;
+        };
+        if !self.search_groups.groups[group_idx].enabled {
+            return false;
+        }
+        for idx in 0..self.visible.len() {
+            let row_idx = self.visible[idx];
+            if self.search_groups.groups[group_idx].matches_msg(&self.rows[row_idx].msg) {
+                self.following = false;
+                self.cursor = idx;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Search hit position among visible rows: `None` when no enabled pattern;
+    /// otherwise `(current_1based_or_none, total_hits)`. `current` is `None`
+    /// when the cursor is not on a matching row.
+    pub fn search_match_stats(&self) -> Option<(Option<usize>, usize)> {
+        if self.search_groups.active_patterns().is_empty() {
+            return None;
+        }
+        let mut total = 0usize;
+        let mut current = None;
+        for (idx, &row_idx) in self.visible.iter().enumerate() {
+            if self.search_groups.any_match(&self.rows[row_idx].msg) {
+                total += 1;
+                if idx == self.cursor {
+                    current = Some(total);
+                }
+            }
+        }
+        Some((current, total))
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +496,38 @@ mod tests {
         assert_eq!(app.rows[0].tag, "B");
         assert_eq!(app.rows[1].tag, "C");
         assert_eq!(app.visible, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_evicting_visible_front_decrements_list_offset() {
+        let mut app = App::new(3);
+        app.groups = GroupList {
+            groups: vec![filter_group(
+                "keep-A",
+                Some(Expr::parse("tag~A", false).unwrap()),
+            )],
+        };
+        let (tx, rx) = mpsc::channel();
+        // Two matching rows fill visible; then non-matching rows churn the ring
+        // until the oldest visible (A0) is evicted — list_offset must track.
+        tx.send(row("A")).unwrap(); // A0
+        tx.send(row("A")).unwrap(); // A1
+        tx.send(row("X")).unwrap(); // fills buffer: [A0,A1,X]
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.visible.len(), 2);
+        app.following = false;
+        app.list_offset = 1;
+        app.cursor = 1;
+
+        let (tx2, rx2) = mpsc::channel();
+        tx2.send(row("Y")).unwrap(); // evict A0 → rows [A1,X,Y], visible drops front
+        drop(tx2);
+        app.drain(&rx2);
+
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.list_offset, 0, "viewport must shift with front eviction");
+        assert_eq!(app.cursor, 0);
     }
 
     #[test]
@@ -723,6 +802,79 @@ mod search_tests {
         drop(tx);
         app.drain(&rx);
         assert!(!app.find_match(1));
+    }
+
+    #[test]
+    fn test_jump_first_match_and_search_match_stats() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "aaa")).unwrap();
+        tx.send(row_with_msg("T", "hit one")).unwrap();
+        tx.send(row_with_msg("T", "bbb")).unwrap();
+        tx.send(row_with_msg("T", "hit two")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = true;
+        app.cursor = 3;
+        assert!(app.search_match_stats().is_none());
+
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["hit".into()]).unwrap());
+        app.cursor = 0; // non-hit row
+        assert_eq!(app.search_match_stats(), Some((None, 2)));
+
+        assert!(app.jump_first_match());
+        assert_eq!(app.cursor, 1);
+        assert!(!app.following);
+        assert_eq!(app.search_match_stats(), Some((Some(1), 2)));
+
+        app.cursor = 3;
+        assert_eq!(app.search_match_stats(), Some((Some(2), 2)));
+
+        app.cursor = 2;
+        assert_eq!(app.search_match_stats(), Some((None, 2)));
+    }
+
+    #[test]
+    fn test_jump_first_match_noop_when_no_hits() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "aaa")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 0;
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["zzz".into()]).unwrap());
+        assert!(!app.jump_first_match());
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.search_match_stats(), Some((None, 0)));
+    }
+
+    #[test]
+    fn test_jump_first_match_targets_newest_group_only() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "foo early")).unwrap();
+        tx.send(row_with_msg("T", "bar later")).unwrap();
+        tx.send(row_with_msg("T", "foo late")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["foo".into()]).unwrap());
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["bar".into()]).unwrap());
+
+        assert!(app.jump_first_match());
+        // Must land on newest group ("bar"), not the earlier "foo" at index 0.
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.rows[app.visible[app.cursor]].msg, "bar later");
     }
 
     #[test]
