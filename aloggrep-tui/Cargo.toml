@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 aloggrep-core = { path = "../aloggrep-core" }
+arboard = "3"
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
 crossterm = "0.29"

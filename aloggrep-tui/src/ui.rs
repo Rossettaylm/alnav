@@ -8,6 +8,7 @@ use regex::Regex;
 use crate::app::{App, Focus, Mode};
 use crate::input::InputBox;
 use crate::model::EntryRow;
+use crate::search_model::SearchBox;
 use crate::theme;
 
 fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
@@ -89,15 +90,45 @@ fn wrap_ranges(text: &str, width: usize) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Splits `msg[range.0..range.1]` into plain/highlighted spans, given
-/// match byte-ranges already computed against the *full* `msg` (so this
-/// composes with `wrap_ranges` cutting the same string into physical
-/// lines without the two disagreeing on byte offsets).
-fn spans_for_range(msg: &str, range: (usize, usize), matches: &[(usize, usize)]) -> Vec<Span<'static>> {
+/// Match segment with its progressive highlight color index.
+type ColoredMatch = (usize, usize, usize); // start, end, color_idx
+
+/// Collect all pattern matches; later patterns overwrite overlapping ranges
+/// (same order as `active_patterns`).
+fn collect_matches(msg: &str, patterns: &[(&Regex, usize)]) -> Vec<ColoredMatch> {
+    let mut marked: Vec<Option<usize>> = vec![None; msg.len()];
+    for &(re, color_idx) in patterns {
+        for m in re.find_iter(msg) {
+            for i in m.start()..m.end() {
+                marked[i] = Some(color_idx);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < marked.len() {
+        if let Some(color) = marked[i] {
+            let start = i;
+            i += 1;
+            while i < marked.len() && marked[i] == Some(color) {
+                i += 1;
+            }
+            // Only emit on char boundaries — marked is per-byte; regex matches
+            // are already on char boundaries for UTF-8.
+            out.push((start, i, color));
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Splits `msg[range.0..range.1]` into plain/highlighted spans.
+fn spans_for_range(msg: &str, range: (usize, usize), matches: &[ColoredMatch]) -> Vec<Span<'static>> {
     let (start, end) = range;
     let mut spans = Vec::new();
     let mut cursor = start;
-    for &(m_start, m_end) in matches {
+    for &(m_start, m_end, color_idx) in matches {
         if m_end <= start || m_start >= end {
             continue;
         }
@@ -106,7 +137,10 @@ fn spans_for_range(msg: &str, range: (usize, usize), matches: &[(usize, usize)])
         if seg_start > cursor {
             spans.push(Span::raw(msg[cursor..seg_start].to_string()));
         }
-        spans.push(Span::styled(msg[seg_start..seg_end].to_string(), theme::highlight_style(0)));
+        spans.push(Span::styled(
+            msg[seg_start..seg_end].to_string(),
+            theme::highlight_style(color_idx),
+        ));
         cursor = seg_end;
     }
     if cursor < end {
@@ -115,26 +149,23 @@ fn spans_for_range(msg: &str, range: (usize, usize), matches: &[(usize, usize)])
     spans
 }
 
-const CONT_PREFIX: &str = "        ";
-
 /// Renders one log entry as one or more physical `Line`s: a header
 /// (timestamp/level/tag/pid:tid) followed by the message, word-wrapped to
-/// `area_width` instead of being truncated. Continuation lines get a dim
-/// indent instead of repeating the header.
-fn render_entry_lines(row: &EntryRow, highlight: &Option<Regex>, area_width: usize) -> Vec<Line<'static>> {
-    let ts = format!("{:<18} ", row.timestamp);
+/// `area_width` instead of being truncated. Fields use natural character
+/// widths (no fixed column padding); continuation lines indent with spaces
+/// matching the header width so the message column stays aligned.
+fn render_entry_lines(row: &EntryRow, patterns: &[(&Regex, usize)], area_width: usize) -> Vec<Line<'static>> {
+    let ts = format!("{} ", row.timestamp);
     let level_badge = format!(" {} ", row.level.as_char());
-    let tag = format!("{:<16} ", row.tag);
+    let tag = format!("{} ", row.tag);
     let ids = format!("[{}:{}] ", row.pid, row.tid);
     let header_width = ts.chars().count() + level_badge.chars().count() + tag.chars().count() + ids.chars().count();
+    let cont_prefix: String = " ".repeat(header_width);
 
     let first_width = area_width.saturating_sub(header_width).max(8);
-    let cont_width = area_width.saturating_sub(CONT_PREFIX.len()).max(8);
+    let cont_width = area_width.saturating_sub(header_width).max(8);
 
-    let matches: Vec<(usize, usize)> = match highlight {
-        Some(re) => re.find_iter(&row.msg).map(|m| (m.start(), m.end())).collect(),
-        None => Vec::new(),
-    };
+    let matches = collect_matches(&row.msg, patterns);
 
     let first_pass = wrap_ranges(&row.msg, first_width);
     let mut line_ranges: Vec<(usize, usize)> = vec![first_pass[0]];
@@ -156,10 +187,36 @@ fn render_entry_lines(row: &EntryRow, highlight: &Option<Regex>, area_width: usi
                 spans.push(Span::styled(tag.clone(), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled(ids.clone(), theme::muted()));
             } else {
-                spans.push(Span::styled(CONT_PREFIX, Style::default().add_modifier(Modifier::DIM)));
+                spans.push(Span::styled(cont_prefix.clone(), Style::default().add_modifier(Modifier::DIM)));
             }
             spans.extend(spans_for_range(&row.msg, range, &matches));
             Line::from(spans)
+        })
+        .collect()
+}
+
+/// Shared chip-group strip rendering for Filter and Search strips.
+fn render_group_strip_labels(
+    labels: &[(String, bool)],
+    cursor: usize,
+    active: bool,
+    empty_hint: &str,
+) -> Vec<Span<'static>> {
+    if labels.is_empty() {
+        return vec![Span::styled(empty_hint.to_string(), Style::default().add_modifier(Modifier::DIM))];
+    }
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, (label, enabled))| {
+            let text = format!(" {label} ");
+            if i == cursor && active {
+                Span::styled(text, theme::focus_style())
+            } else if !*enabled {
+                Span::styled(text, theme::disabled_chip_style())
+            } else {
+                Span::raw(text)
+            }
         })
         .collect()
 }
@@ -170,15 +227,30 @@ fn render_entry_lines(row: &EntryRow, highlight: &Option<Regex>, area_width: usi
 /// viewport-snap bug.
 pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let active = app.focus == Focus::LogList;
-    let block = rounded_block(theme::numbered_title(2, "Log", active), active);
+    let block = rounded_block(theme::numbered_title(3, "Log", active), active);
     let inner_width = block.inner(area).width.max(1) as usize;
+    let selection = app.selection_range();
+    let patterns = app.search_groups.active_patterns();
 
     let items: Vec<ListItem> = app
         .visible_rows()
-        .map(|row| ListItem::new(render_entry_lines(row, &app.highlight, inner_width)))
+        .enumerate()
+        .map(|(i, row)| {
+            let mut item = ListItem::new(render_entry_lines(row, &patterns, inner_width));
+            if let Some((lo, hi)) = selection {
+                if i >= lo && i <= hi {
+                    item = item.style(theme::log_visual_style());
+                }
+            } else if active && i == app.cursor {
+                // Apply selection via ListItem so Span highlight bg is not
+                // overwritten by List::highlight_style's Style::patch.
+                item = item.style(theme::log_selection_style());
+            }
+            item
+        })
         .collect();
-    let highlight_style = if active { theme::log_selection_style() } else { Style::default() };
-    let list = List::new(items).block(block).highlight_style(highlight_style);
+    // No List::highlight_style — selection is painted on the item above.
+    let list = List::new(items).block(block);
     let mut state = ListState::default().with_offset(app.list_offset);
     if !app.visible.is_empty() {
         state.select(Some(app.cursor));
@@ -193,28 +265,34 @@ pub fn render_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let spans: Vec<Span> = if app.groups.groups.is_empty() {
-        vec![Span::styled("(no filter)", Style::default().add_modifier(Modifier::DIM))]
-    } else {
-        app.groups
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(i, g)| {
-                let label = format!(" {} ", g.label);
-                if i == app.group_cursor && active {
-                    Span::styled(label, theme::focus_style())
-                } else {
-                    Span::raw(label)
-                }
-            })
-            .collect()
-    };
+    let labels: Vec<(String, bool)> = app
+        .groups
+        .groups
+        .iter()
+        .map(|g| (g.label.clone(), g.enabled))
+        .collect();
+    let spans = render_group_strip_labels(&labels, app.group_cursor, active, "(no filter)");
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+pub fn render_search_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
+    let active = app.focus == Focus::SearchStrip;
+    let block = rounded_block(theme::numbered_title(2, "Search", active), active);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let labels: Vec<(String, bool)> = app
+        .search_groups
+        .groups
+        .iter()
+        .map(|g| (g.label.clone(), g.enabled))
+        .collect();
+    let spans = render_group_strip_labels(&labels, app.search_cursor, active, "(no search)");
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut Frame, area: Rect) {
-    let block = rounded_block(theme::numbered_title(3, "Input", focused), focused);
+    let block = rounded_block(theme::numbered_title(4, "Input", focused), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -239,25 +317,28 @@ pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
-pub fn render_search_box(app: &App, frame: &mut Frame, area: Rect) {
-    let editing = app.search_draft.is_some();
+pub fn render_search_box(search: &SearchBox, frame: &mut Frame, area: Rect) {
+    let editing = search.editing;
     let block = rounded_block(theme::plain_title("Search", editing), editing);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let mut spans = Vec::new();
-    if let Some(draft) = &app.search_draft {
+    if editing || !search.is_empty() {
         spans.push(Span::styled("/", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
-        spans.push(Span::raw(draft.clone()));
-        spans.push(Span::raw(" "));
-        spans.push(theme::caret(true));
+        for chip in &search.chips {
+            spans.push(Span::styled(
+                format!("[{chip}] "),
+                Style::default().fg(theme::WARNING),
+            ));
+        }
+        spans.push(Span::raw(search.draft.clone()));
+        if editing {
+            spans.push(Span::raw(" "));
+            spans.push(theme::caret(true));
+        }
     } else {
-        let pattern = app
-            .highlight
-            .as_ref()
-            .map(|re| format!("/{}", re.as_str()))
-            .unwrap_or_else(|| "(no highlight)".to_string());
-        spans.push(Span::styled(pattern, Style::default().add_modifier(Modifier::DIM)));
+        spans.push(Span::styled("(no search)", Style::default().add_modifier(Modifier::DIM)));
         spans.push(Span::raw(" "));
         spans.push(theme::caret(false));
     }
@@ -300,10 +381,25 @@ pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     )];
     if app.following {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            " FOLLOWING ",
-            Style::default().fg(Color::Black).bg(theme::SUCCESS).add_modifier(Modifier::BOLD),
-        ));
+        spans.push(theme::status_badge("FOLLOWING", theme::SUCCESS));
+    }
+    if app.visual_anchor.is_some() {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_badge("VISUAL", theme::ACCENT));
+    } else if app.pending_yank {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_badge("y…", theme::WARNING));
+    }
+    if let Some(msg) = &app.status_msg {
+        if msg != "VISUAL" && msg != "y…" {
+            spans.push(Span::raw(" "));
+            let bg = if msg.starts_with("YANK FAILED") {
+                theme::WARNING
+            } else {
+                theme::ACCENT
+            };
+            spans.push(theme::status_badge(msg, bg));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -311,6 +407,7 @@ pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search_model::SearchGroup;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -401,6 +498,39 @@ mod tests {
     }
 
     #[test]
+    fn test_selection_preserves_keyword_highlight_bg() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error here").unwrap())
+            .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["error".into()]).unwrap());
+        app.focus = Focus::LogList;
+        app.cursor = 0;
+
+        let backend = TestBackend::new(80, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
+
+        let expected_hl = theme::highlight_style(0).bg;
+        let buf = terminal.backend().buffer();
+        // Scan the content row for a cell whose bg is the highlight color.
+        let mut found = false;
+        for x in 0..buf.area.width {
+            if buf[(x, 1)].style().bg == expected_hl {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "keyword highlight bg must survive selection overlay");
+    }
+
+    #[test]
     fn test_render_log_list_persists_scroll_offset_when_cursor_moves_within_viewport() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -461,15 +591,16 @@ mod tests {
             "04-02 10:00:00.000  1  1 I Tag     : this message is long enough that it must wrap across more than one physical line when the column width is narrow",
         )
         .unwrap();
-        let lines = render_entry_lines(&row, &None, 40);
+        let lines = render_entry_lines(&row, &[], 40);
         assert!(lines.len() > 1, "a long message should wrap into multiple lines, got {}", lines.len());
     }
 
     #[test]
     fn test_render_entry_lines_highlights_only_matched_keyword() {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred here").unwrap();
-        let highlight = Some(Regex::new("error").unwrap());
-        let lines = render_entry_lines(&row, &highlight, 200);
+        let re = Regex::new("(?i)error").unwrap();
+        let patterns = [(&re, 0usize)];
+        let lines = render_entry_lines(&row, &patterns, 200);
         assert_eq!(lines.len(), 1);
         let matched: Vec<&Span> = lines[0].spans.iter().filter(|s| s.content.as_ref() == "error").collect();
         assert_eq!(matched.len(), 1, "exactly the matched keyword should be its own span");
@@ -479,5 +610,45 @@ mod tests {
             other_span_styles.iter().all(|s| *s != matched[0].style),
             "non-matched spans must not share the highlight style"
         );
+    }
+
+    #[test]
+    fn test_render_entry_lines_multicolor_patterns() {
+        let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : foo and bar here").unwrap();
+        let re0 = Regex::new("(?i)foo").unwrap();
+        let re1 = Regex::new("(?i)bar").unwrap();
+        let patterns = [(&re0, 0usize), (&re1, 1usize)];
+        let lines = render_entry_lines(&row, &patterns, 200);
+        let foo = lines[0].spans.iter().find(|s| s.content.as_ref() == "foo").unwrap();
+        let bar = lines[0].spans.iter().find(|s| s.content.as_ref() == "bar").unwrap();
+        assert_eq!(foo.style, theme::highlight_style(0));
+        assert_eq!(bar.style, theme::highlight_style(1));
+        assert_ne!(foo.style.bg, bar.style.bg);
+    }
+
+    #[test]
+    fn test_render_entry_lines_uses_natural_tag_width_no_fixed_padding() {
+        let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Ab   : msg").unwrap();
+        let lines = render_entry_lines(&row, &[], 200);
+        let tag_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().starts_with("Ab"))
+            .expect("tag span");
+        assert_eq!(tag_span.content.as_ref(), "Ab ", "short tag must not be padded to 16 columns");
+    }
+
+    #[test]
+    fn test_render_entry_lines_continuation_indent_matches_header_width() {
+        let row = EntryRow::from_line(
+            "04-02 10:00:00.000  1  1 I Short : this message is long enough that it must wrap across more than one physical line when the column width is narrow",
+        )
+        .unwrap();
+        let lines = render_entry_lines(&row, &[], 40);
+        assert!(lines.len() > 1);
+        let header_width: usize = lines[0].spans.iter().take(4).map(|s| s.content.chars().count()).sum();
+        let cont = lines[1].spans[0].content.as_ref();
+        assert!(cont.chars().all(|c| c == ' '), "continuation prefix should be spaces");
+        assert_eq!(cont.chars().count(), header_width);
     }
 }

@@ -16,19 +16,19 @@ pub const FILTER_MATCH: Rgb = (180, 140, 50);
 /// Background for the `V` level badge.
 pub const VERBOSE_BG: Rgb = (100, 100, 100);
 
-/// 8-color palette cycled through for `--highlight`/ad-hoc keyword matches:
-/// (background, is_foreground_black).
+/// 8-color reading-friendly progressive palette for `--highlight` / TUI
+/// search chips: (background, is_foreground_black). Hue steps ~40–45°;
+/// mid saturation so multiple chips stay distinguishable without neon glare.
 pub const USER_HIGHLIGHT: [(Rgb, bool); 8] = [
-    ((255, 255, 0), true),
-    ((0, 255, 128), true),
-    ((60, 120, 255), false),
-    ((255, 80, 80), false),
-    ((200, 100, 255), false),
-    ((0, 220, 220), true),
-    ((255, 165, 0), true),
-    ((255, 150, 200), true),
+    ((220, 180, 60), true),   // amber
+    ((230, 150, 90), true),   // peach
+    ((210, 100, 100), false), // coral
+    ((190, 90, 140), false),  // rose
+    ((150, 110, 200), false), // lilac
+    ((80, 140, 210), false),  // sky
+    ((60, 170, 160), true),   // teal
+    ((100, 190, 120), true),  // mint
 ];
-
 /// Named badge colors for the level indicator (`" E "` etc.), one variant
 /// per distinct visual treatment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

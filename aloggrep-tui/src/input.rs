@@ -138,7 +138,12 @@ impl InputBox {
             .collect::<Vec<_>>()
             .join(" AND ");
         self.chips.clear();
-        Ok(Some(Group { label, expr, time: None }))
+        Ok(Some(Group {
+            label,
+            expr,
+            time: None,
+            enabled: true,
+        }))
     }
 }
 

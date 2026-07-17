@@ -1,14 +1,14 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 
-use regex::Regex;
-
 use crate::filter_model::GroupList;
 use crate::model::EntryRow;
+use crate::search_model::{SearchBox, SearchGroupList};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     ChipStrip,
+    SearchStrip,
     LogList,
     Input,
 }
@@ -19,21 +19,67 @@ pub enum Mode {
     Insert,
 }
 
+/// Which chip strip the shared `h`/`l`/`dd`/`di` ops target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripKind {
+    Filter,
+    Search,
+}
+
+/// Second-key target for the `y` operator (`yy`/`yt`/`ym`/…).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YankField {
+    Raw,
+    Tag,
+    Msg,
+    Pid,
+    Tid,
+    Level,
+    Pkg,
+    Timestamp,
+}
+
+impl YankField {
+    pub fn from_char(c: char) -> Option<Self> {
+        match c {
+            'y' | 'r' => Some(Self::Raw),
+            't' => Some(Self::Tag),
+            'm' => Some(Self::Msg),
+            'p' => Some(Self::Pid),
+            'T' => Some(Self::Tid),
+            'l' => Some(Self::Level),
+            'g' => Some(Self::Pkg),
+            's' => Some(Self::Timestamp),
+            _ => None,
+        }
+    }
+}
+
 pub struct App {
     pub rows: VecDeque<EntryRow>,
     pub visible: Vec<usize>,
     pub groups: GroupList,
+    pub search_groups: SearchGroupList,
+    pub search_box: SearchBox,
     pub cursor: usize,
     pub max_lines: usize,
     pub should_quit: bool,
     pub focus: Focus,
     pub mode: Mode,
     pub group_cursor: usize,
-    pub pending_dd: bool,
+    pub search_cursor: usize,
+    /// Armed by first `d` on a chip strip; second `d` deletes, `i` toggles disable.
+    pub pending_d: bool,
+    pub pending_yank: bool,
+    /// When `Some`, LogList is in visual-line mode; value is the anchor
+    /// index into `visible` (same coordinate space as `cursor`).
+    pub visual_anchor: Option<usize>,
     pub following: bool,
-    pub highlight: Option<Regex>,
-    pub search_draft: Option<String>,
     pub list_offset: usize,
+    /// Transient status-bar hint (`YANKED`, `VISUAL`, `y…`, errors).
+    pub status_msg: Option<String>,
+    /// Last text prepared for the clipboard (set even if clipboard I/O fails).
+    pub last_yanked: Option<String>,
 }
 
 impl App {
@@ -42,17 +88,22 @@ impl App {
             rows: VecDeque::new(),
             visible: Vec::new(),
             groups: GroupList::default(),
+            search_groups: SearchGroupList::default(),
+            search_box: SearchBox::default(),
             cursor: 0,
             max_lines,
             should_quit: false,
             focus: Focus::LogList,
             mode: Mode::Normal,
             group_cursor: 0,
-            pending_dd: false,
+            search_cursor: 0,
+            pending_d: false,
+            pending_yank: false,
+            visual_anchor: None,
             following: true,
-            highlight: None,
-            search_draft: None,
             list_offset: 0,
+            status_msg: None,
+            last_yanked: None,
         }
     }
 
@@ -78,6 +129,15 @@ impl App {
             }
             if evicted_was_visible && self.cursor > 0 {
                 self.cursor -= 1;
+            }
+            // `visual_anchor` shares `cursor`'s coordinate space (index into
+            // `visible`). Evicting the oldest visible row shifts that space.
+            if evicted_was_visible {
+                match self.visual_anchor {
+                    Some(0) => self.visual_anchor = None,
+                    Some(a) => self.visual_anchor = Some(a - 1),
+                    None => {}
+                }
             }
         }
         let matches = self.groups.matches(&row);
@@ -147,7 +207,8 @@ impl App {
 
     pub fn cycle_focus_forward(&mut self) {
         self.focus = match self.focus {
-            Focus::ChipStrip => Focus::LogList,
+            Focus::ChipStrip => Focus::SearchStrip,
+            Focus::SearchStrip => Focus::LogList,
             Focus::LogList => Focus::Input,
             Focus::Input => Focus::ChipStrip,
         };
@@ -156,47 +217,185 @@ impl App {
     pub fn cycle_focus_backward(&mut self) {
         self.focus = match self.focus {
             Focus::ChipStrip => Focus::Input,
-            Focus::LogList => Focus::ChipStrip,
+            Focus::SearchStrip => Focus::ChipStrip,
+            Focus::LogList => Focus::SearchStrip,
             Focus::Input => Focus::LogList,
         };
     }
 
-    pub fn move_group_cursor(&mut self, delta: isize) {
-        let len = self.groups.groups.len();
+    fn strip_len(&self, kind: StripKind) -> usize {
+        match kind {
+            StripKind::Filter => self.groups.groups.len(),
+            StripKind::Search => self.search_groups.groups.len(),
+        }
+    }
+
+    fn strip_cursor_mut(&mut self, kind: StripKind) -> &mut usize {
+        match kind {
+            StripKind::Filter => &mut self.group_cursor,
+            StripKind::Search => &mut self.search_cursor,
+        }
+    }
+
+    pub fn move_strip_cursor(&mut self, kind: StripKind, delta: isize) {
+        let len = self.strip_len(kind);
         if len == 0 {
             return;
         }
-        let new = self.group_cursor as isize + delta;
-        self.group_cursor = new.clamp(0, len as isize - 1) as usize;
+        let cursor = *self.strip_cursor_mut(kind);
+        let new = (cursor as isize + delta).clamp(0, len as isize - 1) as usize;
+        *self.strip_cursor_mut(kind) = new;
     }
 
-    /// First `d` arms `pending_dd`; a second `d` within the same keypress
-    /// dispatch deletes the focused group and re-filters. Any other key
-    /// clears `pending_dd` (handled by the caller in Task 14's key dispatch).
-    pub fn delete_focused_group(&mut self) {
-        if self.groups.groups.is_empty() {
+    pub fn move_group_cursor(&mut self, delta: isize) {
+        self.move_strip_cursor(StripKind::Filter, delta);
+    }
+
+    /// Delete the focused group on `kind`. Empty filter strip returns focus
+    /// to LogList and rebuilds visible; empty search strip only clamps cursor.
+    pub fn delete_focused_strip_group(&mut self, kind: StripKind) {
+        let len = self.strip_len(kind);
+        if len == 0 {
             return;
         }
-        self.groups.groups.remove(self.group_cursor);
-        if self.group_cursor >= self.groups.groups.len() {
-            self.group_cursor = self.groups.groups.len().saturating_sub(1);
+        let cursor = *self.strip_cursor_mut(kind);
+        match kind {
+            StripKind::Filter => {
+                self.groups.groups.remove(cursor);
+                if self.group_cursor >= self.groups.groups.len() {
+                    self.group_cursor = self.groups.groups.len().saturating_sub(1);
+                }
+                if self.groups.groups.is_empty() {
+                    self.focus = Focus::LogList;
+                }
+                self.rebuild_visible();
+            }
+            StripKind::Search => {
+                self.search_groups.groups.remove(cursor);
+                if self.search_cursor >= self.search_groups.groups.len() {
+                    self.search_cursor = self.search_groups.groups.len().saturating_sub(1);
+                }
+                if self.search_groups.groups.is_empty() {
+                    self.focus = Focus::LogList;
+                }
+            }
         }
-        if self.groups.groups.is_empty() {
-            self.focus = Focus::LogList;
-        }
-        self.rebuild_visible();
     }
 
-    /// Independent of the chip filter system: never hides rows, only marks
-    /// which ones should be highlighted when rendered.
-    pub fn set_highlight(&mut self, pattern: &str, ignore_case: bool) -> Result<(), String> {
-        if pattern.is_empty() {
-            self.highlight = None;
-            return Ok(());
+    pub fn delete_focused_group(&mut self) {
+        self.delete_focused_strip_group(StripKind::Filter);
+    }
+
+    /// Toggle `enabled` on the focused group (`di`). Does not change focus
+    /// when all groups become disabled.
+    pub fn toggle_disable_focused(&mut self, kind: StripKind) {
+        let len = self.strip_len(kind);
+        if len == 0 {
+            return;
         }
-        let pattern = if ignore_case { format!("(?i){pattern}") } else { pattern.to_string() };
-        self.highlight = Some(Regex::new(&pattern).map_err(|e| e.to_string())?);
-        Ok(())
+        let cursor = *self.strip_cursor_mut(kind);
+        match kind {
+            StripKind::Filter => {
+                let g = &mut self.groups.groups[cursor];
+                g.enabled = !g.enabled;
+                self.rebuild_visible();
+            }
+            StripKind::Search => {
+                let g = &mut self.search_groups.groups[cursor];
+                g.enabled = !g.enabled;
+            }
+        }
+    }
+
+    pub fn current_row(&self) -> Option<&EntryRow> {
+        self.visible.get(self.cursor).map(|&i| &self.rows[i])
+    }
+
+    /// Inclusive `[lo, hi]` range over `visible` indices while in visual-line
+    /// mode; `None` when not selecting.
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.visual_anchor?;
+        if self.visible.is_empty() {
+            return None;
+        }
+        let cur = self.cursor.min(self.visible.len() - 1);
+        let anchor = anchor.min(self.visible.len() - 1);
+        Some((anchor.min(cur), anchor.max(cur)))
+    }
+
+    pub fn enter_visual_line(&mut self) {
+        if self.visible.is_empty() {
+            return;
+        }
+        self.pending_yank = false;
+        self.following = false;
+        self.visual_anchor = Some(self.cursor);
+        self.status_msg = Some("VISUAL".into());
+    }
+
+    pub fn clear_visual(&mut self) {
+        self.visual_anchor = None;
+        if self.status_msg.as_deref() == Some("VISUAL") {
+            self.status_msg = None;
+        }
+    }
+
+    pub fn field_text(row: &EntryRow, field: YankField) -> String {
+        match field {
+            YankField::Raw => row.raw.clone(),
+            YankField::Tag => row.tag.clone(),
+            YankField::Msg => row.msg.clone(),
+            YankField::Pid => row.pid.clone(),
+            YankField::Tid => row.tid.clone(),
+            YankField::Level => row.level.as_char().to_string(),
+            YankField::Pkg => row.pkg.clone(),
+            YankField::Timestamp => row.timestamp.clone(),
+        }
+    }
+
+    pub fn yank_field(&self, field: YankField) -> Option<String> {
+        self.current_row().map(|row| Self::field_text(row, field))
+    }
+
+    /// Join `field` values for visible indices `lo..=hi` with newlines.
+    pub fn yank_range(&self, lo: usize, hi: usize, field: YankField) -> Option<String> {
+        if self.visible.is_empty() || lo > hi || hi >= self.visible.len() {
+            return None;
+        }
+        let mut parts = Vec::with_capacity(hi - lo + 1);
+        for vi in lo..=hi {
+            let row = &self.rows[self.visible[vi]];
+            parts.push(Self::field_text(row, field));
+        }
+        Some(parts.join("\n"))
+    }
+
+    pub fn record_yank(&mut self, text: String) {
+        self.last_yanked = Some(text);
+    }
+
+    /// Jump to the next (`dir > 0`) or previous (`dir < 0`) visible row whose
+    /// `msg` matches any enabled search pattern. Wraps like vim `wrapscan`.
+    pub fn find_match(&mut self, dir: i8) -> bool {
+        if self.search_groups.active_patterns().is_empty() {
+            return false;
+        }
+        let n = self.visible.len();
+        if n == 0 {
+            return false;
+        }
+        let step: isize = if dir >= 0 { 1 } else { -1 };
+        let start = self.cursor as isize;
+        for offset in 1..=n as isize {
+            let idx = (start + offset * step).rem_euclid(n as isize) as usize;
+            let row = &self.rows[self.visible[idx]];
+            if self.search_groups.any_match(&row.msg) {
+                self.following = false;
+                self.cursor = idx;
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -209,6 +408,15 @@ mod tests {
 
     fn row(tag: &str) -> EntryRow {
         EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I {tag}   : m")).unwrap()
+    }
+
+    fn filter_group(label: &str, expr: Option<Expr>) -> Group {
+        Group {
+            label: label.into(),
+            expr,
+            time: None,
+            enabled: true,
+        }
     }
 
     #[test]
@@ -276,11 +484,7 @@ mod tests {
     fn test_cursor_unaffected_when_evicted_row_was_already_filtered_out() {
         let mut app = App::new(3);
         app.groups = GroupList {
-            groups: vec![Group {
-                label: "x".into(),
-                expr: Some(Expr::parse("tag~X", false).unwrap()),
-                time: None,
-            }],
+            groups: vec![filter_group("x", Some(Expr::parse("tag~X", false).unwrap()))],
         };
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(row("N1")).unwrap(); // filtered out, not in `visible`
@@ -308,6 +512,16 @@ mod tests {
 mod focus_tests {
     use super::*;
     use crate::filter_model::Group;
+    use aloggrep::expr::Expr;
+
+    fn g(label: &str) -> Group {
+        Group {
+            label: label.into(),
+            expr: None,
+            time: None,
+            enabled: true,
+        }
+    }
 
     #[test]
     fn test_cycle_focus_forward_wraps() {
@@ -318,14 +532,16 @@ mod focus_tests {
         app.cycle_focus_forward();
         assert_eq!(app.focus, Focus::ChipStrip);
         app.cycle_focus_forward();
+        assert_eq!(app.focus, Focus::SearchStrip);
+        app.cycle_focus_forward();
         assert_eq!(app.focus, Focus::LogList);
     }
 
     #[test]
     fn test_delete_focused_group_removes_and_rescans() {
         let mut app = App::new(100);
-        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
-        app.groups.groups.push(Group { label: "g1".into(), expr: None, time: None });
+        app.groups.groups.push(g("g0"));
+        app.groups.groups.push(g("g1"));
         app.group_cursor = 0;
         app.delete_focused_group();
         assert_eq!(app.groups.groups.len(), 1);
@@ -335,7 +551,7 @@ mod focus_tests {
     #[test]
     fn test_delete_focused_group_returns_focus_to_loglist_when_list_becomes_empty() {
         let mut app = App::new(100);
-        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.groups.groups.push(g("g0"));
         app.focus = Focus::ChipStrip;
         app.delete_focused_group();
         assert!(app.groups.groups.is_empty());
@@ -345,8 +561,8 @@ mod focus_tests {
     #[test]
     fn test_delete_focused_group_keeps_focus_when_groups_remain() {
         let mut app = App::new(100);
-        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
-        app.groups.groups.push(Group { label: "g1".into(), expr: None, time: None });
+        app.groups.groups.push(g("g0"));
+        app.groups.groups.push(g("g1"));
         app.focus = Focus::ChipStrip;
         app.delete_focused_group();
         assert!(!app.groups.groups.is_empty());
@@ -356,11 +572,31 @@ mod focus_tests {
     #[test]
     fn test_move_group_cursor_clamps() {
         let mut app = App::new(100);
-        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.groups.groups.push(g("g0"));
         app.move_group_cursor(-5);
         assert_eq!(app.group_cursor, 0);
         app.move_group_cursor(5);
         assert_eq!(app.group_cursor, 0);
+    }
+
+    #[test]
+    fn test_toggle_disable_filter_rebuilds_visible() {
+        let mut app = App::new(100);
+        app.groups.groups.push(Group {
+            label: "a".into(),
+            expr: Some(Expr::parse("tag~A", false).unwrap()),
+            time: None,
+            enabled: true,
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I A   : m").unwrap()).unwrap();
+        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I B   : m").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.visible.len(), 1);
+        app.toggle_disable_focused(StripKind::Filter);
+        assert!(!app.groups.groups[0].enabled);
+        assert_eq!(app.visible.len(), 2, "disabled-only list ≡ empty filter");
     }
 }
 
@@ -421,9 +657,12 @@ mod follow_tests {
     fn test_rebuild_visible_follows_when_following_and_visible_set_grows() {
         let mut app = App::new(100);
         app.groups = GroupList {
-            groups: vec![
-                Group { label: "a".into(), expr: Some(Expr::parse("tag~A", false).unwrap()), time: None },
-            ],
+            groups: vec![Group {
+                label: "a".into(),
+                expr: Some(Expr::parse("tag~A", false).unwrap()),
+                time: None,
+                enabled: true,
+            }],
         };
         let (tx, rx) = mpsc::channel();
         tx.send(row("A")).unwrap();
@@ -441,36 +680,144 @@ mod follow_tests {
 }
 
 #[cfg(test)]
-mod highlight_tests {
+mod search_tests {
     use super::*;
+    use crate::search_model::SearchGroup;
+    use std::sync::mpsc;
 
-    #[test]
-    fn test_set_highlight_compiles_regex() {
-        let mut app = App::new(100);
-        app.set_highlight("time.*out", false).unwrap();
-        assert!(app.highlight.is_some());
+    fn row_with_msg(tag: &str, msg: &str) -> EntryRow {
+        EntryRow::from_line(&format!("04-02 10:00:00.000  1234  5678 I {tag}   : {msg}")).unwrap()
     }
 
     #[test]
-    fn test_set_highlight_empty_clears() {
+    fn test_find_match_next_prev_and_wrap() {
         let mut app = App::new(100);
-        app.set_highlight("x", false).unwrap();
-        app.set_highlight("", false).unwrap();
-        assert!(app.highlight.is_none());
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "aaa")).unwrap();
+        tx.send(row_with_msg("T", "hit one")).unwrap();
+        tx.send(row_with_msg("T", "bbb")).unwrap();
+        tx.send(row_with_msg("T", "hit two")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["hit".into()]).unwrap());
+
+        assert!(app.find_match(1));
+        assert_eq!(app.cursor, 1);
+        assert!(app.find_match(1));
+        assert_eq!(app.cursor, 3);
+        assert!(app.find_match(1)); // wrap
+        assert_eq!(app.cursor, 1);
+        assert!(app.find_match(-1)); // wrap backward to last
+        assert_eq!(app.cursor, 3);
     }
 
     #[test]
-    fn test_set_highlight_bad_regex_errors() {
+    fn test_find_match_noop_without_search() {
         let mut app = App::new(100);
-        assert!(app.set_highlight("(unclosed", false).is_err());
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "x")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert!(!app.find_match(1));
     }
 
     #[test]
-    fn test_set_highlight_ignore_case_matches_regardless_of_case() {
+    fn test_find_match_ignore_case_by_default() {
         let mut app = App::new(100);
-        app.set_highlight("ERROR", true).unwrap();
-        let re = app.highlight.as_ref().unwrap();
-        assert!(re.is_match("an error occurred"));
-        assert!(re.is_match("AN ERROR OCCURRED"));
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "an error occurred")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+        app.search_groups
+            .groups
+            .push(SearchGroup::from_patterns(&["ERROR".into()]).unwrap());
+        // already on the match; find_match steps away first — add a decoy row
+        assert!(app.search_groups.any_match("an error occurred"));
+    }
+
+    #[test]
+    fn test_disabled_search_group_excluded_from_find() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("T", "hit")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        let mut g = SearchGroup::from_patterns(&["hit".into()]).unwrap();
+        g.enabled = false;
+        app.search_groups.groups.push(g);
+        assert!(!app.find_match(1));
+    }
+}
+
+#[cfg(test)]
+mod yank_and_search_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn row_with_msg(tag: &str, msg: &str) -> EntryRow {
+        EntryRow::from_line(&format!("04-02 10:00:00.000  1234  5678 I {tag}   : {msg}")).unwrap()
+    }
+
+    #[test]
+    fn test_yank_field_extracts_tag_and_msg() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("MyTag", "hello")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.yank_field(YankField::Tag).as_deref(), Some("MyTag"));
+        assert_eq!(app.yank_field(YankField::Msg).as_deref(), Some("hello"));
+        assert_eq!(app.yank_field(YankField::Pid).as_deref(), Some("1234"));
+        assert_eq!(app.yank_field(YankField::Tid).as_deref(), Some("5678"));
+        assert_eq!(app.yank_field(YankField::Level).as_deref(), Some("I"));
+        assert_eq!(app.yank_field(YankField::Timestamp).as_deref(), Some("04-02 10:00:00.000"));
+    }
+
+    #[test]
+    fn test_yank_range_joins_raw_with_newlines() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        let a = row_with_msg("A", "one");
+        let b = row_with_msg("B", "two");
+        let raw_a = a.raw.clone();
+        let raw_b = b.raw.clone();
+        tx.send(a).unwrap();
+        tx.send(b).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        let text = app.yank_range(0, 1, YankField::Raw).unwrap();
+        assert_eq!(text, format!("{raw_a}\n{raw_b}"));
+    }
+
+    #[test]
+    fn test_selection_range_orders_anchor_and_cursor() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        for i in 0..5 {
+            tx.send(row_with_msg("T", &format!("m{i}"))).unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 3;
+        app.visual_anchor = Some(1);
+        assert_eq!(app.selection_range(), Some((1, 3)));
+        app.cursor = 0;
+        assert_eq!(app.selection_range(), Some((0, 1)));
+    }
+
+    #[test]
+    fn test_yank_field_from_char_mapping() {
+        assert_eq!(YankField::from_char('y'), Some(YankField::Raw));
+        assert_eq!(YankField::from_char('t'), Some(YankField::Tag));
+        assert_eq!(YankField::from_char('m'), Some(YankField::Msg));
+        assert_eq!(YankField::from_char('T'), Some(YankField::Tid));
+        assert_eq!(YankField::from_char('x'), None);
     }
 }

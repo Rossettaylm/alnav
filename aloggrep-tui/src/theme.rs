@@ -38,12 +38,19 @@ pub fn level_badge_style(level: Level) -> Style {
     }
 }
 
-/// One of the 8 CLI highlight-palette colors, cycled by index. The `/`
-/// search box always uses index 0 (same as a single `--highlight PATTERN`).
+/// One of the 8 reading-friendly highlight-palette colors, cycled by index.
+/// TUI search chips assign a progressive index per pattern; CLI `--highlight`
+/// does the same.
 pub fn highlight_style(idx: usize) -> Style {
     let ((r, g, b), fg_black) = logcolor::USER_HIGHLIGHT[idx % logcolor::USER_HIGHLIGHT.len()];
     let fg = if fg_black { Color::Black } else { Color::White };
     Style::default().fg(fg).bg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)
+}
+
+/// Soft-disabled chip/group label (`di`): dim gray, distinct from focus and
+/// from normal labels.
+pub fn disabled_chip_style() -> Style {
+    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
 }
 
 /// Chip field -> accent color, shared by the input box, popup, and (once
@@ -86,9 +93,9 @@ pub fn border_style(active: bool) -> Style {
     }
 }
 
-/// Border title for one of the three numbered, Tab-cyclable regions
-/// (ChipStrip/LogList/Input): a digit badge followed by a label, both
-/// styled by whether the region is currently focused.
+/// Border title for a numbered, Tab-cyclable region (Filter/Search/Log/Input):
+/// a digit badge followed by a label, both styled by whether the region is
+/// currently focused.
 pub fn numbered_title(number: u8, label: &str, active: bool) -> Line<'static> {
     let badge_style = if active { focus_style() } else { Style::default().add_modifier(Modifier::DIM) };
     let label_style = if active {
@@ -125,10 +132,26 @@ pub fn caret(is_editing: bool) -> Span<'static> {
 }
 
 /// Selected-row background in the log list — a quiet, low-contrast gray
-/// instead of a full reverse-video block. Only applied while the log list
-/// itself has keyboard focus; see `ui::render_log_list`.
+/// instead of a full reverse-video block. Applied via `ListItem::style` (not
+/// `List::highlight_style`) so keyword highlight spans keep their own bg;
+/// see `ui::render_log_list`.
 pub fn log_selection_style() -> Style {
     Style::default().bg(Color::DarkGray)
+}
+
+/// Background for rows inside a visual-line selection (`V` … `y`). Distinct
+/// from `log_selection_style` so the range reads as a block, not a single
+/// cursor highlight.
+pub fn log_visual_style() -> Style {
+    Style::default().bg(Color::Rgb(30, 60, 70))
+}
+
+/// Reverse badge used for transient status hints (FOLLOWING / YANKED / VISUAL).
+pub fn status_badge(label: &str, bg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default().fg(Color::Black).bg(bg).add_modifier(Modifier::BOLD),
+    )
 }
 
 #[cfg(test)]
@@ -140,5 +163,10 @@ mod tests {
         let style = log_selection_style();
         assert_eq!(style.bg, Some(Color::DarkGray));
         assert!(!style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn test_log_visual_style_differs_from_selection() {
+        assert_ne!(log_visual_style().bg, log_selection_style().bg);
     }
 }

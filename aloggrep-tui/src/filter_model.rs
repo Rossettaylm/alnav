@@ -9,6 +9,9 @@ pub struct Group {
     pub label: String,
     pub expr: Option<Expr>,
     pub time: Option<TimeBound>,
+    /// When false, the group is ignored by `GroupList::matches` (soft disable
+    /// via `di`; distinct from deleting with `dd`).
+    pub enabled: bool,
 }
 
 impl Group {
@@ -59,6 +62,7 @@ impl TimeBound {
 }
 
 /// OR'd list of groups. Empty list = no filtering (everything visible).
+/// All-disabled is treated the same as empty (everything visible).
 #[derive(Default)]
 pub struct GroupList {
     pub groups: Vec<Group>,
@@ -66,7 +70,17 @@ pub struct GroupList {
 
 impl GroupList {
     pub fn matches(&self, row: &EntryRow) -> bool {
-        self.groups.is_empty() || self.groups.iter().any(|g| g.matches(row))
+        let mut any_enabled = false;
+        for g in &self.groups {
+            if !g.enabled {
+                continue;
+            }
+            any_enabled = true;
+            if g.matches(row) {
+                return true;
+            }
+        }
+        !any_enabled
     }
 }
 
@@ -82,6 +96,15 @@ mod tests {
         .unwrap()
     }
 
+    fn group(label: &str, expr: Option<Expr>) -> Group {
+        Group {
+            label: label.into(),
+            expr,
+            time: None,
+            enabled: true,
+        }
+    }
+
     #[test]
     fn test_empty_group_list_matches_everything() {
         let list = GroupList::default();
@@ -91,7 +114,9 @@ mod tests {
     #[test]
     fn test_single_group_and_within() {
         let expr = Expr::parse("tag~A and level>=W", false).unwrap();
-        let list = GroupList { groups: vec![Group { label: "tag:A AND level:W".into(), expr: Some(expr), time: None }] };
+        let list = GroupList {
+            groups: vec![group("tag:A AND level:W", Some(expr))],
+        };
         assert!(list.matches(&row("A", "m", "E")));
         assert!(!list.matches(&row("A", "m", "I")));
         assert!(!list.matches(&row("B", "m", "E")));
@@ -102,10 +127,7 @@ mod tests {
         let g1 = Expr::parse("tag~A", false).unwrap();
         let g2 = Expr::parse("tag~B", false).unwrap();
         let list = GroupList {
-            groups: vec![
-                Group { label: "tag:A".into(), expr: Some(g1), time: None },
-                Group { label: "tag:B".into(), expr: Some(g2), time: None },
-            ],
+            groups: vec![group("tag:A", Some(g1)), group("tag:B", Some(g2))],
         };
         assert!(list.matches(&row("A", "m", "I")));
         assert!(list.matches(&row("B", "m", "I")));
@@ -114,9 +136,55 @@ mod tests {
 
     #[test]
     fn test_time_bound_since_until() {
-        let bound = TimeBound { since: Some("10:00:00".into()), until: Some("10:00:00".into()) };
-        let group = Group { label: "since/until".into(), expr: None, time: Some(bound) };
-        let list = GroupList { groups: vec![group] };
+        let bound = TimeBound {
+            since: Some("10:00:00".into()),
+            until: Some("10:00:00".into()),
+        };
+        let list = GroupList {
+            groups: vec![Group {
+                label: "since/until".into(),
+                expr: None,
+                time: Some(bound),
+                enabled: true,
+            }],
+        };
         assert!(list.matches(&row("A", "m", "I"))); // entry ts is exactly 10:00:00.000
+    }
+
+    #[test]
+    fn test_disabled_group_skipped() {
+        let expr = Expr::parse("tag~A", false).unwrap();
+        let list = GroupList {
+            groups: vec![Group {
+                label: "tag:A".into(),
+                expr: Some(expr),
+                time: None,
+                enabled: false,
+            }],
+        };
+        // all-disabled ≡ empty → everything visible
+        assert!(list.matches(&row("B", "m", "I")));
+    }
+
+    #[test]
+    fn test_disabled_among_enabled_only_active_match() {
+        let list = GroupList {
+            groups: vec![
+                Group {
+                    label: "tag:A".into(),
+                    expr: Some(Expr::parse("tag~A", false).unwrap()),
+                    time: None,
+                    enabled: false,
+                },
+                Group {
+                    label: "tag:B".into(),
+                    expr: Some(Expr::parse("tag~B", false).unwrap()),
+                    time: None,
+                    enabled: true,
+                },
+            ],
+        };
+        assert!(!list.matches(&row("A", "m", "I")));
+        assert!(list.matches(&row("B", "m", "I")));
     }
 }

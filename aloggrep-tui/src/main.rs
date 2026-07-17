@@ -3,6 +3,7 @@ mod filter_model;
 mod ingest;
 mod input;
 mod model;
+mod search_model;
 mod theme;
 mod ui;
 
@@ -58,6 +59,7 @@ struct Cli {
     #[arg(long, value_name = "TIME")]
     until: Option<String>,
 
+    /// Accepted for CLI compatibility; TUI filter/search are always case-insensitive.
     #[arg(short = 'i', long)]
     ignore_case: bool,
 
@@ -75,7 +77,8 @@ struct Cli {
 }
 
 fn initial_group(cli: &Cli) -> Result<GroupList, String> {
-    let expr = Expr::from_filters(&cli.tag, &cli.msg, &cli.pkg, &cli.pid, &cli.tid, cli.level.as_deref(), cli.ignore_case)?;
+    // TUI always compiles filters case-insensitively (CLI `-i` is a no-op).
+    let expr = Expr::from_filters(&cli.tag, &cli.msg, &cli.pkg, &cli.pid, &cli.tid, cli.level.as_deref(), true)?;
     let time = if cli.since.is_some() || cli.until.is_some() {
         Some(TimeBound { since: cli.since.clone(), until: cli.until.clone() })
     } else {
@@ -94,7 +97,14 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
     if let Some(s) = &cli.since { label_parts.push(format!("since:{s}")); }
     if let Some(u) = &cli.until { label_parts.push(format!("until:{u}")); }
     let label = if label_parts.is_empty() { "(startup filter)".to_string() } else { label_parts.join(" AND ") };
-    Ok(GroupList { groups: vec![Group { label, expr, time }] })
+    Ok(GroupList {
+        groups: vec![Group {
+            label,
+            expr,
+            time,
+            enabled: true,
+        }],
+    })
 }
 
 #[cfg(test)]
@@ -219,7 +229,8 @@ fn main() -> Result<(), String> {
     };
 
     let mut input = input::InputBox::default();
-    let result = run(&mut terminal, &mut app, &mut input, &rx, cli.ignore_case);
+    let _ = cli.ignore_case; // retained for CLI compat; TUI always ignore-case
+    let result = run(&mut terminal, &mut app, &mut input, &rx);
 
     let disable_result = disable_raw_mode().map_err(|e| e.to_string());
     let leave_result = execute!(io::stdout(), LeaveAlternateScreen, event::DisableMouseCapture).map_err(|e| e.to_string());
@@ -229,14 +240,30 @@ fn main() -> Result<(), String> {
     // _hdc_child_guard drops here at end of main(), killing the child if not already killed
 }
 
-/// Anchors the field-candidate dropdown right below the input box's bottom
-/// border, clamped so it never draws past the terminal's actual height.
-fn popup_rect(input_area: Rect, frame_area: Rect, match_count: usize) -> Rect {
-    let below = input_area.y + input_area.height;
-    let max_height = frame_area.height.saturating_sub(below).max(1);
-    let height = (match_count.clamp(1, 6) as u16 + 2).min(max_height);
+/// Anchors the field-candidate dropdown just above the input box's top
+/// border (covering the bottom of the log area), clamped to the space
+/// available above the input. The region below Input is only Search+status
+/// (~4 rows), which is too short for a usable candidate list.
+fn popup_rect(input_area: Rect, _frame_area: Rect, match_count: usize) -> Rect {
+    let desired = match_count.clamp(1, 6) as u16 + 2;
+    let height = desired.min(input_area.y).max(1);
     let width = input_area.width.clamp(12, 28);
-    Rect { x: input_area.x, y: below, width, height }
+    let y = input_area.y.saturating_sub(height);
+    Rect { x: input_area.x, y, width, height }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .map_err(|e| e.to_string())
+}
+
+fn apply_yank(app: &mut App, text: String) {
+    app.record_yank(text.clone());
+    app.status_msg = match copy_to_clipboard(&text) {
+        Ok(()) => Some("YANKED".into()),
+        Err(e) => Some(format!("YANK FAILED: {e}")),
+    };
 }
 
 fn run<B: ratatui::backend::Backend>(
@@ -244,7 +271,6 @@ fn run<B: ratatui::backend::Backend>(
     app: &mut App,
     input: &mut input::InputBox,
     rx: &std::sync::mpsc::Receiver<model::EntryRow>,
-    ignore_case: bool,
 ) -> Result<(), String> {
     use app::Mode;
 
@@ -253,18 +279,21 @@ fn run<B: ratatui::backend::Backend>(
 
         terminal
             .draw(|frame| {
-                let [chip_area, log_area, input_area, search_area, status_area] = Layout::vertical([
-                    Constraint::Length(3),
-                    Constraint::Fill(1),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(1),
-                ])
-                .areas(frame.area());
-                ui::render_chip_strip(app, frame, chip_area);
+                let [filter_area, search_strip_area, log_area, input_area, search_area, status_area] =
+                    Layout::vertical([
+                        Constraint::Length(3),
+                        Constraint::Length(3),
+                        Constraint::Fill(1),
+                        Constraint::Length(3),
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                    ])
+                    .areas(frame.area());
+                ui::render_chip_strip(app, frame, filter_area);
+                ui::render_search_chip_strip(app, frame, search_strip_area);
                 ui::render_log_list(app, frame, log_area);
                 ui::render_input_box(input, app.mode, app.focus == app::Focus::Input, frame, input_area);
-                ui::render_search_box(app, frame, search_area);
+                ui::render_search_box(&app.search_box, frame, search_area);
                 ui::render_status_bar(app, frame, status_area);
                 if let Some(popup) = &input.popup {
                     let rect = popup_rect(input_area, frame.area(), popup.matches().len());
@@ -288,12 +317,10 @@ fn run<B: ratatui::backend::Backend>(
             _ => continue,
         };
 
-        // The `/` search draft is checked before Ctrl+C (and before the
-        // Normal/Insert dispatch below) so that Ctrl+C while typing a search
-        // query cancels the draft like Esc does, instead of falling through
-        // to the Ctrl+C handling below and quitting the app in Mode::Normal.
-        if app.search_draft.is_some() {
-            handle_search_draft_key(app, key, ignore_case);
+        // Search-box editing is checked before Ctrl+C / Normal/Insert so that
+        // Ctrl+C cancels the draft like Esc, instead of quitting in Normal.
+        if app.search_box.editing {
+            handle_search_box_key(app, key);
             continue;
         }
 
@@ -328,7 +355,7 @@ fn run<B: ratatui::backend::Backend>(
 
         match app.mode {
             Mode::Normal => handle_normal_key(app, input, key.code),
-            Mode::Insert => handle_insert_key(app, input, key.code, ignore_case)?,
+            Mode::Insert => handle_insert_key(app, input, key.code)?,
         }
     }
     Ok(())
@@ -360,7 +387,8 @@ const MOUSE_SCROLL_STEP: isize = 3;
 /// ignored in this pass (no click-to-focus yet — see the design doc's
 /// "Mouse wheel scrolling" section for why that's out of scope here). The
 /// wheel always targets the log list regardless of which region currently
-/// has keyboard focus.
+/// has keyboard focus. While visual-line is active, scrolling extends the
+/// selection the same way `j`/`k` do.
 fn handle_mouse_event(app: &mut App, mouse: event::MouseEvent) {
     match mouse.kind {
         event::MouseEventKind::ScrollDown => app.move_cursor_manual(MOUSE_SCROLL_STEP),
@@ -370,40 +398,165 @@ fn handle_mouse_event(app: &mut App, mouse: event::MouseEvent) {
 }
 
 /// Independent of `handle_normal_key`/`handle_insert_key`/`handle_ctrl_c`:
-/// dispatched before any of them while `app.search_draft` is `Some`. Ctrl+C
-/// here cancels the draft (like Esc), not quit — same "abort current line"
-/// convention as `handle_ctrl_c`. An invalid regex on Enter is silently
-/// ignored rather than propagated, so a search-box typo can't end the
-/// session or affect the previously active highlight (if any).
-fn handle_search_draft_key(app: &mut App, key: event::KeyEvent, ignore_case: bool) {
-    let Some(draft) = &mut app.search_draft else { return };
+/// dispatched before any of them while `app.search_box.editing`. Ctrl+C
+/// here cancels the draft (like Esc), not quit. Invalid regex on Enter is
+/// silently ignored so a typo can't end the session or drop existing groups.
+fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
     let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Enter => {
-            let pattern = draft.clone();
-            app.search_draft = None;
-            let _ = app.set_highlight(&pattern, ignore_case);
-            app.focus = app::Focus::LogList;
+            match app.search_box.build_group() {
+                Ok(Some(group)) => {
+                    app.search_groups.groups.push(group);
+                    app.search_box.clear();
+                    app.focus = app::Focus::LogList;
+                }
+                Ok(None) => {
+                    // empty Enter: no-op (stay editing)
+                }
+                Err(()) => {
+                    // bad regex: exit editing, keep prior search groups
+                    app.search_box.clear();
+                    app.focus = app::Focus::LogList;
+                }
+            }
         }
         KeyCode::Esc => {
-            app.search_draft = None;
+            app.search_box.clear();
             app.focus = app::Focus::LogList;
         }
         _ if is_ctrl_c => {
-            app.search_draft = None;
+            app.search_box.clear();
             app.focus = app::Focus::LogList;
         }
-        KeyCode::Backspace => { draft.pop(); }
-        KeyCode::Char(c) => draft.push(c),
+        KeyCode::Char(' ') => app.search_box.commit_draft_as_chip(),
+        KeyCode::Backspace => app.search_box.backspace(),
+        KeyCode::Char(c) => app.search_box.push_char(c),
         _ => {}
     }
 }
 
-fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
-    use app::Focus;
+fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> bool {
+    use app::StripKind;
+    if !matches!(
+        (kind, app.focus),
+        (StripKind::Filter, app::Focus::ChipStrip) | (StripKind::Search, app::Focus::SearchStrip)
+    ) {
+        return false;
+    }
+    if app.pending_d {
+        match code {
+            KeyCode::Char('d') => {
+                app.delete_focused_strip_group(kind);
+                app.pending_d = false;
+                return true;
+            }
+            KeyCode::Char('i') => {
+                app.toggle_disable_focused(kind);
+                app.pending_d = false;
+                return true;
+            }
+            _ => {
+                app.pending_d = false;
+                return false;
+            }
+        }
+    }
+    if code == KeyCode::Char('d') {
+        app.pending_d = true;
+        return true;
+    }
+    false
+}
 
+fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
+    use app::{Focus, StripKind, YankField};
+
+    // Visual-line: handle selection motions / yank before anything else.
+    if app.visual_anchor.is_some() && app.focus == Focus::LogList {
+        match code {
+            KeyCode::Char('j') => {
+                app.move_cursor_manual(1);
+                return;
+            }
+            KeyCode::Char('k') => {
+                app.move_cursor_manual(-1);
+                return;
+            }
+            KeyCode::Char('J') => {
+                app.move_cursor_manual(7);
+                return;
+            }
+            KeyCode::Char('K') => {
+                app.move_cursor_manual(-7);
+                return;
+            }
+            KeyCode::Char('y') => {
+                if let Some((lo, hi)) = app.selection_range() {
+                    if let Some(text) = app.yank_range(lo, hi, YankField::Raw) {
+                        apply_yank(app, text);
+                    }
+                }
+                app.clear_visual();
+                return;
+            }
+            KeyCode::Char('Y') => {
+                if let Some((lo, hi)) = app.selection_range() {
+                    if let Some(text) = app.yank_range(lo, hi, YankField::Msg) {
+                        apply_yank(app, text);
+                    }
+                }
+                app.clear_visual();
+                return;
+            }
+            KeyCode::Esc => {
+                app.clear_visual();
+                app.focus = Focus::LogList;
+                return;
+            }
+            _ => {
+                app.clear_visual();
+                // fall through so the key still does its Normal action
+            }
+        }
+    }
+
+    // Yank operator pending: consume the second key (or Esc) and return.
+    if app.pending_yank {
+        app.pending_yank = false;
+        if app.focus == Focus::LogList {
+            match code {
+                KeyCode::Esc => {
+                    app.status_msg = None;
+                    return;
+                }
+                KeyCode::Char(c) => {
+                    if let Some(field) = YankField::from_char(c) {
+                        if let Some(text) = app.yank_field(field) {
+                            apply_yank(app, text);
+                        }
+                    } else {
+                        app.status_msg = None;
+                    }
+                    return;
+                }
+                _ => {
+                    app.status_msg = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    // Filter / Search strip: `dd` delete, `di` toggle disable.
+    if handle_strip_d_chord(app, StripKind::Filter, code) {
+        return;
+    }
+    if handle_strip_d_chord(app, StripKind::Search, code) {
+        return;
+    }
     if code != KeyCode::Char('d') {
-        app.pending_dd = false;
+        app.pending_d = false;
     }
 
     match (app.focus, code) {
@@ -411,42 +564,56 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (_, KeyCode::Tab) => app.cycle_focus_forward(),
         (_, KeyCode::BackTab) => app.cycle_focus_backward(),
         (_, KeyCode::Char('1')) => app.focus = Focus::ChipStrip,
-        (_, KeyCode::Char('2')) => app.focus = Focus::LogList,
-        (_, KeyCode::Char('3')) => app.focus = Focus::Input,
+        (_, KeyCode::Char('2')) => app.focus = Focus::SearchStrip,
+        (_, KeyCode::Char('3')) => app.focus = Focus::LogList,
+        (_, KeyCode::Char('4')) => app.focus = Focus::Input,
         (_, KeyCode::Esc) => app.focus = Focus::LogList,
         (Focus::LogList, KeyCode::Char('j')) => app.move_cursor_manual(1),
         (Focus::LogList, KeyCode::Char('k')) => app.move_cursor_manual(-1),
         (Focus::LogList, KeyCode::Char('J')) => app.move_cursor_manual(7),
         (Focus::LogList, KeyCode::Char('K')) => app.move_cursor_manual(-7),
-        (Focus::LogList, KeyCode::Char('g')) => { app.following = false; app.jump_top(); }
+        (Focus::LogList, KeyCode::Char('g')) => {
+            app.following = false;
+            app.jump_top();
+        }
         (Focus::LogList, KeyCode::Char('G')) => app.jump_bottom_resume_follow(),
-        (Focus::ChipStrip, KeyCode::Char('h')) => app.move_group_cursor(-1),
-        (Focus::ChipStrip, KeyCode::Char('l')) => app.move_group_cursor(1),
-        (Focus::ChipStrip, KeyCode::Char('d')) => {
-            if app.pending_dd {
-                app.delete_focused_group();
-                app.pending_dd = false;
-            } else {
-                app.pending_dd = true;
+        (Focus::LogList, KeyCode::Char('y')) => {
+            app.pending_yank = true;
+            app.status_msg = Some("y…".into());
+        }
+        (Focus::LogList, KeyCode::Char('Y')) => {
+            if let Some(text) = app.yank_field(YankField::Msg) {
+                apply_yank(app, text);
             }
         }
+        (Focus::LogList, KeyCode::Char('V')) => app.enter_visual_line(),
+        (Focus::LogList, KeyCode::Char('n')) => {
+            let _ = app.find_match(1);
+        }
+        (Focus::LogList, KeyCode::Char('N')) => {
+            let _ = app.find_match(-1);
+        }
+        (Focus::ChipStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Filter, -1),
+        (Focus::ChipStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Filter, 1),
+        (Focus::SearchStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Search, -1),
+        (Focus::SearchStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Search, 1),
         // Esc and Ctrl+C (when no popup is open) are the two Insert->Normal
         // transitions; both reset *input first.
         (_, KeyCode::Char('a') | KeyCode::Char('i') | KeyCode::Char('o')) => {
             app.focus = Focus::Input;
             app.mode = app::Mode::Insert;
         }
-        (_, KeyCode::Char('/')) => app.search_draft = Some(String::new()),
+        (_, KeyCode::Char('/')) => {
+            app.search_box.editing = true;
+            if app.search_box.chips.is_empty() && app.search_box.draft.is_empty() {
+                // fresh session
+            }
+        }
         _ => {}
     }
 }
 
-fn handle_insert_key(
-    app: &mut App,
-    input: &mut input::InputBox,
-    code: KeyCode,
-    ignore_case: bool,
-) -> Result<(), String> {
+fn handle_insert_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) -> Result<(), String> {
     if input.popup.is_some() {
         match code {
             KeyCode::Up => input.popup.as_mut().unwrap().move_selection(-1),
@@ -463,6 +630,7 @@ fn handle_insert_key(
     // Tab/BackTab intentionally do nothing mid-Insert. Esc always returns
     // focus to the log list; Enter does the same, but only when it actually
     // completes a filter group (build_group returns Some).
+    // Filter chips always compile case-insensitively.
     match code {
         KeyCode::Esc => {
             *input = input::InputBox::default();
@@ -471,7 +639,7 @@ fn handle_insert_key(
         }
         KeyCode::Char('/') => input.open_popup(),
         KeyCode::Enter => {
-            if let Some(group) = input.build_group(ignore_case)? {
+            if let Some(group) = input.build_group(true)? {
                 app.groups.groups.push(group);
                 app.rebuild_visible();
                 app.mode = app::Mode::Normal;
@@ -491,12 +659,23 @@ mod dispatch_tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     #[test]
-    fn test_popup_rect_anchors_below_input_and_clamps_to_frame_height() {
+    fn test_popup_rect_anchors_above_input_and_clamps_to_space_above() {
         let input_area = Rect { x: 0, y: 10, width: 40, height: 3 };
         let frame_area = Rect { x: 0, y: 0, width: 80, height: 14 };
         let rect = popup_rect(input_area, frame_area, 20); // way more matches than fit
-        assert_eq!(rect.y, 13, "popup should start right below the input box's bottom border");
-        assert!(rect.y + rect.height <= frame_area.height, "popup must not draw past the frame");
+        // desired = min(6,20)+2 = 8; space above = 10; height = 8; y = 10-8 = 2
+        assert_eq!(rect.height, 8);
+        assert_eq!(rect.y, 2, "popup should sit directly above the input box");
+        assert!(rect.y + rect.height <= input_area.y, "popup must not overlap the input box");
+    }
+
+    #[test]
+    fn test_popup_rect_clamps_when_little_space_above() {
+        let input_area = Rect { x: 0, y: 3, width: 40, height: 3 };
+        let frame_area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let rect = popup_rect(input_area, frame_area, 6);
+        assert_eq!(rect.height, 3);
+        assert_eq!(rect.y, 0);
     }
 
     #[test]
@@ -513,7 +692,7 @@ mod dispatch_tests {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
 
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('3'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('4'));
         assert_eq!(app.focus, app::Focus::Input);
         assert_eq!(app.mode, app::Mode::Normal, "number keys must not start editing");
 
@@ -521,6 +700,9 @@ mod dispatch_tests {
         assert_eq!(app.focus, app::Focus::ChipStrip);
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('2'));
+        assert_eq!(app.focus, app::Focus::SearchStrip);
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('3'));
         assert_eq!(app.focus, app::Focus::LogList);
     }
 
@@ -606,7 +788,7 @@ mod dispatch_tests {
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         input.push_char('x');
-        handle_insert_key(&mut app, &mut input, KeyCode::Esc, false).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Esc).unwrap();
         assert_eq!(app.mode, app::Mode::Normal);
         assert_eq!(app.focus, app::Focus::LogList, "Esc should also return focus to the log list");
         assert!(input.is_empty());
@@ -618,7 +800,7 @@ mod dispatch_tests {
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         input.push_char('x');
-        handle_insert_key(&mut app, &mut input, KeyCode::Enter, false).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
         assert_eq!(app.groups.groups.len(), 1);
         assert_eq!(app.mode, app::Mode::Normal, "adding a group should behave like Esc: back to Normal");
         assert_eq!(app.focus, app::Focus::LogList, "adding a group should jump focus back to the log list");
@@ -630,74 +812,134 @@ mod dispatch_tests {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
-        handle_insert_key(&mut app, &mut input, KeyCode::Enter, false).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
         assert!(app.groups.groups.is_empty(), "empty draft must not build a group");
         assert_eq!(app.mode, app::Mode::Insert, "empty-Enter no-op must not touch mode");
         assert_eq!(app.focus, app::Focus::Input, "empty-Enter no-op must not touch focus");
     }
 
     #[test]
+    fn test_filter_build_group_ignore_case_by_default() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.set_field(input::ChipField::Tag);
+        for c in "mytag".chars() {
+            input.push_char(c);
+        }
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        let row = crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I MyTag   : m").unwrap();
+        assert!(app.groups.matches(&row), "filter chips must ignore case by default");
+    }
+
+    #[test]
     fn test_dd_chord_requires_two_consecutive_d_presses() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
-        app.groups.groups.push(Group { label: "g0".into(), expr: None, time: None });
+        app.groups.groups.push(Group {
+            label: "g0".into(),
+            expr: None,
+            time: None,
+            enabled: true,
+        });
         app.focus = app::Focus::ChipStrip;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
-        assert!(app.pending_dd);
+        assert!(app.pending_d);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('j')); // unrelated key in between
-        assert!(!app.pending_dd, "pending_dd should clear on a non-d key");
+        assert!(!app.pending_d, "pending_d should clear on a non-d key");
         assert_eq!(app.groups.groups.len(), 1, "group should NOT be deleted");
     }
 
     #[test]
-    fn test_search_draft_enter_applies_highlight_and_clears_draft() {
+    fn test_di_toggles_filter_group_disabled() {
         let mut app = App::new(100);
-        app.search_draft = Some("hello".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false);
-        assert!(app.search_draft.is_none());
-        assert!(app.highlight.is_some());
+        let mut input = input::InputBox::default();
+        app.groups.groups.push(Group {
+            label: "g0".into(),
+            expr: None,
+            time: None,
+            enabled: true,
+        });
+        app.focus = app::Focus::ChipStrip;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+        assert!(!app.groups.groups[0].enabled);
+        assert_eq!(app.mode, app::Mode::Normal, "di must not enter Insert");
+        assert_eq!(app.focus, app::Focus::ChipStrip);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+        assert!(app.groups.groups[0].enabled);
     }
 
     #[test]
-    fn test_search_draft_ctrl_c_cancels_without_applying() {
+    fn test_search_box_enter_adds_group_ignore_case() {
         let mut app = App::new(100);
-        app.search_draft = Some("hello".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), false);
-        assert!(app.search_draft.is_none());
-        assert!(app.highlight.is_none(), "Ctrl+C should cancel, not apply, the draft");
+        app.search_box.editing = true;
+        for c in "ERROR".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.search_box.editing);
+        assert_eq!(app.search_groups.groups.len(), 1);
+        assert!(app.search_groups.any_match("an error occurred"));
     }
 
     #[test]
-    fn test_search_draft_invalid_regex_does_not_crash_or_change_highlight() {
+    fn test_search_box_space_commits_chip_then_enter() {
         let mut app = App::new(100);
-        app.set_highlight("existing", false).unwrap();
-        app.search_draft = Some("(unclosed".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false);
-        assert!(app.search_draft.is_none());
-        assert!(app.highlight.is_some(), "invalid pattern should be ignored, not crash or clear the prior highlight");
+        app.search_box.editing = true;
+        for c in "foo".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.search_box.chips, vec!["foo"]);
+        for c in "bar".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.search_groups.groups[0].label, "foo AND bar");
+        assert_eq!(app.search_groups.active_patterns().len(), 2);
     }
 
     #[test]
-    fn test_search_draft_ignore_case_true_matches_case_insensitively() {
+    fn test_search_box_ctrl_c_cancels_without_adding() {
         let mut app = App::new(100);
-        app.search_draft = Some("ERROR".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), true);
-        assert!(app.search_draft.is_none());
-        let re = app.highlight.as_ref().unwrap();
-        assert!(re.is_match("an error occurred"));
+        app.search_box.editing = true;
+        app.search_box.push_char('x');
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.search_box.editing);
+        assert!(app.search_groups.groups.is_empty());
     }
 
     #[test]
-    fn test_search_draft_esc_and_enter_return_focus_to_loglist() {
+    fn test_search_box_invalid_regex_does_not_drop_prior_groups() {
+        let mut app = App::new(100);
+        app.search_groups
+            .groups
+            .push(search_model::SearchGroup::from_patterns(&["existing".into()]).unwrap());
+        app.search_box.editing = true;
+        for c in "(unclosed".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.search_box.editing);
+        assert_eq!(app.search_groups.groups.len(), 1);
+        assert!(app.search_groups.any_match("existing"));
+    }
+
+    #[test]
+    fn test_search_box_esc_and_enter_return_focus_to_loglist() {
         let mut app = App::new(100);
         app.focus = app::Focus::Input;
-        app.search_draft = Some("x".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), false);
+        app.search_box.editing = true;
+        app.search_box.push_char('x');
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.focus, app::Focus::LogList);
 
         app.focus = app::Focus::ChipStrip;
-        app.search_draft = Some("y".to_string());
-        handle_search_draft_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), false);
+        app.search_box.editing = true;
+        app.search_box.push_char('y');
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.focus, app::Focus::LogList);
     }
 
@@ -757,5 +999,108 @@ mod dispatch_tests {
             },
         );
         assert_eq!(app.cursor, cursor_before, "clicks are ignored in this pass");
+    }
+
+    fn drain_lines(app: &mut App, lines: &[&str]) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for line in lines {
+            tx.send(crate::model::EntryRow::from_line(line).unwrap()).unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+    }
+
+    #[test]
+    fn test_yy_yanks_raw_and_clears_pending() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let line = "04-02 10:00:00.000  1  1 I Tag     : hello";
+        drain_lines(&mut app, &[line]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
+        assert!(app.pending_yank);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
+        assert!(!app.pending_yank);
+        assert_eq!(app.last_yanked.as_deref(), Some(line));
+    }
+
+    #[test]
+    fn test_yt_and_ym_yank_fields() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I MyTag   : boom"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert_eq!(app.last_yanked.as_deref(), Some("MyTag"));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        assert_eq!(app.last_yanked.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_capital_y_yanks_msg() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : onlymsg"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('Y'));
+        assert_eq!(app.last_yanked.as_deref(), Some("onlymsg"));
+        assert!(!app.pending_yank);
+    }
+
+    #[test]
+    fn test_yank_pending_esc_cancels() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert!(!app.pending_yank);
+        assert!(app.last_yanked.is_none());
+    }
+
+    #[test]
+    fn test_visual_line_shift_v_jk_y_yanks_range() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let a = "04-02 10:00:00.000  1  1 I Tag     : a";
+        let b = "04-02 10:00:01.000  1  1 I Tag     : b";
+        let c = "04-02 10:00:02.000  1  1 I Tag     : c";
+        drain_lines(&mut app, &[a, b, c]);
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('V'));
+        assert_eq!(app.visual_anchor, Some(0));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('j'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('j'));
+        assert_eq!(app.cursor, 2);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
+        assert!(app.visual_anchor.is_none());
+        let expected = format!("{a}\n{b}\n{c}");
+        assert_eq!(app.last_yanked.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_n_and_shift_n_jump_highlight_matches() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : aaa",
+                "04-02 10:00:01.000  1  1 I Tag     : hit one",
+                "04-02 10:00:02.000  1  1 I Tag     : bbb",
+                "04-02 10:00:03.000  1  1 I Tag     : hit two",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        app.search_groups
+            .groups
+            .push(search_model::SearchGroup::from_patterns(&["hit".into()]).unwrap());
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
+        assert_eq!(app.cursor, 1);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
+        assert_eq!(app.cursor, 3);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('N'));
+        assert_eq!(app.cursor, 1);
     }
 }

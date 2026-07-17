@@ -30,7 +30,7 @@ cargo run -p aloggrep-tui -- --hdc              # TUI 实时抓取模式
 - `src/hdc.rs` — 3 个单元测试（`HdcLiveFilter` 历史缓冲跳过逻辑）
 - `src/expr.rs` — `Expr::from_filters` 相关测试
 
-测试分布（`aloggrep-tui`，位于 `aloggrep-tui/`）：全部为源文件内 `#[cfg(test)]` 单元测试，覆盖 `model`/`filter_model`/`ingest`/`app`/`ui`/`input`/`main`（`dispatch_tests`）各模块。
+测试分布（`aloggrep-tui`，位于 `aloggrep-tui/`）：全部为源文件内 `#[cfg(test)]` 单元测试，覆盖 `model`/`filter_model`/`search_model`/`ingest`/`app`/`ui`/`input`/`main`（`dispatch_tests`）各模块。
 
 ## Architecture
 
@@ -52,13 +52,14 @@ aloggrep-core/src/
 └── summary.rs     # 聚合统计：级别分布、Top tags、Top errors、崩溃计数
 
 aloggrep-tui/src/
-├── main.rs         # CLI 入口（clap derive）、panic hook、终端 raw mode/alt screen 生命周期、事件循环 run()、按键分发（handle_normal_key/handle_insert_key/handle_ctrl_c/handle_search_draft_key）、popup_rect 浮层定位
+├── main.rs         # CLI 入口（clap derive）、panic hook、终端 raw mode/alt screen 生命周期、事件循环 run()、按键分发（handle_normal_key/handle_insert_key/handle_ctrl_c/handle_search_box_key）、popup_rect 浮层定位
 ├── model.rs        # EntryRow：拥有所有权的行模型，from_line() 解析，as_log_entry() 借出给 core 匹配逻辑复用
-├── filter_model.rs # Group（一个 AND 组合的 Expr + 只读 TimeBound）+ GroupList（组间 OR）
+├── filter_model.rs # Group（AND 组合 Expr + TimeBound + enabled）+ GroupList（组间 OR；全禁用≡空列表≡全可见）
+├── search_model.rs # SearchGroup/SearchGroupList（pattern chip 高亮 OR）+ SearchBox（Space 上屏 chip / Enter 成组）
 ├── input.rs        # ChipField/Chip/InputBox（草稿+已提交 chip）/Popup（字段候选框）+ build_group（复用 Expr::from_filters）
-├── app.rs          # App 状态机：环形缓冲 rows/visible 下标列表/cursor/Focus/Mode/group_cursor/pending_dd/following/highlight/search_draft
-├── ui.rs           # 渲染：render_log_list（换行+关键词高亮）/render_chip_strip/render_input_box/render_search_box/render_popup（下拉浮层）/render_status_bar，颜色一律经 theme.rs
-├── theme.rs        # UI 颜色映射唯一入口：语义色常量 + border_style/numbered_title/plain_title/caret/level_badge_style/highlight_style/field_color/focus_style/mode_badge，日志相关部分派生自 aloggrep::logcolor
+├── app.rs          # App 状态机：rows/visible/groups/search_groups/Focus(含 SearchStrip)/pending_d(dd|di)/search_box
+├── ui.rs           # 渲染：render_log_list（换行+多色高亮）/render_chip_strip/render_search_chip_strip/render_input_box/render_search_box/render_popup/render_status_bar
+├── theme.rs        # UI 颜色映射唯一入口：语义色 + border/numbered_title/highlight_style/disabled_chip_style/log_selection_style 等，日志色派生自 aloggrep::logcolor
 └── ingest.rs        # 统一摄入管线：spawn_file_ingest（-f，io::Result 立即报告打开失败）/ spawn_hdc_ingest（--hdc，复用 aloggrep-core::hdc）
 ```
 
@@ -73,26 +74,27 @@ aloggrep-tui/src/
 - **main.rs `dispatch_lines!` 宏**：根据 `--multiline`/`--crashes` 标志决定是否用 `MultilineMerger` 包裹迭代器，避免运行时分支开销。
 - **输出路径分支**：`run_simple`（常规快速路径）vs `run_with_context`（-C/-A/-B 上下文行缓冲）vs `run_time_context`（--time-context 两遍扫描）vs `run_follow`（--follow-pid/tid 两遍扫描）。
 - **`--hdc` Ctrl-L 清屏（CLI）**：仅在 stdin/stdout 都是 tty 时启用；用 cbreak 模式（保留 `ISIG`）而非标准 raw mode，避免破坏现有 Ctrl+C 依赖的 `SIGINT` 语义。按键上报走 channel + `KeypressGate` 迭代器分发。仅支持 Unix，Windows 上静默不可用。已知权衡：若进程被 `SIGTERM`/`SIGKILL` 直接杀死（而非 Ctrl+C），termios 不会被恢复，终端会卡在 cbreak 模式，需手动 `stty sane`/`reset`——这与 vim/less 等直接操作终端的工具在被强杀时的行为一致，未特殊处理。
-- **`aloggrep-tui` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。启动时的 CLI 过滤参数被转换为第 0 组，与交互式新增的组同等对待（可被 `dd` 删除），不存在额外的 AND 层。chip 编译直接调用 `Expr::from_filters`（不走文本拼接再 `Expr::parse` 的回路），避免值中引号转义问题，同字段多值天然走 `compile_joined` 的 OR 合并。
+- **`aloggrep-tui` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。启动时的 CLI 过滤参数被转换为第 0 组，与交互式新增的组同等对待（可被 `dd` 删除 / `di` 禁用），不存在额外的 AND 层。chip 编译直接调用 `Expr::from_filters`（不走文本拼接再 `Expr::parse` 的回路），避免值中引号转义问题，同字段多值天然走 `compile_joined` 的 OR 合并。**TUI 过滤/搜索一律 ignore-case**（含启动 initial_group）；CLI `-i` 保留兼容但不再改变行为。
+- **`aloggrep-tui` 的 search chip 模型**：与 Filter 对称——底部 Search 区自由输入 pattern（无 ChipField），`Space` 提交组内 chip，`Enter` 上屏为一个 `SearchGroup`，展示在 Filter 组条正下方的 Search 组条。组内 pattern 高亮 OR；每个 enabled pattern 按全局顺序取 `USER_HIGHLIGHT` 递进色阶分色；`n`/`N` 在任一 enabled pattern 上跳转。`dd`/`di`/`h`/`l` 与 Filter 组条共用同一套 strip 操作。
 - **`aloggrep-tui` 的环形缓冲与光标**：`App.rows: VecDeque<EntryRow>` 按 `max_lines` 淘汰最旧行；`App.visible: Vec<usize>` 始终保持升序，淘汰只可能发生在下标 0，故 `push_row` 无需全表扫描；`rebuild_visible`（过滤条件变化时）与 `follow_tick`（新行到达/环形缓冲淘汰时）共同维护 "following 模式下 cursor 始终指向可见集合最后一行" 的不变量。
 - **`aloggrep-tui` 的 LogList 滚动跟随**：`ui::render_log_list` 每帧用 `ListState::default().with_offset(app.list_offset)` 而不是全新的 `ListState::default()`，渲染后把 `state.offset()` 写回 `App.list_offset`。ratatui 的 `List` 本身已经实现"选中项在可视区内则只移动高亮，超出边缘才滚动"的算法，只是需要一个跨帧持久化的起始 offset 才能生效——`App.list_offset` 就是这个持久化载体，纯 `usize`，不引入 ratatui 类型到 `app.rs`。
-- **`aloggrep-tui` 的 LogList 作为行动原点**：除了 Tab/1/2/3 显式切焦点，以下路径都会把 `app.focus` 重置为 `Focus::LogList`：Normal 模式下任意焦点按 `Esc`；Insert 模式下无 popup 时按 `Esc` 或 Ctrl+C（同时也把 `mode` 切回 `Normal`）；Input 里 `Enter` 成功构建一个过滤组后（同样切回 `Normal`，与 `Esc` 语义对齐，加完组立刻可 `j`/`k` 导航）；`/` 搜索草稿无论是取消（`Esc`/Ctrl+C）还是应用（`Enter`）都会重置焦点；`dd` 删光最后一个过滤组后（`App::delete_focused_group` 内联处理）。popup 打开时的 `Esc` 是唯一例外——只关 popup，不跳焦点，保留两级 escape（见 popup-aware Ctrl+C 的既有设计）。
+- **`aloggrep-tui` 的 LogList 作为行动原点**：除了 Tab/1/2/3/4 显式切焦点，以下路径都会把 `app.focus` 重置为 `Focus::LogList`：Normal 模式下任意焦点按 `Esc`；Insert 模式下无 popup 时按 `Esc` 或 Ctrl+C（同时也把 `mode` 切回 `Normal`）；Input 里 `Enter` 成功构建一个过滤组后；SearchBox `Enter` 成功上屏 / `Esc`/Ctrl+C 取消；`dd` 删光最后一个 Filter 或 Search 组后。popup 打开时的 `Esc` 是唯一例外——只关 popup，不跳焦点。
 - **`aloggrep-tui` 的 LogList 快速移动与鼠标滚轮**：`Shift+J`/`Shift+K`（即 `KeyCode::Char('J'/'K')`，crossterm 对 Shift+字母直接上报大写字符，无需读 modifiers）复用 `move_cursor_manual` 各移动 7 行；鼠标滚轮（`Event::Mouse` 里的 `MouseEventKind::ScrollDown`/`ScrollUp`）复用同一函数各移动 3 行，且不管当前 `Focus` 是哪个区域，滚轮永远作用于日志列表（未做"先点击聚焦再滚动"，点击类事件在 `handle_mouse_event` 里被忽略）。
 - **`aloggrep-tui` 的终端生命周期**：panic hook 在 `main()` 最开始安装，先于任何 raw mode/alt screen 操作；`--hdc` 子进程通过 `HdcChildGuard`（RAII，`Drop` 时 kill+wait）持有，保证无论从哪个 `?` 分支提前返回，子进程都不会残留。
-- **`aloggrep-tui` 的 Ctrl+C 语义**：raw mode 下 `ISIG` 被禁用，Ctrl+C 以普通 `KeyEvent` 到达而非 `SIGINT`，因此显式处理为与 `Esc` 语义一致的"就地取消"（Normal 模式下退出整个程序；Insert 模式下弹窗打开时仅关闭弹窗，否则重置输入框回到 Normal；搜索草稿输入中则取消搜索），而不是无条件退出。
-- **`aloggrep-tui` 的三个可聚焦分区**：`Focus` 仍是 `ChipStrip`/`LogList`/`Input` 三态（未新增/合并），`Tab`/`BackTab` 循环切换，`1`/`2`/`3` 直达（仅 Normal 态生效，只切换键盘焦点，不触发编辑——进入编辑态唯一入口仍是 `i`/`a`/`o`）。三个区域各自套一层圆角 `Block`，边框/标题颜色由 `theme::border_style`/`numbered_title` 按 `app.focus` 是否匹配决定。`/` 搜索草稿是三分区之外独立常驻的第四个边框区域（`render_search_box`），不参与编号和 Tab 循环，边框亮暗改用 `app.search_draft.is_some()` 判断。
-- **跨 crate 的日志颜色统一**：`aloggrep-core::logcolor` 是唯一的颜色数据源（纯 RGB/枚举，不依赖 `colored`/`ratatui`），CLI 的 `formatter.rs`（`colored`）和 TUI 的 `theme.rs`（`ratatui::style::Color`）各自将其转换成自己的类型。新增/调整日志相关配色只改 `logcolor.rs`，两边自动同步，禁止在 `formatter.rs`/`theme.rs` 里各自硬编码一份 RGB 数值。
+- **`aloggrep-tui` 的 Ctrl+C 语义**：raw mode 下 `ISIG` 被禁用，Ctrl+C 以普通 `KeyEvent` 到达而非 `SIGINT`，因此显式处理为与 `Esc` 语义一致的"就地取消"（Normal 模式下退出整个程序；Insert 模式下弹窗打开时仅关闭弹窗，否则重置输入框回到 Normal；SearchBox 编辑中则取消搜索），而不是无条件退出。
+- **`aloggrep-tui` 的四个可聚焦分区**：`Focus` 为 `ChipStrip`/`SearchStrip`/`LogList`/`Input`，`Tab`/`BackTab` 循环，`1`/`2`/`3`/`4` 直达（仅 Normal；不触发编辑——进入 Filter 编辑仍是 `i`/`a`/`o`，进入 Search 编辑是 `/`）。布局自上而下：Filter 组条 → Search 组条 → Log → Input → 底部 Search 输入区（不参与编号/Tab，边框亮暗看 `search_box.editing`）→ status。
+- **跨 crate 的日志颜色统一**：`aloggrep-core::logcolor` 是唯一的颜色数据源（纯 RGB/枚举，不依赖 `colored`/`ratatui`），CLI 的 `formatter.rs`（`colored`）和 TUI 的 `theme.rs`（`ratatui::style::Color`）各自将其转换成自己的类型。新增/调整日志相关配色只改 `logcolor.rs`，两边自动同步，禁止在 `formatter.rs`/`theme.rs` 里各自硬编码一份 RGB 数值。`USER_HIGHLIGHT` 为 8 档阅读向递进色阶，供 CLI `--highlight` 与 TUI search chip 共用。
 - **`aloggrep-tui` 日志区默认多行展示**：`ui.rs::wrap_ranges` 是唯一的换行实现（贪婪按空白断行，单词超宽则硬切），操作字节区间而非 `Cow<str>`（为了跟 `render_entry_lines` 里已经用 `Regex::find_iter` 算好的高亮命中区间对齐——顺序是"先算高亮区间，再换行"，换行只是把同一份区间数据切成多个 `Span` 分布到多个 `Line`，不会把一个高亮命中切碎到两半）。`ListItem` 内可以放多个 `Line`，`ListState` 选中/滚动天然按整个 item 处理，翻页逻辑（`PAGE_SIZE`/`move_cursor_manual`）不需要感知 item 内部行数。
-- **`aloggrep-tui` 字段候选下拉浮层**：`render_popup` 不再占用固定行高的一行，而是在 `main.rs::popup_rect` 里按 `input_area` 底边动态算一个悬浮 `Rect`（`Clear` + 圆角 `List`），高度按候选数量 clamp 到 `[1,6]+2`，并 clamp 到不超过 frame 剩余高度——浮层会盖住下方 search 区甚至日志区顶部，这是有意的（跟 Claude Code 的 `/` 命令下拉一致），不是 bug。
+- **`aloggrep-tui` 字段候选下拉浮层**：`render_popup` 不再占用固定行高的一行，而是在 `main.rs::popup_rect` 里按 `input_area` **顶边上方**动态算一个悬浮 `Rect`（`Clear` + 圆角 `List`），高度按候选数量 clamp 到 `[1,6]+2`，并 clamp 到不超过 Input 上方可用高度——浮层会盖住日志区底部，这是有意的（下方只剩 Search+status，空间不够），不是 bug。
 
 ## aloggrep-tui UI 设计指导（opencode 风格）
 
 配色与布局遵循以下规则；改动渲染代码前先看这里。所有颜色常量与映射函数集中在 `aloggrep-tui/src/theme.rs`——**禁止在 `ui.rs` 或其他渲染代码里直接写 `Color::*`/硬编码 `Style`**，新增语义就去 `theme.rs` 加常量或函数，保证同一语义在任何地方渲染出来的颜色都一致。
 
-- **三个可聚焦分区套圆角边框，未聚焦低对比度**：ChipStrip/LogList/Input 各自一层 `BorderType::Rounded`，`theme::border_style(active)`：聚焦时 `fg(ACCENT)`，未聚焦时 `fg(DarkGray)+DIM`（终端没有真 alpha，用 dim 模拟"半透明未聚焦"）。边框标题（`Block::title()`，天然画在左上角）用 `theme::numbered_title(1|2|3, label, active)` 带数字徽标；不参与编号的区域（Search、字段候选浮层）用 `theme::plain_title`。
+- **四个可聚焦分区套圆角边框，未聚焦低对比度**：Filter/SearchStrip/Log/Input 各自一层 `BorderType::Rounded`，`theme::border_style(active)`：聚焦时 `fg(ACCENT)`，未聚焦时 `fg(DarkGray)+DIM`。边框标题用 `theme::numbered_title(1|2|3|4, label, active)`；底部 Search 输入区与字段候选浮层用 `theme::plain_title`。
 - **单一强调色 + 大量 dim**：`theme::ACCENT`（Cyan）是唯一的"焦点/强调"色，非关键信息统一 `Modifier::DIM`，避免多色混战。
-- **焦点用反色块，不用边框变色**：当前选中的 chip / popup 候选项用 `theme::focus_style()`（黑字 + ACCENT 底，加粗）标出，而不是给文字加粗变色或画边框。
-- **日志行选中态只在 LogList 聚焦时显示，且是柔和灰底**：`theme::log_selection_style()`（`Color::DarkGray` 背景，不加粗不反色）只在 `app.focus == Focus::LogList` 时作为 `List::highlight_style` 生效；失焦时用 `Style::default()`，选中行与普通行外观完全一致——不同于 chip/popup 用反色块表示焦点，日志行的"当前选中位置"和"当前键盘焦点"是两个独立的语义，故意选了更安静的视觉语言。
+- **焦点用反色块，不用边框变色**：当前选中的 chip / popup 候选项用 `theme::focus_style()`（黑字 + ACCENT 底，加粗）标出；`di` 禁用的组用 `theme::disabled_chip_style()`（DarkGray+DIM）置灰。
+- **日志行选中态只在 LogList 聚焦时显示，且是柔和灰底**：经 `ListItem::style(log_selection_style())` 施加（**不用** `List::highlight_style`，以免 `Style::patch` 盖掉关键词高亮底色）；失焦时无选中底。关键词 Span 的高亮色在选中行上保持可读叠加。
 - **状态/模式提示用反色徽标**：输入框左侧的 `NORMAL`/`INSERT` 徽标（`theme::mode_badge`）、状态栏的 `FOLLOWING` 提示都是反色块，不是纯文字提示。搜索框/输入框的编辑态用 `theme::caret`（方块=静止/Normal，竖线=正在编辑/Insert，仿 vim 光标形状），只在该区域自己判定为"活跃"时才画，不画在非活跃区域上。
 - **字段名颜色全局唯一映射**：`ChipField` 的颜色只由 `theme::field_color` 决定；chip 栏、输入框、popup 三处渲染字段名时必须复用同一函数，不允许各自维护一份颜色表。
 - **不硬编码 White/Black 当默认前景色**：如 `Level::I`（默认级别）用 `Style::default()` 继承终端主题色，不写 `Color::White`，以兼容浅色/深色终端。
@@ -107,8 +109,9 @@ aloggrep-tui/src/
 | 警告（chip 字段名） | `theme::WARNING` | Yellow |
 | 日志时间戳/pid/tid | `theme::muted()` | `logcolor::MUTED` |
 | 日志 level 徽标 | `theme::level_badge_style()` | `logcolor::level_badge()` |
-| 关键词/搜索高亮 | `theme::highlight_style(idx)` | `logcolor::USER_HIGHLIGHT[idx]`，`/` 搜索固定用 `idx=0` |
-| 日志行选中态（仅聚焦时） | `theme::log_selection_style()` | `Color::DarkGray`，无 logcolor 来源 |
+| 关键词/搜索高亮 | `theme::highlight_style(idx)` | `logcolor::USER_HIGHLIGHT[idx]`，按 search pattern 全局序号递进 |
+| 禁用 chip 组 | `theme::disabled_chip_style()` | DarkGray+DIM |
+| 日志行选中态（仅聚焦时） | `theme::log_selection_style()` | `Color::DarkGray`，经 ListItem.style 施加 |
 
 ## Filter Logic（`aloggrep-core` CLI）
 
