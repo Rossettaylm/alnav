@@ -263,16 +263,9 @@ fn main() -> Result<(), String> {
     // _hdc_child_guard drops here at end of main(), killing the child if not already killed
 }
 
-/// Anchors the field-candidate dropdown just above the input box's top
-/// border (covering the bottom of the log area), clamped to the space
-/// available above the input. The region below Input is only Search+status
-/// (~4 rows), which is too short for a usable candidate list.
-fn popup_rect(input_area: Rect, _frame_area: Rect, match_count: usize) -> Rect {
-    let desired = match_count.clamp(1, 6) as u16 + 2;
-    let height = desired.min(input_area.y).max(1);
-    let width = input_area.width.clamp(12, 28);
-    let y = input_area.y.saturating_sub(height);
-    Rect { x: input_area.x, y, width, height }
+/// Anchors the field-candidate dropdown just above the centered Input modal.
+fn popup_rect(input_modal: Rect, frame_area: Rect, match_count: usize) -> Rect {
+    ui::candidate_popup_rect(input_modal, frame_area, match_count)
 }
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
@@ -302,28 +295,39 @@ fn run<B: ratatui::backend::Backend>(
 
         terminal
             .draw(|frame| {
-                let outer_w = frame.area().width;
+                let frame_area = frame.area();
+                let outer_w = frame_area.width;
                 let filter_h = ui::filter_strip_height(app, outer_w);
                 let search_h = ui::search_strip_height(app, outer_w);
-                let [filter_area, search_strip_area, log_area, input_area, search_area, status_area] =
-                    Layout::vertical([
-                        Constraint::Length(filter_h),
-                        Constraint::Length(search_h),
-                        Constraint::Fill(1),
-                        Constraint::Length(3),
-                        Constraint::Length(3),
-                        Constraint::Length(1),
-                    ])
-                    .areas(frame.area());
+                let [filter_area, search_strip_area, log_area, status_area] = Layout::vertical([
+                    Constraint::Length(filter_h),
+                    Constraint::Length(search_h),
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                ])
+                .areas(frame_area);
                 ui::render_chip_strip(app, frame, filter_area);
                 ui::render_search_chip_strip(app, frame, search_strip_area);
                 ui::render_log_list(app, frame, log_area);
-                ui::render_input_box(input, app.mode, app.focus == app::Focus::Input, frame, input_area);
-                ui::render_search_box(&app.search_box, frame, search_area);
                 ui::render_status_bar(app, frame, status_area);
-                if let Some(popup) = &input.popup {
-                    let rect = popup_rect(input_area, frame.area(), popup.matches().len());
-                    ui::render_popup(input, frame, rect);
+
+                let modal_w = ui::modal_width(frame_area.width);
+                // Search modal takes key priority; do not stack both.
+                if app.search_box.editing {
+                    let cand = app
+                        .search_box
+                        .candidate_indices(&app.search_groups.groups)
+                        .len();
+                    let h = ui::search_modal_height(cand);
+                    let area = ui::centered_modal_rect(frame_area, modal_w, h);
+                    ui::render_search_modal(&app.search_box, &app.search_groups.groups, frame, area);
+                } else if app.focus == app::Focus::Input {
+                    let input_area = ui::centered_modal_rect(frame_area, modal_w, 3);
+                    ui::render_input_modal(input, app.mode, frame, input_area);
+                    if let Some(popup) = &input.popup {
+                        let rect = popup_rect(input_area, frame_area, popup.matches().len());
+                        ui::render_popup(input, frame, rect);
+                    }
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -445,11 +449,18 @@ fn handle_mouse_event(app: &mut App, mouse: event::MouseEvent) {
 /// dispatched before any of them while `app.search_box.editing`. Ctrl+C
 /// here cancels the draft (like Esc), not quit. Invalid regex on Enter is
 /// silently ignored so a typo can't end the session or drop existing groups.
+/// Enter/Tab with history candidates mirrors Input field-popup confirm.
 fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
     let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Enter => {
-            match app.search_box.submit_draft() {
+        KeyCode::Up => app
+            .search_box
+            .move_selection(&app.search_groups.groups, -1),
+        KeyCode::Down => app
+            .search_box
+            .move_selection(&app.search_groups.groups, 1),
+        KeyCode::Enter | KeyCode::Tab => {
+            match app.search_box.confirm_or_submit(&app.search_groups.groups) {
                 Ok(Some(group)) => {
                     let idx = app.push_or_find_search_group(group);
                     app.search_box.clear();
@@ -457,7 +468,7 @@ fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
                     app.focus = app::Focus::LogList;
                 }
                 Ok(None) => {
-                    // empty Enter: no-op (stay editing)
+                    // empty Enter/Tab: no-op (stay editing)
                 }
                 Err(()) => {
                     // bad regex: exit editing, keep prior search groups
@@ -664,7 +675,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             focus_input_insert(app);
         }
         (_, KeyCode::Char('/')) => {
-            app.search_box.editing = true;
+            app.search_box.begin_editing();
         }
         _ => {}
     }
@@ -738,23 +749,73 @@ mod dispatch_tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     #[test]
-    fn test_popup_rect_anchors_above_input_and_clamps_to_space_above() {
-        let input_area = Rect { x: 0, y: 10, width: 40, height: 3 };
-        let frame_area = Rect { x: 0, y: 0, width: 80, height: 14 };
-        let rect = popup_rect(input_area, frame_area, 20); // way more matches than fit
+    fn test_popup_rect_anchors_above_input_modal_and_clamps_to_space_above() {
+        let input_modal = Rect { x: 12, y: 10, width: 40, height: 3 };
+        let frame_area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let rect = popup_rect(input_modal, frame_area, 20); // way more matches than fit
         // desired = min(6,20)+2 = 8; space above = 10; height = 8; y = 10-8 = 2
         assert_eq!(rect.height, 8);
-        assert_eq!(rect.y, 2, "popup should sit directly above the input box");
-        assert!(rect.y + rect.height <= input_area.y, "popup must not overlap the input box");
+        assert_eq!(rect.y, 2, "popup should sit directly above the Input modal");
+        assert_eq!(rect.x, input_modal.x);
+        assert_eq!(rect.width, input_modal.width);
+        assert!(rect.y + rect.height <= input_modal.y, "popup must not overlap the Input modal");
     }
 
     #[test]
     fn test_popup_rect_clamps_when_little_space_above() {
-        let input_area = Rect { x: 0, y: 3, width: 40, height: 3 };
+        let input_modal = Rect { x: 12, y: 3, width: 40, height: 3 };
         let frame_area = Rect { x: 0, y: 0, width: 80, height: 20 };
-        let rect = popup_rect(input_area, frame_area, 6);
+        let rect = popup_rect(input_modal, frame_area, 6);
         assert_eq!(rect.height, 3);
         assert_eq!(rect.y, 0);
+    }
+
+    #[test]
+    fn test_centered_modal_rect_centers_and_clamps() {
+        let frame = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let rect = ui::centered_modal_rect(frame, 40, 5);
+        assert_eq!(rect.width, 40);
+        assert_eq!(rect.height, 5);
+        assert_eq!(rect.x, 20);
+        assert_eq!(rect.y, 9);
+        let tiny = ui::centered_modal_rect(Rect { x: 0, y: 0, width: 10, height: 4 }, 40, 10);
+        assert_eq!(tiny.width, 10);
+        assert_eq!(tiny.height, 4);
+    }
+
+    #[test]
+    fn test_search_box_tab_confirms_selected_candidate() {
+        let mut app = App::new(100);
+        app.search_groups
+            .groups
+            .push(search_model::SearchGroup::from_pattern("error").unwrap());
+        app.search_groups
+            .groups
+            .push(search_model::SearchGroup::from_pattern("errno").unwrap());
+        app.search_box.begin_editing();
+        for c in "er".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!app.search_box.editing);
+        assert_eq!(app.search_groups.groups.len(), 2, "must reuse existing, not add");
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn test_search_box_enter_creates_when_no_candidate_match() {
+        let mut app = App::new(100);
+        app.search_groups
+            .groups
+            .push(search_model::SearchGroup::from_pattern("error").unwrap());
+        app.search_box.begin_editing();
+        for c in "unique".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.search_groups.groups.len(), 2);
+        assert_eq!(app.search_groups.groups[1].pattern, "unique");
     }
 
     #[test]

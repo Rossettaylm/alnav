@@ -67,12 +67,14 @@ impl SearchGroupList {
     }
 }
 
-/// Bottom search input: free-text draft only. Enter submits one SearchGroup.
+/// Centered search modal draft: free-text + history-chip prefix completion.
 #[derive(Default)]
 pub struct SearchBox {
     pub draft: String,
     /// When true, key events are routed here (entered via `/`).
     pub editing: bool,
+    /// Highlighted index into the current candidate list (not into `groups`).
+    pub selected: usize,
 }
 
 impl SearchBox {
@@ -82,10 +84,61 @@ impl SearchBox {
 
     pub fn push_char(&mut self, c: char) {
         self.draft.push(c);
+        self.selected = 0;
     }
 
     pub fn backspace(&mut self) {
         self.draft.pop();
+        self.selected = 0;
+    }
+
+    /// Open the search modal (Normal `/`).
+    pub fn begin_editing(&mut self) {
+        self.editing = true;
+        self.selected = 0;
+    }
+
+    /// Indices into `groups` whose pattern has `draft` as an ignore-case prefix.
+    /// Capped at 6 to match the centered modal candidate list height.
+    pub fn candidate_indices(&self, groups: &[SearchGroup]) -> Vec<usize> {
+        let q = self.draft.to_ascii_lowercase();
+        groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.pattern.to_ascii_lowercase().starts_with(&q))
+            .map(|(i, _)| i)
+            .take(6)
+            .collect()
+    }
+
+    pub fn move_selection(&mut self, groups: &[SearchGroup], delta: isize) {
+        let len = self.candidate_indices(groups).len();
+        if len == 0 {
+            return;
+        }
+        let new = self.selected as isize + delta;
+        self.selected = new.clamp(0, len as isize - 1) as usize;
+    }
+
+    /// Enter/Tab: empty draft → no-op; non-empty with candidates → selected
+    /// pattern; non-empty without candidates → compile draft.
+    /// `Ok(None)` = empty (stay editing). `Err` = bad regex.
+    pub fn confirm_or_submit(&mut self, groups: &[SearchGroup]) -> Result<Option<SearchGroup>, ()> {
+        if self.draft.is_empty() {
+            return Ok(None);
+        }
+        let candidates = self.candidate_indices(groups);
+        if !candidates.is_empty() {
+            let sel = self.selected.min(candidates.len() - 1);
+            let pattern = groups[candidates[sel]].pattern.clone();
+            self.draft.clear();
+            match SearchGroup::from_pattern(&pattern) {
+                Some(g) => Ok(Some(g)),
+                None => Err(()),
+            }
+        } else {
+            self.submit_draft()
+        }
     }
 
     /// Enter: compile draft into a single-pattern group and clear draft.
@@ -107,6 +160,7 @@ impl SearchBox {
     pub fn clear(&mut self) {
         self.draft.clear();
         self.editing = false;
+        self.selected = 0;
     }
 }
 
@@ -163,5 +217,68 @@ mod tests {
         list.groups.push(SearchGroup::from_pattern("Error").unwrap());
         assert_eq!(list.find_equivalent("error"), Some(0));
         assert_eq!(list.find_equivalent("other"), None);
+    }
+
+    #[test]
+    fn test_candidate_indices_prefix_ignore_case() {
+        let groups = vec![
+            SearchGroup::from_pattern("Error").unwrap(),
+            SearchGroup::from_pattern("errno").unwrap(),
+            SearchGroup::from_pattern("warn").unwrap(),
+        ];
+        let mut box_ = SearchBox::default();
+        box_.draft = "er".into();
+        assert_eq!(box_.candidate_indices(&groups), vec![0, 1]);
+        box_.draft = "ER".into();
+        assert_eq!(box_.candidate_indices(&groups), vec![0, 1]);
+        box_.draft = "xyz".into();
+        assert!(box_.candidate_indices(&groups).is_empty());
+    }
+
+    #[test]
+    fn test_move_selection_clamps() {
+        let groups = vec![
+            SearchGroup::from_pattern("a").unwrap(),
+            SearchGroup::from_pattern("ab").unwrap(),
+        ];
+        let mut box_ = SearchBox::default();
+        box_.draft = "a".into();
+        box_.move_selection(&groups, 1);
+        assert_eq!(box_.selected, 1);
+        box_.move_selection(&groups, 10);
+        assert_eq!(box_.selected, 1);
+        box_.move_selection(&groups, -10);
+        assert_eq!(box_.selected, 0);
+    }
+
+    #[test]
+    fn test_confirm_or_submit_picks_candidate_when_present() {
+        let groups = vec![
+            SearchGroup::from_pattern("error").unwrap(),
+            SearchGroup::from_pattern("errno").unwrap(),
+        ];
+        let mut box_ = SearchBox::default();
+        box_.draft = "er".into();
+        box_.selected = 1;
+        let g = box_.confirm_or_submit(&groups).unwrap().unwrap();
+        assert_eq!(g.pattern, "errno");
+        assert!(box_.draft.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_or_submit_creates_when_no_candidates() {
+        let groups = vec![SearchGroup::from_pattern("error").unwrap()];
+        let mut box_ = SearchBox::default();
+        box_.draft = "unique".into();
+        let g = box_.confirm_or_submit(&groups).unwrap().unwrap();
+        assert_eq!(g.pattern, "unique");
+    }
+
+    #[test]
+    fn test_confirm_or_submit_empty_draft_is_noop_even_with_candidates() {
+        let groups = vec![SearchGroup::from_pattern("error").unwrap()];
+        let mut box_ = SearchBox::default();
+        assert!(box_.confirm_or_submit(&groups).unwrap().is_none());
+        assert_eq!(box_.candidate_indices(&groups).len(), 1);
     }
 }

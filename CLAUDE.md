@@ -52,13 +52,13 @@ aloggrep-core/src/
 └── summary.rs     # 聚合统计：级别分布、Top tags、Top errors、崩溃计数
 
 aloggrep-tui/src/
-├── main.rs         # CLI 入口（clap derive）、panic hook、终端 raw mode/alt screen 生命周期、事件循环 run()、按键分发（handle_normal_key/handle_insert_key/handle_ctrl_c/handle_search_box_key）、popup_rect 浮层定位
+├── main.rs         # CLI 入口（clap derive）、panic hook、终端 raw mode/alt screen 生命周期、事件循环 run()、按键分发（handle_normal_key/handle_insert_key/handle_ctrl_c/handle_search_box_key）、居中模态与字段候选定位
 ├── model.rs        # EntryRow：拥有所有权的行模型，from_line() 解析，as_log_entry() 借出给 core 匹配逻辑复用
 ├── filter_model.rs # Group（chips + AND Expr + TimeBound + enabled；same_as 去重）+ GroupList（组间 OR；全禁用≡空列表≡全可见）
-├── search_model.rs # SearchGroup（单 pattern）/SearchGroupList（组间高亮 OR）+ SearchBox（draft；Enter 一次提交）
+├── search_model.rs # SearchGroup（单 pattern）/SearchGroupList（组间高亮 OR）+ SearchBox（居中模态 draft；历史 chip 前缀候选；Enter/Tab 确认）
 ├── input.rs        # ChipField/Chip/InputBox（Enter 两段式：收 pill / 提交组）/Popup + build_group（复用 Expr::from_filters）
-├── app.rs          # App 状态机：rows/visible/groups/search_groups/Focus/following/strip 高度动画/pending_d(dd|di)/search_box
-├── ui.rs           # 渲染：render_log_list（换行+多色高亮）/pill 风格 chip strip/input/search_box/popup/status_bar
+├── app.rs          # App 状态机：rows/visible/groups/search_groups/Focus/following/pending_d(dd|di)/search_box
+├── ui.rs           # 渲染：log list/chip strip + 共用居中模态壳（Input/Search）+ 字段/历史候选 List + status_bar
 ├── theme.rs        # UI 颜色映射唯一入口：chip_pill/search_pill/caret_bar/border/highlight 等，日志色派生自 aloggrep::logcolor
 └── ingest.rs        # 统一摄入管线：spawn_file_ingest（-f，io::Result 立即报告打开失败）/ spawn_hdc_ingest（--hdc，复用 aloggrep-core::hdc）
 ```
@@ -75,28 +75,28 @@ aloggrep-tui/src/
 - **输出路径分支**：`run_simple`（常规快速路径）vs `run_with_context`（-C/-A/-B 上下文行缓冲）vs `run_time_context`（--time-context 两遍扫描）vs `run_follow`（--follow-pid/tid 两遍扫描）。
 - **`--hdc` Ctrl-L 清屏（CLI）**：仅在 stdin/stdout 都是 tty 时启用；用 cbreak 模式（保留 `ISIG`）而非标准 raw mode，避免破坏现有 Ctrl+C 依赖的 `SIGINT` 语义。按键上报走 channel + `KeypressGate` 迭代器分发。仅支持 Unix，Windows 上静默不可用。已知权衡：若进程被 `SIGTERM`/`SIGKILL` 直接杀死（而非 Ctrl+C），termios 不会被恢复，终端会卡在 cbreak 模式，需手动 `stty sane`/`reset`——这与 vim/less 等直接操作终端的工具在被强杀时的行为一致，未特殊处理。
 - **`aloggrep-tui` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。Input：`Space` 进草稿（可含空格）；有草稿时 `Enter` 收成 pill；无草稿且已有 pill 时 `Enter` 提交组。提交前按 chip 多重集（ignore-case）去重，重复则不 push。启动 CLI 过滤转为第 0 组（可 `dd`/`di`）。chip 编译走 `Expr::from_filters(..., SameFieldOp::And)`；启动 `initial_group` 仍用 `SameFieldOp::Or`。**TUI 过滤/搜索一律 ignore-case**。
-- **`aloggrep-tui` 的 search chip 模型**：一次搜索 = 一个 `SearchGroup`（单 pattern）。底部 Search：`Space` 字面量进草稿，`Enter` 直接提交（可含空格）；与已有组 ignore-case 去重，重复不 push 但仍 `jump_first_match`。多个搜索 = 多次 `/`+Enter（组间 OR 高亮）；enabled pattern 按全局顺序取 `USER_HIGHLIGHT` 分色；`n`/`N` 跨组跳转。`dd`/`di`/`h`/`l` 与 Filter strip 共用。
+- **`aloggrep-tui` 的 search chip 模型**：一次搜索 = 一个 `SearchGroup`（单 pattern）。Normal `/` 打开居中 Search 模态：`Space` 字面量进草稿；输入时用已有 search chip 做 ignore-case 前缀候选（最多 6 条），`Up`/`Down` 移动，`Enter`/`Tab` 有候选则采用选中项、无候选则用 draft 新建；与已有组 ignore-case 去重，重复不 push 但仍 `jump_first_match`。多个搜索 = 多次 `/`+Enter（组间 OR 高亮）；enabled pattern 按全局顺序取 `USER_HIGHLIGHT` 分色；`n`/`N` 跨组跳转。`dd`/`di`/`h`/`l` 与 Filter strip 共用。
 - **`aloggrep-tui` 的环形缓冲与光标**：`App.rows: VecDeque<EntryRow>` 按 `max_lines` 淘汰最旧行；`App.visible: Vec<usize>` 始终保持升序；`rebuild_visible` 与 `follow_tick` 共同维护 following 不变量。
 - **`aloggrep-tui` 的 Following**：任意 LogList 手动操作（`j/k/J/K`、滚轮、`g/G`、`n/N`、Visual、搜索跳转）一律 `following=false`；**仅 `Esc`（及同等取消路径）** `resume_following`（钉底并恢复）。`G` 只跳底不恢复。
 - **`aloggrep-tui` 的 LogList 滚动跟随**：`ui::render_log_list` 每帧用持久化的 `App.list_offset` 驱动 ratatui `List` 视口。
 - **`aloggrep-tui` 的 LogList 作为行动原点**：`Esc` / Insert 取消 / 提交 Filter 组 → `Focus::LogList` 并恢复 following；SearchBox `Enter` 上屏后跳到首命中（退出 following）；`dd` 删光 strip 后回 LogList。popup 打开时 `Esc` 只关 popup。
 - **`aloggrep-tui` 的 LogList 快速移动与鼠标滚轮**：`Shift+J`/`Shift+K` 各 7 行；滚轮各 3 行，始终作用于日志列表。
 - **`aloggrep-tui` 的终端生命周期**：panic hook 在 `main()` 最开始安装；`--hdc` 子进程经 `HdcChildGuard` RAII 清理。
-- **`aloggrep-tui` 的 Ctrl+C 语义**：Normal 退出；Insert 有 popup 只关 popup，否则重置 Input 并 `Esc` 式回 LogList+follow；SearchBox 编辑中取消搜索并 follow。
-- **`aloggrep-tui` 的四个可聚焦分区**：`Focus` 为 `ChipStrip`/`SearchStrip`/`LogList`/`Input`；`Tab`/`4` 进入 Input 时自动 Insert（无 idle Normal）。Insert 下仍可用 `Tab`/`BackTab` 切焦点（数字键当字面量）；Input 全空时 `Enter` 切到 LogList。Filter/Search strip **为空则折叠**（高度 lerp 动画，约 200–300ms）。布局：Filter（可 0 高）→ Search strip（可 0 高）→ Log → Input → 底部 Search 输入 → status。
+- **`aloggrep-tui` 的 Ctrl+C 语义**：Normal 退出；Insert 有 popup 只关 popup，否则重置 Input 并回 LogList；Search 模态编辑中取消草稿并回 LogList（不 resume following）。
+- **`aloggrep-tui` 的四个可聚焦分区**：`Focus` 为 `ChipStrip`/`SearchStrip`/`LogList`/`Input`；`Tab`/`4`/`a`/`i`/`o` 进入 Input 时自动 Insert，并打开**居中 Input 模态**（无 idle Normal、无底部常驻输入行）。Insert 下仍可用 `Tab`/`BackTab` 切焦点（数字键当字面量）；Input 全空时 `Enter` 切到 LogList。Filter/Search strip **为空则折叠**（高度按内容即时计算）。布局：Filter（可 0 高）→ Search strip（可 0 高）→ Log（Fill）→ status；Input/Search 输入均为居中浮层（共用 `centered_modal_rect` / `render_modal_shell`），Search 不在 Focus/Tab 循环。
 - **跨 crate 的日志颜色统一**：`aloggrep-core::logcolor` 是唯一的颜色数据源（纯 RGB/枚举，不依赖 `colored`/`ratatui`），CLI 的 `formatter.rs`（`colored`）和 TUI 的 `theme.rs`（`ratatui::style::Color`）各自将其转换成自己的类型。新增/调整日志相关配色只改 `logcolor.rs`，两边自动同步，禁止在 `formatter.rs`/`theme.rs` 里各自硬编码一份 RGB 数值。`USER_HIGHLIGHT` 为 8 档阅读向递进色阶，供 CLI `--highlight` 与 TUI search chip 共用。
 - **`aloggrep-tui` 日志区默认多行展示**：`ui.rs::wrap_ranges` 是唯一的换行实现（贪婪按空白断行，单词超宽则硬切），操作字节区间而非 `Cow<str>`（为了跟 `render_entry_lines` 里已经用 `Regex::find_iter` 算好的高亮命中区间对齐——顺序是"先算高亮区间，再换行"，换行只是把同一份区间数据切成多个 `Span` 分布到多个 `Line`，不会把一个高亮命中切碎到两半）。`ListItem` 内可以放多个 `Line`，`ListState` 选中/滚动天然按整个 item 处理，翻页逻辑（`PAGE_SIZE`/`move_cursor_manual`）不需要感知 item 内部行数。
-- **`aloggrep-tui` 字段候选下拉浮层**：`render_popup` 不再占用固定行高的一行，而是在 `main.rs::popup_rect` 里按 `input_area` **顶边上方**动态算一个悬浮 `Rect`（`Clear` + 圆角 `List`），高度按候选数量 clamp 到 `[1,6]+2`，并 clamp 到不超过 Input 上方可用高度——浮层会盖住日志区底部，这是有意的（下方只剩 Search+status，空间不够），不是 bug。
+- **`aloggrep-tui` 居中模态与字段候选**：Input（`Focus::Input`）与 Search（`search_box.editing`）共用居中浮层壳（圆角 border + `plain_title`）。字段候选 `render_popup` 锚在**居中 Input 模态顶边上方**（`candidate_popup_rect`），高度 clamp 到 `[1,6]+2` 且不超过模态上方可用空间；Search 历史候选嵌在 Search 模态草稿行下方，键位对齐字段 popup（Up/Down/Enter|Tab）。
 
 ## aloggrep-tui UI 设计指导（opencode 风格）
 
 配色与布局遵循以下规则；改动渲染代码前先看这里。所有颜色常量与映射函数集中在 `aloggrep-tui/src/theme.rs`——**禁止在 `ui.rs` 或其他渲染代码里直接写 `Color::*`/硬编码 `Style`**，新增语义就去 `theme.rs` 加常量或函数，保证同一语义在任何地方渲染出来的颜色都一致。
 
-- **四个可聚焦分区套圆角边框，未聚焦低对比度**：Filter/SearchStrip/Log/Input 各自一层 `BorderType::Rounded`，`theme::border_style(active)`：聚焦时 `fg(ACCENT)`，未聚焦时 `fg(DarkGray)+DIM`。边框标题用 `theme::numbered_title(1|2|3|4, label, active)`；底部 Search 输入区与字段候选浮层用 `theme::plain_title`。
+- **Strip/Log 套圆角边框，未聚焦低对比度**：Filter/SearchStrip/Log 各自一层 `BorderType::Rounded`，`theme::border_style(active)`：聚焦时 `fg(ACCENT)`，未聚焦时 `fg(DarkGray)+DIM`。边框标题用 `theme::numbered_title(1|2|3, label, active)`。Input/Search **居中模态**与字段候选浮层用 `theme::plain_title` + 同一套 `render_modal_shell`（始终 active 强调色）。
 - **单一强调色 + 大量 dim**：`theme::ACCENT`（Cyan）是唯一的"焦点/强调"色，非关键信息统一 `Modifier::DIM`，避免多色混战。
-- **焦点**：popup 候选项仍用 `theme::focus_style()` 反色块；Filter/Search **每组**始终套与分区相同的圆角 `Block`（`BorderType::Rounded`），选中为 Magenta（`SELECTION_FRAME`）、未选中为 dim DarkGray 占位——切换选中只改边框色、不改宽度/间距；`di` 禁用用 `disabled_chip_style()`。Strip 目标高度 5（外框 + 内组框）。
+- **焦点**：popup/候选 List 仍用 `theme::focus_style()` 反色块；Filter/Search strip 组选中为 Magenta（`SELECTION_FRAME`）、未选中为 dim DarkGray；`di` 禁用用 `disabled_chip_style()`。
 - **日志行选中态只在 LogList 聚焦时显示，且是柔和灰底**：经 `ListItem::style(log_selection_style())` 施加（**不用** `List::highlight_style`，以免 `Style::patch` 盖掉关键词高亮底色）；失焦时无选中底。关键词 Span 的高亮色在选中行上保持可读叠加。
-- **状态提示用反色徽标**：状态栏 `FOLLOWING` 等为反色块。Input **不画** NORMAL/INSERT 徽标；编辑态仅用 `theme::caret_bar()`（竖线），Search 仅在 `editing` 时画竖线，非编辑不画方块光标。
+- **状态提示用反色徽标**：状态栏 `FOLLOWING` 等为反色块。Input/Search 模态编辑态用 `theme::caret_bar()`（竖线）；非编辑不画模态。
 - **Filter/Search chip 用填充 pill**：`theme::chip_pill`（按 `field_color` / level badge）与 `theme::search_pill`（`highlight_style`）；Input 已提交 chip 与 Filter strip 共用 pill 样式。
 - **字段名颜色全局唯一映射**：`ChipField` 的颜色只由 `theme::field_color` 决定；popup 字段名与 pill 背景同源。
 - **不硬编码 White/Black 当默认前景色**：如 `Level::I`（默认级别）用 `Style::default()` 继承终端主题色，不写 `Color::White`，以兼容浅色/深色终端。

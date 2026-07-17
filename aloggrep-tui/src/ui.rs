@@ -1,4 +1,4 @@
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
@@ -18,6 +18,10 @@ const CHIP_GROUP_GAP: u16 = 1;
 const DOT_PILL_GAP: u16 = 1;
 /// Gap between adjacent pills inside a group.
 const PILL_GAP: u16 = 1;
+/// Shared centered-modal width: leave 2 cols margin each side, clamp to a
+/// readable band so Input and Search share one visual scale.
+pub const MODAL_WIDTH_MIN: u16 = 24;
+pub const MODAL_WIDTH_MAX: u16 = 56;
 
 fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
     Block::new()
@@ -25,6 +29,94 @@ fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(theme::border_style(active))
         .title(title)
+}
+
+/// Unified width for centered Input / Search modals.
+pub fn modal_width(frame_width: u16) -> u16 {
+    frame_width.saturating_sub(4).clamp(MODAL_WIDTH_MIN, MODAL_WIDTH_MAX)
+}
+
+/// Horizontally and vertically center a `width`×`height` rect inside `frame`.
+pub fn centered_modal_rect(frame: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(frame.width).max(1);
+    let height = height.min(frame.height).max(1);
+    let x = frame.x + (frame.width.saturating_sub(width)) / 2;
+    let y = frame.y + (frame.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Clear + rounded active shell with a plain title. Returns the inner content rect.
+pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
+    frame.render_widget(Clear, area);
+    let block = rounded_block(theme::plain_title(title, true), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Clear, inner);
+    inner
+}
+
+/// Candidate list skin shared by field popup and Search history completion.
+pub fn render_candidate_list(
+    title: &str,
+    labels: &[String],
+    styles: &[Style],
+    selected: usize,
+    empty_msg: &str,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    frame.render_widget(Clear, area);
+    let block = rounded_block(theme::plain_title(title, true), true);
+    if labels.is_empty() {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(empty_msg, Style::default().add_modifier(Modifier::DIM))),
+            inner,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = labels
+        .iter()
+        .zip(styles.iter())
+        .map(|(label, style)| ListItem::new(Span::styled(format!(" {label} "), *style)))
+        .collect();
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::focus_style())
+        .highlight_symbol("\u{203a} ");
+    let mut state = ListState::default();
+    state.select(Some(selected.min(labels.len() - 1)));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Field-candidate popup height: `clamp(count,1,6)+2` for border, clamped to
+/// space above the Input modal anchor.
+pub fn candidate_popup_rect(anchor: Rect, frame: Rect, match_count: usize) -> Rect {
+    let desired = match_count.clamp(1, 6) as u16 + 2;
+    let space_above = anchor.y.saturating_sub(frame.y);
+    let height = desired.min(space_above).max(1);
+    Rect {
+        x: anchor.x,
+        y: anchor.y.saturating_sub(height),
+        width: anchor.width,
+        height,
+    }
+}
+
+/// Search modal outer height: input row (+borders) plus optional candidate rows.
+pub fn search_modal_height(candidate_count: usize) -> u16 {
+    let input_shell = 3u16; // border + 1 content line
+    if candidate_count == 0 {
+        input_shell
+    } else {
+        input_shell + candidate_count.clamp(1, 6) as u16
+    }
 }
 
 /// Greedy word-wrap: returns byte ranges into `text`, one per physical
@@ -457,14 +549,7 @@ pub fn render_search_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(search_strip_lines(app, inner.width)), inner);
 }
 
-pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut Frame, area: Rect) {
-    let block = rounded_block(theme::numbered_title(4, "Input", focused), focused);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    // Clear leftovers so a previous longer pill row cannot stain draft/caret cells
-    // (Span styles with `bg: None` do not overwrite an existing background).
-    frame.render_widget(Clear, inner);
-
+fn input_content_spans(input: &InputBox, show_caret: bool) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (i, chip) in input.chips.iter().enumerate() {
         if i > 0 {
@@ -484,63 +569,116 @@ pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut
         ));
     }
     spans.push(Span::styled(input.draft.clone(), Style::reset()));
-    if mode == Mode::Insert {
+    if show_caret {
         spans.push(theme::caret_bar());
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    spans
 }
 
-pub fn render_search_box(search: &SearchBox, frame: &mut Frame, area: Rect) {
-    let editing = search.editing;
-    let block = rounded_block(theme::plain_title("Search", editing), editing);
+/// Centered Input modal (visible while `Focus::Input`).
+pub fn render_input_modal(input: &InputBox, mode: Mode, frame: &mut Frame, area: Rect) {
+    let inner = render_modal_shell("Input", frame, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(input_content_spans(input, mode == Mode::Insert))),
+        inner,
+    );
+}
+
+/// Legacy single-row Input render kept for unit tests that draw into a fixed area.
+pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut Frame, area: Rect) {
+    let block = rounded_block(theme::numbered_title(4, "Input", focused), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(input_content_spans(input, mode == Mode::Insert))),
+        inner,
+    );
+}
 
-    let mut spans = Vec::new();
-    if editing {
-        spans.push(Span::styled(
+/// Centered Search modal with optional history-chip candidate rows below the draft.
+pub fn render_search_modal(
+    search: &SearchBox,
+    groups: &[SearchGroup],
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let candidates = search.candidate_indices(groups);
+    let n = candidates.len().min(6);
+    frame.render_widget(Clear, area);
+
+    let block = rounded_block(theme::plain_title("Search", true), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [draft_area, list_area] = if n == 0 {
+        [inner, Rect::default()]
+    } else {
+        let [d, l] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+        [d, l]
+    };
+
+    frame.render_widget(Clear, draft_area);
+    let spans = vec![
+        Span::styled(
             "/",
             Style::reset().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(search.draft.clone(), Style::reset()));
-        spans.push(theme::caret_bar());
-    } else if !search.is_empty() {
-        // Transient: draft cleared on submit; keep branch for safety.
-        spans.push(Span::styled(search.draft.clone(), Style::reset()));
-    } else {
-        spans.push(Span::styled("(no search)", Style::default().add_modifier(Modifier::DIM)));
+        ),
+        Span::styled(search.draft.clone(), Style::reset()),
+        theme::caret_bar(),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(spans)), draft_area);
+
+    if n > 0 && list_area.height > 0 {
+        let labels: Vec<String> = candidates
+            .iter()
+            .take(n)
+            .map(|&i| groups[i].pattern.clone())
+            .collect();
+        // Color by each group's global enabled-pattern index for consistency
+        // with strip pills; fall back to dim if disabled.
+        let mut color_idx = 0usize;
+        let mut group_color: Vec<Option<usize>> = Vec::with_capacity(groups.len());
+        for g in groups {
+            if g.enabled {
+                group_color.push(Some(color_idx));
+                color_idx += 1;
+            } else {
+                group_color.push(None);
+            }
+        }
+        let styles: Vec<Style> = candidates
+            .iter()
+            .take(n)
+            .map(|&i| match group_color[i] {
+                Some(idx) => theme::highlight_style(idx),
+                None => theme::disabled_chip_style(),
+            })
+            .collect();
+        // Render list without an extra outer title (already inside Search shell).
+        let items: Vec<ListItem> = labels
+            .iter()
+            .zip(styles.iter())
+            .map(|(label, style)| ListItem::new(Span::styled(format!(" {label} "), *style)))
+            .collect();
+        let list = List::new(items)
+            .highlight_style(theme::focus_style())
+            .highlight_symbol("\u{203a} ");
+        let mut state = ListState::default();
+        state.select(Some(search.selected.min(n - 1)));
+        frame.render_stateful_widget(list, list_area, &mut state);
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
     let Some(popup) = &input.popup else { return };
-    frame.render_widget(Clear, area);
-
     let matches = popup.matches();
-    let block = rounded_block(theme::plain_title("字段", true), true);
-
-    if matches.is_empty() {
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        frame.render_widget(
-            Paragraph::new(Span::styled("无匹配字段", Style::default().add_modifier(Modifier::DIM))),
-            inner,
-        );
-        return;
-    }
-
-    let items: Vec<ListItem> = matches
+    let labels: Vec<String> = matches.iter().map(|f| f.keyword().to_string()).collect();
+    let styles: Vec<Style> = matches
         .iter()
-        .map(|&f| {
-            ListItem::new(Span::styled(format!(" {} ", f.keyword()), Style::default().fg(theme::field_color(f))))
-        })
+        .map(|&f| Style::default().fg(theme::field_color(f)))
         .collect();
-    let list = List::new(items).block(block).highlight_style(theme::focus_style()).highlight_symbol("\u{203a} ");
-    let mut state = ListState::default();
-    state.select(Some(popup.selected));
-    frame.render_stateful_widget(list, area, &mut state);
+    render_candidate_list("字段", &labels, &styles, popup.selected, "无匹配字段", frame, area);
 }
 
 pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
