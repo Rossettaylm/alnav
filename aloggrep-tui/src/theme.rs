@@ -9,7 +9,6 @@ use ratatui::text::{Line, Span};
 use aloggrep::logcolor::{self, Badge};
 use aloggrep::parser::Level;
 
-use crate::app::Mode;
 use crate::input::ChipField;
 
 pub const ACCENT: Color = Color::Cyan;
@@ -74,18 +73,67 @@ pub fn field_color(field: ChipField) -> Color {
 }
 
 /// Reverse-color block used for whatever currently has keyboard focus
-/// (selected chip, selected popup entry) instead of border/bold color
-/// changes.
+/// (selected popup entry, numbered title badge) instead of border/bold color
+/// changes. Not used for Filter/Search chip selection — those tint the
+/// group `●`/`○` via [`chip_group_border_style`].
 pub fn focus_style() -> Style {
     Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
-/// Mode badge shown at the start of the input line.
-pub fn mode_badge(mode: Mode) -> Span<'static> {
-    match mode {
-        Mode::Normal => Span::styled(" NORMAL ", Style::default().add_modifier(Modifier::DIM)),
-        Mode::Insert => Span::styled(" INSERT ", focus_style()),
+/// Chip-group selection accent: Magenta, distinct from focused-region [`ACCENT`].
+pub const SELECTION_FRAME: Color = Color::Magenta;
+
+/// Style for the group `●`/`○` marker (selected = Magenta, else dim).
+/// One cell wide so chip strips stay a single content row tall.
+pub fn chip_group_border_style(selected: bool) -> Style {
+    if selected {
+        Style::default().fg(SELECTION_FRAME)
+    } else {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
     }
+}
+
+/// Body style for a filter pill (text + fg/bg fill). Drawn as a single-row
+/// filled span inside the strip's rounded region border (per-chip `Block`
+/// chrome needs 3 rows and doubles strip height on typical cell aspect ratios).
+pub fn chip_pill_style(field: ChipField, value: &str, disabled: bool) -> (String, Style) {
+    let text = format!(" {value} ");
+    if disabled {
+        return (text, disabled_chip_style());
+    }
+    let style = match field {
+        ChipField::Level => {
+            let level = match value.chars().next().unwrap_or('I').to_ascii_uppercase() {
+                'V' => Level::V,
+                'D' => Level::D,
+                'I' => Level::I,
+                'W' => Level::W,
+                'E' => Level::E,
+                'F' => Level::F,
+                _ => Level::I,
+            };
+            level_badge_style(level)
+        }
+        other => Style::default()
+            .fg(Color::Black)
+            .bg(field_color(other))
+            .add_modifier(Modifier::BOLD),
+    };
+    (text, style)
+}
+
+/// Body style for a search pill — same single-row fill model as [`chip_pill_style`].
+pub fn search_pill_style(pattern: &str, color_idx: usize, disabled: bool) -> (String, Style) {
+    let text = format!(" {pattern} ");
+    if disabled {
+        return (text, disabled_chip_style());
+    }
+    (text, highlight_style(color_idx))
+}
+
+/// Thin editing caret (Insert / search editing). Idle block caret is unused.
+pub fn caret_bar() -> Span<'static> {
+    Span::styled("▏", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
 /// Border color for a bordered region: bright accent when it currently has
@@ -126,17 +174,6 @@ pub fn plain_title(label: &str, active: bool) -> Line<'static> {
     Line::from(Span::styled(format!(" {label} "), label_style))
 }
 
-/// Fake caret appended after drafted text: a block for the "idle/normal"
-/// state, a thin line for "actively editing" (mirrors vim's Normal/Insert
-/// cursor shapes).
-pub fn caret(is_editing: bool) -> Span<'static> {
-    if is_editing {
-        Span::styled("▏", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
-    } else {
-        Span::styled("█", Style::default().fg(ACCENT))
-    }
-}
-
 /// Selected-row background in the log list — a quiet, low-contrast gray
 /// instead of a full reverse-video block. Applied via `ListItem::style` (not
 /// `List::highlight_style`) so keyword highlight spans keep their own bg;
@@ -174,5 +211,19 @@ mod tests {
     #[test]
     fn test_log_visual_style_differs_from_selection() {
         assert_ne!(log_visual_style().bg, log_selection_style().bg);
+    }
+
+    #[test]
+    fn test_chip_group_border_style_distinct_from_region_accent() {
+        assert_ne!(SELECTION_FRAME, ACCENT);
+        assert_eq!(chip_group_border_style(true).fg, Some(SELECTION_FRAME));
+        assert_eq!(chip_group_border_style(false).fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_chip_pill_style_fill() {
+        let (text, body) = chip_pill_style(ChipField::Tag, "MyTag", false);
+        assert!(text.contains("MyTag"));
+        assert_eq!(body.bg, Some(ACCENT));
     }
 }

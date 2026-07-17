@@ -1,12 +1,15 @@
 use aloggrep::expr::Expr;
 
+use crate::input::{Chip, ChipField};
 use crate::model::EntryRow;
 
 /// One AND-combined filter clause plus an optional read-only time bound
 /// (from `--since`/`--until`, which `expr::Expr` can't express — see design
-/// doc "过滤条件的整体语义"). `label` is precomputed display text.
+/// doc "过滤条件的整体语义"). `label` is precomputed display text; `chips`
+/// drives pill rendering and dedup (time-only groups may have empty chips).
 pub struct Group {
     pub label: String,
+    pub chips: Vec<Chip>,
     pub expr: Option<Expr>,
     pub time: Option<TimeBound>,
     /// When false, the group is ignored by `GroupList::matches` (soft disable
@@ -20,6 +23,36 @@ impl Group {
         let expr_ok = self.expr.as_ref().map_or(true, |e| e.matches(&le));
         let time_ok = self.time.as_ref().map_or(true, |t| t.matches(&le));
         expr_ok && time_ok
+    }
+
+    /// Chip multiset equality (field + ignore-case value) plus identical time bound.
+    pub fn same_as(&self, other: &Group) -> bool {
+        if !time_bound_eq(&self.time, &other.time) {
+            return false;
+        }
+        if self.chips.len() != other.chips.len() {
+            return false;
+        }
+        let mut a = normalize_chips(&self.chips);
+        let mut b = normalize_chips(&other.chips);
+        a.sort();
+        b.sort();
+        a == b
+    }
+}
+
+fn normalize_chips(chips: &[Chip]) -> Vec<(ChipField, String)> {
+    chips
+        .iter()
+        .map(|c| (c.field, c.value.to_ascii_lowercase()))
+        .collect()
+}
+
+fn time_bound_eq(a: &Option<TimeBound>, b: &Option<TimeBound>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.since == b.since && a.until == b.until,
+        _ => false,
     }
 }
 
@@ -99,6 +132,7 @@ mod tests {
     fn group(label: &str, expr: Option<Expr>) -> Group {
         Group {
             label: label.into(),
+            chips: Vec::new(),
             expr,
             time: None,
             enabled: true,
@@ -143,6 +177,7 @@ mod tests {
         let list = GroupList {
             groups: vec![Group {
                 label: "since/until".into(),
+                chips: Vec::new(),
                 expr: None,
                 time: Some(bound),
                 enabled: true,
@@ -157,6 +192,7 @@ mod tests {
         let list = GroupList {
             groups: vec![Group {
                 label: "tag:A".into(),
+                chips: Vec::new(),
                 expr: Some(expr),
                 time: None,
                 enabled: false,
@@ -172,12 +208,14 @@ mod tests {
             groups: vec![
                 Group {
                     label: "tag:A".into(),
+                    chips: Vec::new(),
                     expr: Some(Expr::parse("tag~A", false).unwrap()),
                     time: None,
                     enabled: false,
                 },
                 Group {
                     label: "tag:B".into(),
+                    chips: Vec::new(),
                     expr: Some(Expr::parse("tag~B", false).unwrap()),
                     time: None,
                     enabled: true,

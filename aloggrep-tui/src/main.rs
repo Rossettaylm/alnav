@@ -18,7 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::Terminal;
 
-use aloggrep::expr::Expr;
+use aloggrep::expr::{Expr, SameFieldOp};
 
 use app::App;
 use filter_model::{Group, GroupList, TimeBound};
@@ -78,7 +78,10 @@ struct Cli {
 
 fn initial_group(cli: &Cli) -> Result<GroupList, String> {
     // TUI always compiles filters case-insensitively (CLI `-i` is a no-op).
-    let expr = Expr::from_filters(&cli.tag, &cli.msg, &cli.pkg, &cli.pid, &cli.tid, cli.level.as_deref(), true)?;
+    // Startup CLI multi-values keep OR (`msg:a|b` label); interactive chips use And.
+    let expr = Expr::from_filters(
+        &cli.tag, &cli.msg, &cli.pkg, &cli.pid, &cli.tid, cli.level.as_deref(), true, SameFieldOp::Or,
+    )?;
     let time = if cli.since.is_some() || cli.until.is_some() {
         Some(TimeBound { since: cli.since.clone(), until: cli.until.clone() })
     } else {
@@ -86,6 +89,25 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
     };
     if expr.is_none() && time.is_none() {
         return Ok(GroupList::default());
+    }
+    let mut chips = Vec::new();
+    for v in &cli.tag {
+        chips.push(input::Chip { field: input::ChipField::Tag, value: v.clone() });
+    }
+    for v in &cli.msg {
+        chips.push(input::Chip { field: input::ChipField::Msg, value: v.clone() });
+    }
+    for v in &cli.pkg {
+        chips.push(input::Chip { field: input::ChipField::Pkg, value: v.clone() });
+    }
+    for v in &cli.pid {
+        chips.push(input::Chip { field: input::ChipField::Pid, value: v.clone() });
+    }
+    for v in &cli.tid {
+        chips.push(input::Chip { field: input::ChipField::Tid, value: v.clone() });
+    }
+    if let Some(l) = &cli.level {
+        chips.push(input::Chip { field: input::ChipField::Level, value: l.clone() });
     }
     let mut label_parts = Vec::new();
     if !cli.tag.is_empty() { label_parts.push(format!("tag:{}", cli.tag.join("|"))); }
@@ -100,6 +122,7 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
     Ok(GroupList {
         groups: vec![Group {
             label,
+            chips,
             expr,
             time,
             enabled: true,
@@ -279,10 +302,13 @@ fn run<B: ratatui::backend::Backend>(
 
         terminal
             .draw(|frame| {
+                let outer_w = frame.area().width;
+                let filter_h = ui::filter_strip_height(app, outer_w);
+                let search_h = ui::search_strip_height(app, outer_w);
                 let [filter_area, search_strip_area, log_area, input_area, search_area, status_area] =
                     Layout::vertical([
-                        Constraint::Length(3),
-                        Constraint::Length(3),
+                        Constraint::Length(filter_h),
+                        Constraint::Length(search_h),
                         Constraint::Fill(1),
                         Constraint::Length(3),
                         Constraint::Length(3),
@@ -372,10 +398,28 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
             } else {
                 *input = input::InputBox::default();
                 app.mode = Mode::Normal;
-                app.focus = app::Focus::LogList;
+                focus_loglist(app);
             }
         }
     }
+}
+
+/// Return keyboard focus to the log list without changing cursor / offset /
+/// following. Used when leaving ChipStrip/SearchStrip/Input/SearchBox.
+fn focus_loglist(app: &mut App) {
+    app.focus = app::Focus::LogList;
+}
+
+/// Return focus to the log list and resume live follow (pin to bottom).
+/// Reserved for Esc on LogList, Visual Esc, and successful filter-group submit.
+fn focus_loglist_and_follow(app: &mut App) {
+    app.focus = app::Focus::LogList;
+    app.resume_following();
+}
+
+fn focus_input_insert(app: &mut App) {
+    app.focus = app::Focus::Input;
+    app.mode = app::Mode::Insert;
 }
 
 /// Mouse wheel step size for the log list, independent of `PAGE_SIZE`
@@ -405,11 +449,11 @@ fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
     let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Enter => {
-            match app.search_box.build_group() {
+            match app.search_box.submit_draft() {
                 Ok(Some(group)) => {
-                    app.search_groups.groups.push(group);
+                    let idx = app.push_or_find_search_group(group);
                     app.search_box.clear();
-                    let _ = app.jump_first_match();
+                    let _ = app.jump_first_match_of(idx);
                     app.focus = app::Focus::LogList;
                 }
                 Ok(None) => {
@@ -418,19 +462,18 @@ fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
                 Err(()) => {
                     // bad regex: exit editing, keep prior search groups
                     app.search_box.clear();
-                    app.focus = app::Focus::LogList;
+                    focus_loglist(app);
                 }
             }
         }
         KeyCode::Esc => {
             app.search_box.clear();
-            app.focus = app::Focus::LogList;
+            focus_loglist(app);
         }
         _ if is_ctrl_c => {
             app.search_box.clear();
-            app.focus = app::Focus::LogList;
+            focus_loglist(app);
         }
-        KeyCode::Char(' ') => app.search_box.commit_draft_as_chip(),
         KeyCode::Backspace => app.search_box.backspace(),
         KeyCode::Char(c) => app.search_box.push_char(c),
         _ => {}
@@ -512,7 +555,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             }
             KeyCode::Esc => {
                 app.clear_visual();
-                app.focus = Focus::LogList;
+                focus_loglist_and_follow(app);
                 return;
             }
             _ => {
@@ -562,13 +605,29 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
 
     match (app.focus, code) {
         (_, KeyCode::Char('q')) => app.should_quit = true,
-        (_, KeyCode::Tab) => app.cycle_focus_forward(),
-        (_, KeyCode::BackTab) => app.cycle_focus_backward(),
+        (_, KeyCode::Tab) => {
+            app.cycle_focus_forward();
+            if app.focus == Focus::Input {
+                app.mode = app::Mode::Insert;
+            }
+        }
+        (_, KeyCode::BackTab) => {
+            app.cycle_focus_backward();
+            if app.focus == Focus::Input {
+                app.mode = app::Mode::Insert;
+            }
+        }
         (_, KeyCode::Char('1')) => app.focus = Focus::ChipStrip,
         (_, KeyCode::Char('2')) => app.focus = Focus::SearchStrip,
         (_, KeyCode::Char('3')) => app.focus = Focus::LogList,
-        (_, KeyCode::Char('4')) => app.focus = Focus::Input,
-        (_, KeyCode::Esc) => app.focus = Focus::LogList,
+        (_, KeyCode::Char('4')) => focus_input_insert(app),
+        (_, KeyCode::Esc) => {
+            if app.focus == Focus::LogList {
+                focus_loglist_and_follow(app);
+            } else {
+                focus_loglist(app);
+            }
+        }
         (Focus::LogList, KeyCode::Char('j')) => app.move_cursor_manual(1),
         (Focus::LogList, KeyCode::Char('k')) => app.move_cursor_manual(-1),
         (Focus::LogList, KeyCode::Char('J')) => app.move_cursor_manual(7),
@@ -577,7 +636,10 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             app.following = false;
             app.jump_top();
         }
-        (Focus::LogList, KeyCode::Char('G')) => app.jump_bottom_resume_follow(),
+        (Focus::LogList, KeyCode::Char('G')) => {
+            app.following = false;
+            app.jump_bottom();
+        }
         (Focus::LogList, KeyCode::Char('y')) => {
             app.pending_yank = true;
             app.status_msg = Some("y…".into());
@@ -598,17 +660,11 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (Focus::ChipStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Filter, 1),
         (Focus::SearchStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Search, -1),
         (Focus::SearchStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Search, 1),
-        // Esc and Ctrl+C (when no popup is open) are the two Insert->Normal
-        // transitions; both reset *input first.
         (_, KeyCode::Char('a') | KeyCode::Char('i') | KeyCode::Char('o')) => {
-            app.focus = Focus::Input;
-            app.mode = app::Mode::Insert;
+            focus_input_insert(app);
         }
         (_, KeyCode::Char('/')) => {
             app.search_box.editing = true;
-            if app.search_box.chips.is_empty() && app.search_box.draft.is_empty() {
-                // fresh session
-            }
         }
         _ => {}
     }
@@ -628,23 +684,45 @@ fn handle_insert_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) 
         return Ok(());
     }
 
-    // Tab/BackTab intentionally do nothing mid-Insert. Esc always returns
-    // focus to the log list; Enter does the same, but only when it actually
-    // completes a filter group (build_group returns Some).
-    // Filter chips always compile case-insensitively.
+    // Tab/BackTab cycle focus while editing (digits stay literal chars).
+    // Enter two-step: pending draft → commit pill; chips ready → submit group;
+    // empty input → jump focus to LogList.
+    // Filter chips always compile case-insensitively. Space is literal text.
     match code {
         KeyCode::Esc => {
             *input = input::InputBox::default();
             app.mode = app::Mode::Normal;
-            app.focus = app::Focus::LogList;
+            focus_loglist(app);
+        }
+        KeyCode::Tab => {
+            app.cycle_focus_forward();
+            app.mode = if app.focus == app::Focus::Input {
+                app::Mode::Insert
+            } else {
+                app::Mode::Normal
+            };
+        }
+        KeyCode::BackTab => {
+            app.cycle_focus_backward();
+            app.mode = if app.focus == app::Focus::Input {
+                app::Mode::Insert
+            } else {
+                app::Mode::Normal
+            };
         }
         KeyCode::Char('/') => input.open_popup(),
         KeyCode::Enter => {
-            if let Some(group) = input.build_group(true)? {
-                app.groups.groups.push(group);
-                app.rebuild_visible();
+            if input.has_pending_draft() {
+                input.commit_draft_as_chip();
+            } else if input.is_empty() {
                 app.mode = app::Mode::Normal;
                 app.focus = app::Focus::LogList;
+            } else if let Some(group) = input.build_group(true)? {
+                if app.push_filter_group(group) {
+                    app.rebuild_visible();
+                }
+                app.mode = app::Mode::Normal;
+                focus_loglist_and_follow(app);
             }
         }
         KeyCode::Backspace => input.backspace(),
@@ -689,13 +767,13 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_number_keys_switch_focus_without_entering_insert() {
+    fn test_number_keys_switch_focus_and_4_enters_insert() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('4'));
         assert_eq!(app.focus, app::Focus::Input);
-        assert_eq!(app.mode, app::Mode::Normal, "number keys must not start editing");
+        assert_eq!(app.mode, app::Mode::Insert, "4 focuses Input in Insert (no idle Normal)");
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('1'));
         assert_eq!(app.focus, app::Focus::ChipStrip);
@@ -708,12 +786,42 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_esc_in_normal_mode_returns_focus_to_loglist() {
+    fn test_esc_from_other_focus_preserves_loglist_position() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..20 {
+            tx.send(model::EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I Tag     : line{i}")).unwrap())
+                .unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 5;
+        app.list_offset = 2;
+        app.following = false;
         app.focus = app::Focus::ChipStrip;
         handle_normal_key(&mut app, &mut input, KeyCode::Esc);
         assert_eq!(app.focus, app::Focus::LogList);
+        assert!(!app.following, "Esc from ChipStrip must not resume following");
+        assert_eq!(app.cursor, 5);
+        assert_eq!(app.list_offset, 2);
+    }
+
+    #[test]
+    fn test_esc_on_loglist_resumes_follow() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap()).unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : b").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.move_cursor_manual(-1);
+        assert!(!app.following);
+        assert_eq!(app.cursor, 0);
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert!(app.following);
+        assert_eq!(app.cursor, 1);
     }
 
     #[test]
@@ -796,27 +904,70 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_enter_builds_group_and_returns_focus_to_loglist() {
+    fn test_enter_two_step_builds_group_and_returns_focus_to_loglist() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         input.push_char('x');
-        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // commit pill
+        assert_eq!(input.chips.len(), 1);
+        assert_eq!(app.groups.groups.len(), 0);
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // submit group
         assert_eq!(app.groups.groups.len(), 1);
         assert_eq!(app.mode, app::Mode::Normal, "adding a group should behave like Esc: back to Normal");
         assert_eq!(app.focus, app::Focus::LogList, "adding a group should jump focus back to the log list");
-        assert!(input.chips.is_empty()); // build_group cleared it
+        assert!(app.following);
+        assert!(input.chips.is_empty());
     }
 
     #[test]
-    fn test_enter_with_empty_draft_does_not_change_mode_or_focus() {
+    fn test_enter_with_empty_input_focuses_loglist() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
         assert!(app.groups.groups.is_empty(), "empty draft must not build a group");
-        assert_eq!(app.mode, app::Mode::Insert, "empty-Enter no-op must not touch mode");
-        assert_eq!(app.focus, app::Focus::Input, "empty-Enter no-op must not touch focus");
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert_eq!(app.focus, app::Focus::LogList, "empty Enter switches focus to LogList");
+    }
+
+    #[test]
+    fn test_tab_in_insert_cycles_focus_away_from_input() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x'); // draft preserved across Tab
+        handle_insert_key(&mut app, &mut input, KeyCode::Tab).unwrap();
+        assert_eq!(app.focus, app::Focus::ChipStrip);
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert_eq!(input.draft, "x");
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // ChipStrip → SearchStrip
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → LogList
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → Input + Insert
+        assert_eq!(app.focus, app::Focus::Input);
+        assert_eq!(app.mode, app::Mode::Insert);
+    }
+
+    #[test]
+    fn test_digit_in_insert_is_literal_not_focus_switch() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        handle_insert_key(&mut app, &mut input, KeyCode::Char('1')).unwrap();
+        assert_eq!(app.focus, app::Focus::Input);
+        assert_eq!(input.draft, "1");
+    }
+
+    #[test]
+    fn test_space_is_literal_in_input_draft() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('a');
+        handle_insert_key(&mut app, &mut input, KeyCode::Char(' ')).unwrap();
+        input.push_char('b');
+        assert_eq!(input.draft, "a b");
+        assert!(input.chips.is_empty());
     }
 
     #[test]
@@ -828,9 +979,26 @@ mod dispatch_tests {
         for c in "mytag".chars() {
             input.push_char(c);
         }
-        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // pill
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // submit
         let row = crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I MyTag   : m").unwrap();
         assert!(app.groups.matches(&row), "filter chips must ignore case by default");
+    }
+
+    #[test]
+    fn test_filter_group_dedup_skips_duplicate() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x');
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        assert_eq!(app.groups.groups.len(), 1);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        input.push_char('x');
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        assert_eq!(app.groups.groups.len(), 1, "duplicate filter group must not be added");
     }
 
     #[test]
@@ -839,6 +1007,7 @@ mod dispatch_tests {
         let mut input = input::InputBox::default();
         app.groups.groups.push(Group {
             label: "g0".into(),
+            chips: Vec::new(),
             expr: None,
             time: None,
             enabled: true,
@@ -857,6 +1026,7 @@ mod dispatch_tests {
         let mut input = input::InputBox::default();
         app.groups.groups.push(Group {
             label: "g0".into(),
+            chips: Vec::new(),
             expr: None,
             time: None,
             enabled: true,
@@ -908,20 +1078,61 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_search_box_space_commits_chip_then_enter() {
+    fn test_search_box_space_is_literal_single_enter_submits() {
         let mut app = App::new(100);
         app.search_box.editing = true;
-        for c in "foo".chars() {
-            app.search_box.push_char(c);
-        }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert_eq!(app.search_box.chips, vec!["foo"]);
-        for c in "bar".chars() {
+        for c in "foo bar".chars() {
             app.search_box.push_char(c);
         }
         handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.search_groups.groups[0].label, "foo AND bar");
-        assert_eq!(app.search_groups.active_patterns().len(), 2);
+        assert_eq!(app.search_groups.groups.len(), 1);
+        assert_eq!(app.search_groups.groups[0].pattern, "foo bar");
+        assert_eq!(app.search_groups.active_patterns().len(), 1);
+    }
+
+    #[test]
+    fn test_search_box_duplicate_jumps_without_adding() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap()).unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : findme here").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+
+        app.search_box.editing = true;
+        for c in "findme".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.search_groups.groups.len(), 1);
+        assert_eq!(app.cursor, 1);
+
+        app.cursor = 0;
+        app.search_box.editing = true;
+        for c in "FINDME".chars() {
+            app.search_box.push_char(c);
+        }
+        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.search_groups.groups.len(), 1, "duplicate must not add another group");
+        assert_eq!(app.cursor, 1, "duplicate still jumps to first match");
+    }
+
+    #[test]
+    fn test_g_jump_bottom_does_not_resume_follow() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap()).unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : b").unwrap()).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.move_cursor_manual(-1);
+        assert!(!app.following);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('G'));
+        assert_eq!(app.cursor, 1);
+        assert!(!app.following, "G must not resume following; only Esc on LogList does");
     }
 
     #[test]
@@ -939,7 +1150,7 @@ mod dispatch_tests {
         let mut app = App::new(100);
         app.search_groups
             .groups
-            .push(search_model::SearchGroup::from_patterns(&["existing".into()]).unwrap());
+            .push(search_model::SearchGroup::from_pattern("existing").unwrap());
         app.search_box.editing = true;
         for c in "(unclosed".chars() {
             app.search_box.push_char(c);
@@ -1118,7 +1329,7 @@ mod dispatch_tests {
         app.cursor = 0;
         app.search_groups
             .groups
-            .push(search_model::SearchGroup::from_patterns(&["hit".into()]).unwrap());
+            .push(search_model::SearchGroup::from_pattern("hit").unwrap());
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 1);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));

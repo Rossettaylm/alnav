@@ -1,7 +1,7 @@
-use aloggrep::expr::Expr;
+use aloggrep::expr::{Expr, SameFieldOp};
 use crate::filter_model::Group;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChipField {
     Tag,
     Msg,
@@ -82,6 +82,12 @@ impl InputBox {
         self.chips.is_empty() && self.draft.is_empty() && self.draft_field.is_none()
     }
 
+    /// True when Enter should commit a pill rather than submit the group:
+    /// there is draft text and/or a selected field awaiting a value.
+    pub fn has_pending_draft(&self) -> bool {
+        !self.draft.is_empty() || self.draft_field.is_some()
+    }
+
     /// `/`: finish the in-progress token, then open the field popup.
     pub fn open_popup(&mut self) {
         self.commit_draft_as_chip();
@@ -102,15 +108,11 @@ impl InputBox {
         self.popup = None;
     }
 
-    /// Enter: commit the in-progress token, compile all chips into a `Group`
-    /// via `Expr::from_filters` (same-field chips OR'd via its
-    /// `compile_joined` helper, cross-field AND'd — matches this project's
-    /// documented filter semantics), and clear the buffer. Returns
-    /// `Ok(None)` if there's nothing to compile (design doc: empty Enter is
-    /// a no-op, not a "clear all" — `dd` on the chip strip is the only way
-    /// to remove an already-confirmed group).
+    /// Compile already-committed chips into a `Group` via `Expr::from_filters`
+    /// with [`SameFieldOp::And`]. Does **not** commit the in-progress draft —
+    /// caller uses Enter two-step: pending draft → `commit_draft_as_chip`,
+    /// empty draft + chips → `build_group`. Returns `Ok(None)` if chips empty.
     pub fn build_group(&mut self, case_insensitive: bool) -> Result<Option<Group>, String> {
-        self.commit_draft_as_chip();
         if self.chips.is_empty() {
             return Ok(None);
         }
@@ -130,16 +132,19 @@ impl InputBox {
                 ChipField::Level => level = Some(chip.value.as_str()),
             }
         }
-        let expr = Expr::from_filters(&tag, &msg, &pkg, &pid, &tid, level, case_insensitive)?;
+        let expr = Expr::from_filters(
+            &tag, &msg, &pkg, &pid, &tid, level, case_insensitive, SameFieldOp::And,
+        )?;
         let label = self
             .chips
             .iter()
             .map(|c| format!("{}:{}", c.field.keyword(), c.value))
             .collect::<Vec<_>>()
             .join(" AND ");
-        self.chips.clear();
+        let chips = std::mem::take(&mut self.chips);
         Ok(Some(Group {
             label,
+            chips,
             expr,
             time: None,
             enabled: true,
@@ -318,8 +323,10 @@ mod build_group_tests {
         input.confirm_popup(); // picks Level
         input.push_char('W');
 
+        input.commit_draft_as_chip(); // level:W
         let group = input.build_group(false).unwrap().unwrap();
         assert_eq!(group.label, "tag:A AND level:W");
+        assert_eq!(group.chips.len(), 2);
         assert!(group.matches(&row("A", "m", "E")));
         assert!(!group.matches(&row("A", "m", "I")));
         assert!(!group.matches(&row("B", "m", "E")));
@@ -335,25 +342,34 @@ mod build_group_tests {
     fn test_build_group_clears_chips() {
         let mut input = InputBox::default();
         input.push_char('x');
+        input.commit_draft_as_chip();
         input.build_group(false).unwrap();
         assert!(input.chips.is_empty());
     }
 
     #[test]
-    fn test_build_group_same_field_chips_are_ored() {
+    fn test_build_group_same_field_chips_are_anded() {
         let mut input = InputBox::default();
-        input.set_field(ChipField::Tag);
-        input.push_char('A');
+        input.set_field(ChipField::Msg);
+        for c in "trace=".chars() {
+            input.push_char(c);
+        }
         input.open_popup();
-        input.popup.as_mut().unwrap().push_char('t');
-        input.confirm_popup(); // picks Tag again
-        input.push_char('B');
+        input.popup.as_mut().unwrap().push_char('m');
+        input.confirm_popup(); // Msg again
+        for c in "0x1100".chars() {
+            input.push_char(c);
+        }
+        input.commit_draft_as_chip();
 
-        let group = input.build_group(false).unwrap().unwrap();
-        let row = |tag: &str| EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I {tag}   : m")).unwrap();
-        assert!(group.matches(&row("A")));
-        assert!(group.matches(&row("B")));
-        assert!(!group.matches(&row("C")));
+        let group = input.build_group(true).unwrap().unwrap();
+        assert_eq!(group.label, "msg:trace= AND msg:0x1100");
+        let row = |msg: &str| {
+            EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I Tag   : {msg}")).unwrap()
+        };
+        assert!(group.matches(&row("foo trace=0x1100 bar")));
+        assert!(!group.matches(&row("foo trace=999 bar")));
+        assert!(!group.matches(&row("foo code=0x1100 bar")));
     }
 
     #[test]
@@ -363,8 +379,22 @@ mod build_group_tests {
         input.push_char('\''); input.push_char('t'); input.push_char(' ');
         input.push_char('"'); input.push_char('h'); input.push_char('i'); input.push_char('"');
         // draft is now: can't "hi"  (defaults to msg field)
+        input.commit_draft_as_chip();
         let group = input.build_group(false).unwrap().unwrap();
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag   : can't \"hi\" there").unwrap();
         assert!(group.matches(&row));
+    }
+
+    #[test]
+    fn test_has_pending_draft() {
+        let mut input = InputBox::default();
+        assert!(!input.has_pending_draft());
+        input.set_field(ChipField::Tag);
+        assert!(input.has_pending_draft());
+        input.push_char('a');
+        assert!(input.has_pending_draft());
+        input.commit_draft_as_chip();
+        assert!(!input.has_pending_draft());
+        assert!(!input.chips.is_empty());
     }
 }

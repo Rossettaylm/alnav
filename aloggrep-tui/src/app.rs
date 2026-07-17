@@ -195,15 +195,16 @@ impl App {
         }
     }
 
-    /// Manual upward movement pauses following; jumping to bottom resumes it.
+    /// Any manual cursor movement pauses following. Resume only via Esc on
+    /// LogList (also Visual Esc / successful filter-group submit).
     pub fn move_cursor_manual(&mut self, delta: isize) {
-        if delta < 0 {
-            self.following = false;
-        }
+        self.following = false;
         self.move_cursor(delta);
     }
 
-    pub fn jump_bottom_resume_follow(&mut self) {
+    /// Pin to bottom and resume live follow (Esc on LogList / Visual Esc /
+    /// filter-group submit).
+    pub fn resume_following(&mut self) {
         self.following = true;
         self.jump_bottom();
     }
@@ -405,24 +406,51 @@ impl App {
         false
     }
 
-    /// Jump to the first visible row matching the newest search group.
-    /// Used after committing a new search group. Returns false if none match.
-    pub fn jump_first_match(&mut self) -> bool {
-        let Some(group_idx) = self.search_groups.groups.len().checked_sub(1) else {
+    /// Jump to the first visible row matching search group `group_idx`.
+    /// Used after committing a search (or re-submitting a duplicate).
+    pub fn jump_first_match_of(&mut self, group_idx: usize) -> bool {
+        let Some(group) = self.search_groups.groups.get(group_idx) else {
             return false;
         };
-        if !self.search_groups.groups[group_idx].enabled {
+        if !group.enabled {
             return false;
         }
         for idx in 0..self.visible.len() {
             let row_idx = self.visible[idx];
-            if self.search_groups.groups[group_idx].matches_msg(&self.rows[row_idx].msg) {
+            if group.matches_msg(&self.rows[row_idx].msg) {
                 self.following = false;
                 self.cursor = idx;
                 return true;
             }
         }
         false
+    }
+
+    /// Jump to the first visible row matching the newest search group.
+    pub fn jump_first_match(&mut self) -> bool {
+        let Some(group_idx) = self.search_groups.groups.len().checked_sub(1) else {
+            return false;
+        };
+        self.jump_first_match_of(group_idx)
+    }
+
+    /// Push a filter group unless an equivalent already exists. Returns whether pushed.
+    pub fn push_filter_group(&mut self, group: crate::filter_model::Group) -> bool {
+        if self.groups.groups.iter().any(|g| g.same_as(&group)) {
+            return false;
+        }
+        self.groups.groups.push(group);
+        true
+    }
+
+    /// Push a search group, or return the index of an existing equivalent.
+    /// Caller always jumps to that group's first match.
+    pub fn push_or_find_search_group(&mut self, group: crate::search_model::SearchGroup) -> usize {
+        if let Some(idx) = self.search_groups.find_equivalent(&group.pattern) {
+            return idx;
+        }
+        self.search_groups.groups.push(group);
+        self.search_groups.groups.len() - 1
     }
 
     /// Search hit position among visible rows: `None` when no enabled pattern;
@@ -460,6 +488,7 @@ mod tests {
     fn filter_group(label: &str, expr: Option<Expr>) -> Group {
         Group {
             label: label.into(),
+            chips: Vec::new(),
             expr,
             time: None,
             enabled: true,
@@ -596,6 +625,7 @@ mod focus_tests {
     fn g(label: &str) -> Group {
         Group {
             label: label.into(),
+            chips: Vec::new(),
             expr: None,
             time: None,
             enabled: true,
@@ -663,6 +693,7 @@ mod focus_tests {
         let mut app = App::new(100);
         app.groups.groups.push(Group {
             label: "a".into(),
+            chips: Vec::new(),
             expr: Some(Expr::parse("tag~A", false).unwrap()),
             time: None,
             enabled: true,
@@ -721,15 +752,34 @@ mod follow_tests {
     }
 
     #[test]
-    fn test_jump_bottom_resumes_follow() {
+    fn test_resume_following_pins_bottom() {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
         drop(tx);
         app.drain(&rx);
         app.move_cursor_manual(-1);
-        app.jump_bottom_resume_follow();
+        assert!(!app.following);
+        app.resume_following();
         assert!(app.following);
+        assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn test_manual_down_also_pauses_follow() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert!(app.following);
+        app.move_cursor_manual(0); // still counts as manual
+        // delta 0 doesn't move but we always clear following in move_cursor_manual
+        app.following = true;
+        app.move_cursor_manual(1);
+        assert!(!app.following);
     }
 
     #[test]
@@ -738,6 +788,7 @@ mod follow_tests {
         app.groups = GroupList {
             groups: vec![Group {
                 label: "a".into(),
+                chips: Vec::new(),
                 expr: Some(Expr::parse("tag~A", false).unwrap()),
                 time: None,
                 enabled: true,
@@ -782,7 +833,7 @@ mod search_tests {
         app.cursor = 0;
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["hit".into()]).unwrap());
+            .push(SearchGroup::from_pattern("hit").unwrap());
 
         assert!(app.find_match(1));
         assert_eq!(app.cursor, 1);
@@ -820,7 +871,7 @@ mod search_tests {
 
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["hit".into()]).unwrap());
+            .push(SearchGroup::from_pattern("hit").unwrap());
         app.cursor = 0; // non-hit row
         assert_eq!(app.search_match_stats(), Some((None, 2)));
 
@@ -846,7 +897,7 @@ mod search_tests {
         app.cursor = 0;
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["zzz".into()]).unwrap());
+            .push(SearchGroup::from_pattern("zzz").unwrap());
         assert!(!app.jump_first_match());
         assert_eq!(app.cursor, 0);
         assert_eq!(app.search_match_stats(), Some((None, 0)));
@@ -866,10 +917,10 @@ mod search_tests {
 
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["foo".into()]).unwrap());
+            .push(SearchGroup::from_pattern("foo").unwrap());
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["bar".into()]).unwrap());
+            .push(SearchGroup::from_pattern("bar").unwrap());
 
         assert!(app.jump_first_match());
         // Must land on newest group ("bar"), not the earlier "foo" at index 0.
@@ -888,8 +939,7 @@ mod search_tests {
         app.cursor = 0;
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["ERROR".into()]).unwrap());
-        // already on the match; find_match steps away first — add a decoy row
+            .push(SearchGroup::from_pattern("ERROR").unwrap());
         assert!(app.search_groups.any_match("an error occurred"));
     }
 
@@ -900,10 +950,20 @@ mod search_tests {
         tx.send(row_with_msg("T", "hit")).unwrap();
         drop(tx);
         app.drain(&rx);
-        let mut g = SearchGroup::from_patterns(&["hit".into()]).unwrap();
+        let mut g = SearchGroup::from_pattern("hit").unwrap();
         g.enabled = false;
         app.search_groups.groups.push(g);
         assert!(!app.find_match(1));
+    }
+
+    #[test]
+    fn test_push_or_find_search_group_dedups() {
+        let mut app = App::new(100);
+        let idx0 = app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
+        assert_eq!(idx0, 0);
+        let idx1 = app.push_or_find_search_group(SearchGroup::from_pattern("FOO").unwrap());
+        assert_eq!(idx1, 0);
+        assert_eq!(app.search_groups.groups.len(), 1);
     }
 }
 

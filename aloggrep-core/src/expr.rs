@@ -305,11 +305,14 @@ impl Expr {
         }
     }
 
-    /// Combine scalar CLI-style field filters into one AND-expression,
-    /// matching `FilterChain`'s existing semantics: multiple values for the
-    /// *same* field are joined into one regex alternation (OR), different
-    /// fields are AND'd together. Returns `Ok(None)` if every input is empty
-    /// (no filter to apply).
+    /// Combine scalar field filters into one expression.
+    ///
+    /// Different fields (and `level`) are always AND'd. Multiple values for
+    /// the *same* field follow `same_field`:
+    /// - [`SameFieldOp::Or`] — one regex alternation (`a|b`), CLI default
+    /// - [`SameFieldOp::And`] — separate match nodes AND'd (TUI chip groups)
+    ///
+    /// Returns `Ok(None)` if every input is empty (no filter to apply).
     pub fn from_filters(
         tag: &[String],
         msg: &[String],
@@ -318,24 +321,16 @@ impl Expr {
         tid: &[String],
         level: Option<&str>,
         case_insensitive: bool,
+        same_field: SameFieldOp,
     ) -> Result<Option<Expr>, String> {
         let mut nodes: Vec<Expr> = Vec::new();
 
-        if let Some(re) = Self::compile_joined(tag, case_insensitive, "tag")? {
-            nodes.push(Expr::TagMatch(re));
-        }
-        if let Some(re) = Self::compile_joined(msg, case_insensitive, "msg")? {
-            nodes.push(Expr::MsgMatch(re));
-        }
-        if let Some(re) = Self::compile_joined(pkg, case_insensitive, "pkg")? {
-            nodes.push(Expr::PkgMatch(re));
-        }
-        if let Some(re) = Self::compile_joined(pid, case_insensitive, "pid")? {
-            nodes.push(Expr::PidMatch(re));
-        }
-        if let Some(re) = Self::compile_joined(tid, case_insensitive, "tid")? {
-            nodes.push(Expr::TidMatch(re));
-        }
+        Self::push_field_matches(&mut nodes, tag, case_insensitive, "tag", same_field, Expr::TagMatch)?;
+        Self::push_field_matches(&mut nodes, msg, case_insensitive, "msg", same_field, Expr::MsgMatch)?;
+        Self::push_field_matches(&mut nodes, pkg, case_insensitive, "pkg", same_field, Expr::PkgMatch)?;
+        Self::push_field_matches(&mut nodes, pid, case_insensitive, "pid", same_field, Expr::PidMatch)?;
+        Self::push_field_matches(&mut nodes, tid, case_insensitive, "tid", same_field, Expr::TidMatch)?;
+
         if let Some(l) = level {
             let lvl = Level::from_str(l)
                 .ok_or_else(|| format!("unknown level '{}', expected V/D/I/W/E/F", l))?;
@@ -349,6 +344,32 @@ impl Expr {
         Ok(Some(iter.fold(first, |acc, next| Expr::And(Box::new(acc), Box::new(next)))))
     }
 
+    fn push_field_matches(
+        nodes: &mut Vec<Expr>,
+        values: &[String],
+        case_insensitive: bool,
+        label: &str,
+        same_field: SameFieldOp,
+        wrap: fn(Regex) -> Expr,
+    ) -> Result<(), String> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        match same_field {
+            SameFieldOp::Or => {
+                if let Some(re) = Self::compile_joined(values, case_insensitive, label)? {
+                    nodes.push(wrap(re));
+                }
+            }
+            SameFieldOp::And => {
+                for v in values {
+                    nodes.push(wrap(Self::compile_one(v, case_insensitive, label)?));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn compile_joined(values: &[String], case_insensitive: bool, label: &str) -> Result<Option<Regex>, String> {
         if values.is_empty() {
             return Ok(None);
@@ -357,6 +378,24 @@ impl Expr {
         let pattern = if case_insensitive { format!("(?i){joined}") } else { joined.clone() };
         Regex::new(&pattern).map(Some).map_err(|e| format!("bad {label} pattern '{}': {}", joined, e))
     }
+
+    fn compile_one(value: &str, case_insensitive: bool, label: &str) -> Result<Regex, String> {
+        let pattern = if case_insensitive {
+            format!("(?i){value}")
+        } else {
+            value.to_string()
+        };
+        Regex::new(&pattern).map_err(|e| format!("bad {label} pattern '{}': {}", value, e))
+    }
+}
+
+/// How multiple values for the same filter field combine inside [`Expr::from_filters`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameFieldOp {
+    /// `a|b` alternation (CLI / startup multi-flag default).
+    Or,
+    /// Separate matches AND'd together (TUI chip group within one Enter).
+    And,
 }
 
 #[cfg(test)]
@@ -369,15 +408,17 @@ mod tests {
 
     #[test]
     fn test_from_filters_empty_returns_none() {
-        let result = Expr::from_filters(&[], &[], &[], &[], &[], None, false).unwrap();
+        let result = Expr::from_filters(&[], &[], &[], &[], &[], None, false, SameFieldOp::Or).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_from_filters_single_field() {
-        let expr = Expr::from_filters(&["MyTag".to_string()], &[], &[], &[], &[], None, false)
-            .unwrap()
-            .unwrap();
+        let expr = Expr::from_filters(
+            &["MyTag".to_string()], &[], &[], &[], &[], None, false, SameFieldOp::Or,
+        )
+        .unwrap()
+        .unwrap();
         assert!(expr.matches(&entry("MyTag", "hello", Level::I)));
         assert!(!expr.matches(&entry("Other", "hello", Level::I)));
     }
@@ -386,7 +427,7 @@ mod tests {
     fn test_from_filters_multi_value_same_field_is_or() {
         let expr = Expr::from_filters(
             &["A".to_string(), "B".to_string()],
-            &[], &[], &[], &[], None, false,
+            &[], &[], &[], &[], None, false, SameFieldOp::Or,
         )
         .unwrap()
         .unwrap();
@@ -396,10 +437,25 @@ mod tests {
     }
 
     #[test]
+    fn test_from_filters_multi_value_same_field_is_and() {
+        let expr = Expr::from_filters(
+            &[],
+            &["trace=".to_string(), "0x1100".to_string()],
+            &[], &[], &[], None, true, SameFieldOp::And,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expr.matches(&entry("T", "foo trace=0x1100 bar", Level::I)));
+        assert!(!expr.matches(&entry("T", "foo trace=999 bar", Level::I)));
+        assert!(!expr.matches(&entry("T", "foo code=0x1100 bar", Level::I)));
+        assert!(!expr.matches(&entry("T", "hello world", Level::I)));
+    }
+
+    #[test]
     fn test_from_filters_cross_field_is_and() {
         let expr = Expr::from_filters(
             &["MyTag".to_string()], &["timeout".to_string()], &[], &[], &[],
-            Some("W"), false,
+            Some("W"), false, SameFieldOp::Or,
         )
         .unwrap()
         .unwrap();
@@ -411,7 +467,10 @@ mod tests {
 
     #[test]
     fn test_from_filters_unknown_level_errors() {
-        let err = Expr::from_filters(&[], &[], &[], &[], &[], Some("bogus"), false).unwrap_err();
+        let err = Expr::from_filters(
+            &[], &[], &[], &[], &[], Some("bogus"), false, SameFieldOp::Or,
+        )
+        .unwrap_err();
         assert!(err.contains("bogus"));
     }
 }

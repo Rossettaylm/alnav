@@ -6,10 +6,18 @@ use ratatui::Frame;
 use regex::Regex;
 
 use crate::app::{App, Focus, Mode};
+use crate::filter_model::Group;
 use crate::input::InputBox;
 use crate::model::EntryRow;
-use crate::search_model::SearchBox;
+use crate::search_model::{SearchBox, SearchGroup};
 use crate::theme;
+
+/// Horizontal gap (columns) between chip groups on the same wrap row.
+const CHIP_GROUP_GAP: u16 = 1;
+/// Gap between the selection marker and the group's pills.
+const DOT_PILL_GAP: u16 = 1;
+/// Gap between adjacent pills inside a group.
+const PILL_GAP: u16 = 1;
 
 fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
     Block::new()
@@ -207,33 +215,6 @@ fn render_entry_lines(
         .collect()
 }
 
-/// Shared chip-group strip rendering for Filter and Search strips.
-fn render_group_strip_labels(
-    labels: &[(String, bool)],
-    cursor: usize,
-    active: bool,
-    empty_hint: &str,
-) -> Vec<Span<'static>> {
-    if labels.is_empty() {
-        return vec![Span::styled(empty_hint.to_string(), Style::default().add_modifier(Modifier::DIM))];
-    }
-    labels
-        .iter()
-        .enumerate()
-        .map(|(i, (label, enabled))| {
-            let dot = if *enabled { '●' } else { '○' };
-            let text = format!(" {dot} {label} ");
-            if i == cursor && active {
-                Span::styled(text, theme::focus_style())
-            } else if !*enabled {
-                Span::styled(text, theme::disabled_chip_style())
-            } else {
-                Span::raw(text)
-            }
-        })
-        .collect()
-}
-
 /// Takes `&mut App` (unlike sibling `render_*` functions) so ratatui's
 /// scroll offset can be persisted across frames via `App.list_offset` —
 /// do not revert this to `&App`, that's exactly what caused the old
@@ -273,36 +254,207 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     app.list_offset = state.offset();
 }
 
+fn group_dot_span(enabled: bool, selected: bool) -> Span<'static> {
+    let dot = if enabled { '●' } else { '○' };
+    // Selection uses the same Magenta accent as region selection frames;
+    // kept to one cell so the strip can stay a single content row tall.
+    let style = if selected {
+        theme::chip_group_border_style(true).add_modifier(Modifier::BOLD)
+    } else if !enabled {
+        theme::disabled_chip_style()
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    Span::styled(dot.to_string(), style)
+}
+
+fn filter_group_spans(g: &Group, selected: bool) -> Vec<Span<'static>> {
+    let mut spans = vec![group_dot_span(g.enabled, selected)];
+    spans.push(Span::raw(" ".repeat(DOT_PILL_GAP as usize)));
+    if g.chips.is_empty() {
+        let style = if !g.enabled {
+            theme::disabled_chip_style()
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(format!(" {} ", g.label), style));
+    } else {
+        for (i, chip) in g.chips.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" ".repeat(PILL_GAP as usize)));
+            }
+            let (text, body) = theme::chip_pill_style(chip.field, &chip.value, !g.enabled);
+            spans.push(Span::styled(text, body));
+        }
+    }
+    spans
+}
+
+fn search_group_spans(g: &SearchGroup, color_idx: usize, selected: bool) -> Vec<Span<'static>> {
+    let mut spans = vec![group_dot_span(g.enabled, selected)];
+    spans.push(Span::raw(" ".repeat(DOT_PILL_GAP as usize)));
+    let (text, body) = theme::search_pill_style(&g.pattern, color_idx, !g.enabled);
+    spans.push(Span::styled(text, body));
+    spans
+}
+
+fn span_width(span: &Span<'_>) -> usize {
+    span.content.chars().count()
+}
+
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+
+    for span in spans {
+        let w = span_width(&span);
+        if w > width {
+            if !current.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut current)));
+                used = 0;
+            }
+            let text = span.content.as_ref().to_string();
+            let style = span.style;
+            let chars: Vec<char> = text.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let end = (i + width).min(chars.len());
+                let chunk: String = chars[i..end].iter().collect();
+                lines.push(Line::from(Span::styled(chunk, style)));
+                i = end;
+            }
+            continue;
+        }
+        if !current.is_empty() && used + w > width {
+            lines.push(Line::from(std::mem::take(&mut current)));
+            used = 0;
+        }
+        used += w;
+        current.push(span);
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(Line::from(current));
+    }
+    lines
+}
+
+fn flow_wrap_groups(groups: Vec<Vec<Span<'static>>>, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut row_spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+
+    for group in groups {
+        let group_w: usize = group.iter().map(span_width).sum();
+        if group_w > width {
+            if !row_spans.is_empty() {
+                out.push(Line::from(std::mem::take(&mut row_spans)));
+                used = 0;
+            }
+            out.extend(wrap_spans(group, width));
+            continue;
+        }
+        let need = if row_spans.is_empty() {
+            group_w
+        } else {
+            CHIP_GROUP_GAP as usize + group_w
+        };
+        if !row_spans.is_empty() && used + need > width {
+            out.push(Line::from(std::mem::take(&mut row_spans)));
+            used = 0;
+        }
+        if !row_spans.is_empty() {
+            row_spans.push(Span::raw(" ".repeat(CHIP_GROUP_GAP as usize)));
+            used += CHIP_GROUP_GAP as usize;
+        }
+        used += group_w;
+        row_spans.extend(group);
+    }
+    if !row_spans.is_empty() {
+        out.push(Line::from(row_spans));
+    }
+    out
+}
+
+fn filter_strip_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
+    let active = app.focus == Focus::ChipStrip;
+    let groups: Vec<Vec<Span<'static>>> = app
+        .groups
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| filter_group_spans(g, i == app.group_cursor && active))
+        .collect();
+    flow_wrap_groups(groups, inner_width)
+}
+
+fn search_strip_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
+    let active = app.focus == Focus::SearchStrip;
+    let mut color_idx = 0usize;
+    let groups: Vec<Vec<Span<'static>>> = app
+        .search_groups
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let idx = if g.enabled {
+                let c = color_idx;
+                color_idx += 1;
+                c
+            } else {
+                0
+            };
+            search_group_spans(g, idx, i == app.search_cursor && active)
+        })
+        .collect();
+    flow_wrap_groups(groups, inner_width)
+}
+
+/// Strip height: `0` when empty, else `2` (rounded region chrome) + content
+/// rows. Content is a single terminal row per wrap line — nested per-chip
+/// `Block`s need 3 rows each and made the strip ~2× taller than a cell's
+/// visual proportions allow.
+pub fn filter_strip_height(app: &App, outer_width: u16) -> u16 {
+    if app.groups.groups.is_empty() {
+        return 0;
+    }
+    let inner = outer_width.saturating_sub(2);
+    let rows = filter_strip_lines(app, inner).len().max(1) as u16;
+    rows.saturating_add(2)
+}
+
+/// Same rules as [`filter_strip_height`] for the Search strip.
+pub fn search_strip_height(app: &App, outer_width: u16) -> u16 {
+    if app.search_groups.groups.is_empty() {
+        return 0;
+    }
+    let inner = outer_width.saturating_sub(2);
+    let rows = search_strip_lines(app, inner).len().max(1) as u16;
+    rows.saturating_add(2)
+}
+
 pub fn render_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
     let active = app.focus == Focus::ChipStrip;
     let block = rounded_block(theme::numbered_title(1, "Filter", active), active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let labels: Vec<(String, bool)> = app
-        .groups
-        .groups
-        .iter()
-        .map(|g| (g.label.clone(), g.enabled))
-        .collect();
-    let spans = render_group_strip_labels(&labels, app.group_cursor, active, "(no filter)");
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    frame.render_widget(Paragraph::new(filter_strip_lines(app, inner.width)), inner);
 }
 
 pub fn render_search_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
     let active = app.focus == Focus::SearchStrip;
     let block = rounded_block(theme::numbered_title(2, "Search", active), active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let labels: Vec<(String, bool)> = app
-        .search_groups
-        .groups
-        .iter()
-        .map(|g| (g.label.clone(), g.enabled))
-        .collect();
-    let spans = render_group_strip_labels(&labels, app.search_cursor, active, "(no search)");
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    frame.render_widget(Paragraph::new(search_strip_lines(app, inner.width)), inner);
 }
 
 pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut Frame, area: Rect) {
@@ -310,13 +462,13 @@ pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut spans = vec![theme::mode_badge(mode), Span::raw(" ")];
-    for chip in &input.chips {
-        spans.push(Span::styled(
-            format!("{}:", chip.field.keyword()),
-            Style::default().fg(theme::field_color(chip.field)),
-        ));
-        spans.push(Span::raw(format!("{} ", chip.value)));
+    let mut spans = Vec::new();
+    for (i, chip) in input.chips.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" ".repeat(PILL_GAP as usize)));
+        }
+        let (text, body) = theme::chip_pill_style(chip.field, &chip.value, false);
+        spans.push(Span::styled(text, body));
     }
     if let Some(field) = input.draft_field {
         spans.push(Span::styled(
@@ -326,7 +478,7 @@ pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut
     }
     spans.push(Span::raw(input.draft.clone()));
     if mode == Mode::Insert {
-        spans.push(theme::caret(true));
+        spans.push(theme::caret_bar());
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
@@ -338,23 +490,15 @@ pub fn render_search_box(search: &SearchBox, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 
     let mut spans = Vec::new();
-    if editing || !search.is_empty() {
+    if editing {
         spans.push(Span::styled("/", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
-        for chip in &search.chips {
-            spans.push(Span::styled(
-                format!("[{chip}] "),
-                Style::default().fg(theme::WARNING),
-            ));
-        }
         spans.push(Span::raw(search.draft.clone()));
-        if editing {
-            spans.push(Span::raw(" "));
-            spans.push(theme::caret(true));
-        }
+        spans.push(theme::caret_bar());
+    } else if !search.is_empty() {
+        // Transient: draft cleared on submit; keep branch for safety.
+        spans.push(Span::raw(search.draft.clone()));
     } else {
         spans.push(Span::styled("(no search)", Style::default().add_modifier(Modifier::DIM)));
-        spans.push(Span::raw(" "));
-        spans.push(theme::caret(false));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
@@ -529,7 +673,7 @@ mod tests {
         app.drain(&rx);
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["error".into()]).unwrap());
+            .push(SearchGroup::from_pattern("error").unwrap());
         app.focus = Focus::LogList;
         app.cursor = 0;
 
@@ -689,15 +833,87 @@ mod tests {
     }
 
     #[test]
-    fn test_render_group_strip_labels_enable_disable_dots() {
-        let labels = vec![("foo".into(), true), ("bar".into(), false)];
-        let spans = render_group_strip_labels(&labels, 0, false, "(empty)");
-        assert_eq!(spans.len(), 2);
-        assert!(spans[0].content.as_ref().contains('●'));
-        assert!(spans[0].content.as_ref().contains("foo"));
-        assert!(spans[1].content.as_ref().contains('○'));
-        assert!(spans[1].content.as_ref().contains("bar"));
-        assert_eq!(spans[1].style, theme::disabled_chip_style());
+    fn test_chip_pill_and_search_pill_styles() {
+        let (text, body) = theme::chip_pill_style(crate::input::ChipField::Tag, "MyTag", false);
+        assert!(text.contains("MyTag"));
+        assert_eq!(body.bg, Some(theme::ACCENT));
+        let (_, disabled) = theme::chip_pill_style(crate::input::ChipField::Msg, "x", true);
+        assert_eq!(disabled, theme::disabled_chip_style());
+        let (_, search) = theme::search_pill_style("error", 0, false);
+        assert_eq!(search, theme::highlight_style(0));
+    }
+
+    #[test]
+    fn test_chip_strip_selection_keeps_stable_layout() {
+        use crate::filter_model::Group;
+        use crate::input::{Chip, ChipField};
+
+        let mut app = App::new(100);
+        app.groups.groups.push(Group {
+            label: "a".into(),
+            chips: vec![Chip { field: ChipField::Tag, value: "A".into() }],
+            expr: None,
+            time: None,
+            enabled: true,
+        });
+        app.groups.groups.push(Group {
+            label: "b".into(),
+            chips: vec![Chip { field: ChipField::Msg, value: "B".into() }],
+            expr: None,
+            time: None,
+            enabled: true,
+        });
+        app.focus = Focus::ChipStrip;
+        app.group_cursor = 0;
+
+        // Single content row + outer rounded chrome = height 3.
+        let backend = TestBackend::new(60, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_chip_strip(&app, frame, frame.area()))
+            .unwrap();
+        let before = cell_text(terminal.backend().buffer());
+
+        app.group_cursor = 1;
+        terminal
+            .draw(|frame| render_chip_strip(&app, frame, frame.area()))
+            .unwrap();
+        let after = cell_text(terminal.backend().buffer());
+
+        // Selection only restyles the ● — glyph layout stays put.
+        assert!(before.contains('A') && after.contains('A'));
+        assert!(before.contains('B') && after.contains('B'));
+        assert_eq!(
+            before.chars().filter(|c| *c == 'A' || *c == 'B').count(),
+            after.chars().filter(|c| *c == 'A' || *c == 'B').count()
+        );
+        let corners = before.chars().filter(|c| matches!(*c, '╭' | '╮' | '╰' | '╯')).count();
+        assert_eq!(corners, 4, "only strip outer rounded chrome, got {corners}");
+    }
+
+    #[test]
+    fn test_filter_strip_wraps_and_grows_height() {
+        use crate::filter_model::Group;
+        use crate::input::{Chip, ChipField};
+
+        let mut app = App::new(100);
+        for label in ["AAAA", "BBBB", "CCCC", "DDDD"] {
+            app.groups.groups.push(Group {
+                label: label.into(),
+                chips: vec![Chip {
+                    field: ChipField::Tag,
+                    value: label.into(),
+                }],
+                expr: None,
+                time: None,
+                enabled: true,
+            });
+        }
+        let h = filter_strip_height(&app, 20);
+        assert!(h > 3, "wrapped strip should exceed one content row + chrome, got {h}");
+        assert_eq!(filter_strip_height(&app, 20), h, "height is instantaneous (stable)");
+        app.groups.groups.clear();
+        assert_eq!(filter_strip_height(&app, 20), 0);
     }
 
     #[test]
@@ -713,7 +929,7 @@ mod tests {
         app.cursor = 0;
         app.search_groups
             .groups
-            .push(SearchGroup::from_patterns(&["hit".into()]).unwrap());
+            .push(SearchGroup::from_pattern("hit").unwrap());
 
         let backend = TestBackend::new(40, 1);
         let mut terminal = Terminal::new(backend).unwrap();
