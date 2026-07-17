@@ -75,6 +75,9 @@ aloggrep-tui/src/
 - **`--hdc` Ctrl-L 清屏（CLI）**：仅在 stdin/stdout 都是 tty 时启用；用 cbreak 模式（保留 `ISIG`）而非标准 raw mode，避免破坏现有 Ctrl+C 依赖的 `SIGINT` 语义。按键上报走 channel + `KeypressGate` 迭代器分发。仅支持 Unix，Windows 上静默不可用。已知权衡：若进程被 `SIGTERM`/`SIGKILL` 直接杀死（而非 Ctrl+C），termios 不会被恢复，终端会卡在 cbreak 模式，需手动 `stty sane`/`reset`——这与 vim/less 等直接操作终端的工具在被强杀时的行为一致，未特殊处理。
 - **`aloggrep-tui` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。启动时的 CLI 过滤参数被转换为第 0 组，与交互式新增的组同等对待（可被 `dd` 删除），不存在额外的 AND 层。chip 编译直接调用 `Expr::from_filters`（不走文本拼接再 `Expr::parse` 的回路），避免值中引号转义问题，同字段多值天然走 `compile_joined` 的 OR 合并。
 - **`aloggrep-tui` 的环形缓冲与光标**：`App.rows: VecDeque<EntryRow>` 按 `max_lines` 淘汰最旧行；`App.visible: Vec<usize>` 始终保持升序，淘汰只可能发生在下标 0，故 `push_row` 无需全表扫描；`rebuild_visible`（过滤条件变化时）与 `follow_tick`（新行到达/环形缓冲淘汰时）共同维护 "following 模式下 cursor 始终指向可见集合最后一行" 的不变量。
+- **`aloggrep-tui` 的 LogList 滚动跟随**：`ui::render_log_list` 每帧用 `ListState::default().with_offset(app.list_offset)` 而不是全新的 `ListState::default()`，渲染后把 `state.offset()` 写回 `App.list_offset`。ratatui 的 `List` 本身已经实现"选中项在可视区内则只移动高亮，超出边缘才滚动"的算法，只是需要一个跨帧持久化的起始 offset 才能生效——`App.list_offset` 就是这个持久化载体，纯 `usize`，不引入 ratatui 类型到 `app.rs`。
+- **`aloggrep-tui` 的 LogList 作为行动原点**：除了 Tab/1/2/3 显式切焦点，以下路径都会把 `app.focus` 重置为 `Focus::LogList`：Normal 模式下任意焦点按 `Esc`；Insert 模式下无 popup 时按 `Esc` 或 Ctrl+C（同时也把 `mode` 切回 `Normal`）；Input 里 `Enter` 成功构建一个过滤组后（同样切回 `Normal`，与 `Esc` 语义对齐，加完组立刻可 `j`/`k` 导航）；`/` 搜索草稿无论是取消（`Esc`/Ctrl+C）还是应用（`Enter`）都会重置焦点；`dd` 删光最后一个过滤组后（`App::delete_focused_group` 内联处理）。popup 打开时的 `Esc` 是唯一例外——只关 popup，不跳焦点，保留两级 escape（见 popup-aware Ctrl+C 的既有设计）。
+- **`aloggrep-tui` 的 LogList 快速移动与鼠标滚轮**：`Shift+J`/`Shift+K`（即 `KeyCode::Char('J'/'K')`，crossterm 对 Shift+字母直接上报大写字符，无需读 modifiers）复用 `move_cursor_manual` 各移动 7 行；鼠标滚轮（`Event::Mouse` 里的 `MouseEventKind::ScrollDown`/`ScrollUp`）复用同一函数各移动 3 行，且不管当前 `Focus` 是哪个区域，滚轮永远作用于日志列表（未做"先点击聚焦再滚动"，点击类事件在 `handle_mouse_event` 里被忽略）。
 - **`aloggrep-tui` 的终端生命周期**：panic hook 在 `main()` 最开始安装，先于任何 raw mode/alt screen 操作；`--hdc` 子进程通过 `HdcChildGuard`（RAII，`Drop` 时 kill+wait）持有，保证无论从哪个 `?` 分支提前返回，子进程都不会残留。
 - **`aloggrep-tui` 的 Ctrl+C 语义**：raw mode 下 `ISIG` 被禁用，Ctrl+C 以普通 `KeyEvent` 到达而非 `SIGINT`，因此显式处理为与 `Esc` 语义一致的"就地取消"（Normal 模式下退出整个程序；Insert 模式下弹窗打开时仅关闭弹窗，否则重置输入框回到 Normal；搜索草稿输入中则取消搜索），而不是无条件退出。
 - **`aloggrep-tui` 的三个可聚焦分区**：`Focus` 仍是 `ChipStrip`/`LogList`/`Input` 三态（未新增/合并），`Tab`/`BackTab` 循环切换，`1`/`2`/`3` 直达（仅 Normal 态生效，只切换键盘焦点，不触发编辑——进入编辑态唯一入口仍是 `i`/`a`/`o`）。三个区域各自套一层圆角 `Block`，边框/标题颜色由 `theme::border_style`/`numbered_title` 按 `app.focus` 是否匹配决定。`/` 搜索草稿是三分区之外独立常驻的第四个边框区域（`render_search_box`），不参与编号和 Tab 循环，边框亮暗改用 `app.search_draft.is_some()` 判断。
@@ -89,6 +92,7 @@ aloggrep-tui/src/
 - **三个可聚焦分区套圆角边框，未聚焦低对比度**：ChipStrip/LogList/Input 各自一层 `BorderType::Rounded`，`theme::border_style(active)`：聚焦时 `fg(ACCENT)`，未聚焦时 `fg(DarkGray)+DIM`（终端没有真 alpha，用 dim 模拟"半透明未聚焦"）。边框标题（`Block::title()`，天然画在左上角）用 `theme::numbered_title(1|2|3, label, active)` 带数字徽标；不参与编号的区域（Search、字段候选浮层）用 `theme::plain_title`。
 - **单一强调色 + 大量 dim**：`theme::ACCENT`（Cyan）是唯一的"焦点/强调"色，非关键信息统一 `Modifier::DIM`，避免多色混战。
 - **焦点用反色块，不用边框变色**：当前选中的 chip / popup 候选项用 `theme::focus_style()`（黑字 + ACCENT 底，加粗）标出，而不是给文字加粗变色或画边框。
+- **日志行选中态只在 LogList 聚焦时显示，且是柔和灰底**：`theme::log_selection_style()`（`Color::DarkGray` 背景，不加粗不反色）只在 `app.focus == Focus::LogList` 时作为 `List::highlight_style` 生效；失焦时用 `Style::default()`，选中行与普通行外观完全一致——不同于 chip/popup 用反色块表示焦点，日志行的"当前选中位置"和"当前键盘焦点"是两个独立的语义，故意选了更安静的视觉语言。
 - **状态/模式提示用反色徽标**：输入框左侧的 `NORMAL`/`INSERT` 徽标（`theme::mode_badge`）、状态栏的 `FOLLOWING` 提示都是反色块，不是纯文字提示。搜索框/输入框的编辑态用 `theme::caret`（方块=静止/Normal，竖线=正在编辑/Insert，仿 vim 光标形状），只在该区域自己判定为"活跃"时才画，不画在非活跃区域上。
 - **字段名颜色全局唯一映射**：`ChipField` 的颜色只由 `theme::field_color` 决定；chip 栏、输入框、popup 三处渲染字段名时必须复用同一函数，不允许各自维护一份颜色表。
 - **不硬编码 White/Black 当默认前景色**：如 `Level::I`（默认级别）用 `Style::default()` 继承终端主题色，不写 `Color::White`，以兼容浅色/深色终端。
@@ -104,6 +108,7 @@ aloggrep-tui/src/
 | 日志时间戳/pid/tid | `theme::muted()` | `logcolor::MUTED` |
 | 日志 level 徽标 | `theme::level_badge_style()` | `logcolor::level_badge()` |
 | 关键词/搜索高亮 | `theme::highlight_style(idx)` | `logcolor::USER_HIGHLIGHT[idx]`，`/` 搜索固定用 `idx=0` |
+| 日志行选中态（仅聚焦时） | `theme::log_selection_style()` | `Color::DarkGray`，无 logcolor 来源 |
 
 ## Filter Logic（`aloggrep-core` CLI）
 
