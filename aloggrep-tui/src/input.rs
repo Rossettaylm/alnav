@@ -234,77 +234,9 @@ fn push_msg_token(
     }
 }
 
-/// H7/H9 msg-token picker: draft filters tokens with ignore-case contains.
-#[derive(Debug, Clone)]
-pub struct MsgChipPicker {
-    pub tokens: Vec<String>,
-    pub draft: String,
-    pub selected: usize,
-    /// When true, confirm pushes an exclude chip (H9 `C`+`m`).
-    pub as_exclude: bool,
-}
-
-impl MsgChipPicker {
-    /// `None` when msg has no usable tokens.
-    pub fn open(msg: &str, as_exclude: bool) -> Option<Self> {
-        let tokens = tokenize_msg_tokens(msg);
-        if tokens.is_empty() {
-            return None;
-        }
-        Some(Self {
-            tokens,
-            draft: String::new(),
-            selected: 0,
-            as_exclude,
-        })
-    }
-
-    /// Filtered labels (empty draft → all tokens).
-    pub fn candidates(&self) -> Vec<&str> {
-        if self.draft.is_empty() {
-            return self.tokens.iter().map(String::as_str).collect();
-        }
-        let q = self.draft.to_ascii_lowercase();
-        self.tokens
-            .iter()
-            .filter(|t| t.to_ascii_lowercase().contains(&q))
-            .map(String::as_str)
-            .collect()
-    }
-
-    pub fn move_selection(&mut self, delta: isize) {
-        let len = self.candidates().len();
-        if len == 0 {
-            return;
-        }
-        let new = self.selected as isize + delta;
-        self.selected = new.clamp(0, len as isize - 1) as usize;
-    }
-
-    pub fn push_char(&mut self, c: char) {
-        self.draft.push(c);
-        self.selected = 0;
-    }
-
-    pub fn backspace(&mut self) {
-        if !self.draft.is_empty() {
-            self.draft.pop();
-            self.selected = 0;
-        }
-    }
-
-    /// Selected token, or full draft when filter miss; `None` if both empty.
-    pub fn confirm_value(&self) -> Option<String> {
-        let cands = self.candidates();
-        if !cands.is_empty() {
-            let sel = self.selected.min(cands.len() - 1);
-            return Some(cands[sel].to_string());
-        }
-        if !self.draft.is_empty() {
-            return Some(self.draft.clone());
-        }
-        None
-    }
+/// H7/H9 candidates consumed by the unified fzf picker.
+pub fn msg_token_candidates(msg: &str) -> Vec<String> {
+    tokenize_msg_tokens(msg)
 }
 
 #[cfg(test)]
@@ -593,21 +525,15 @@ mod msg_tokenize_tests {
     }
 
     #[test]
-    fn msg_picker_contains_filter_and_draft_fallback() {
-        let mut p = MsgChipPicker::open("hello world timeout", false).unwrap();
-        assert_eq!(p.candidates().len(), 3);
-        p.push_char('t');
-        p.push_char('i');
-        assert_eq!(p.candidates(), vec!["timeout"]);
-        assert_eq!(p.confirm_value().as_deref(), Some("timeout"));
-
-        p.draft = "zzz".into();
-        assert!(p.candidates().is_empty());
-        assert_eq!(p.confirm_value().as_deref(), Some("zzz"));
+    fn msg_candidates_reuse_tokenizer_output() {
+        assert_eq!(
+            msg_token_candidates("hello world timeout"),
+            vec!["hello", "world", "timeout"]
+        );
     }
 
     #[test]
-    fn msg_picker_none_without_tokens() {
-        assert!(MsgChipPicker::open("a!", false).is_none());
+    fn msg_candidates_empty_without_tokens() {
+        assert!(msg_token_candidates("a!").is_empty());
     }
 }

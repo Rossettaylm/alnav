@@ -184,23 +184,19 @@
 
 ### H6. 上下文帮助（按 Focus 的键位提示） `[x]`
 
-**用户价值：** 降低「四个 Focus + 模态」的记忆负担，接近「光标处有相关帮助」。
+**用户价值：** 降低「五个 Focus + 模态」的记忆负担，接近「光标处有相关帮助」。
 
 **本项目语境：**
 
-- status_bar（或模态副标题）按当前状态显示**短**提示，例如：
-  - LogList：`j/k 移动  e/E 错误  / 搜索  n/N 下一命中  Esc 跟随`（H7–H10 落地后补上 `c`/`C`/`fp` 等；H2 已含 `e/E`）
-  - Filter / **Exclude(H9)** / SearchStrip：`h/l 组  dd 删  di 禁用`（Exclude pill 带 `!`）
-  - Input：`Space 入草稿  Enter 收pill/提交  ! 排除模式(空时)  Esc 取消`
-  - Search 模态：`Space 入草稿  Enter 确认  Esc 取消`
-- **注意（H9）：** Focus 将扩为 5 区并重编号（Filter→Exclude→Search→Log→Input）；H6 文案/数字键随 H9 落地更新。
-- 提示文案集中一处（如 `theme` 旁的 `help.rs` 或 `ui` 内常量表），避免散落魔法字符串。
+- status_bar 右侧按**二级**切换短提示（统一 `键:短名`）：无 operator 时 L1（单键/前缀）；Leader `Space` 与 `m`/`f`/`c`/`C`/`y`/`d` pending 时显示 L2。文案集中在 `help.rs`。
+- LogList L1 以 `Space:面板` 为统一入口；Leader L2 为 `/:列表 f:滤 s:搜 m:签 x:排除`；书签 `m` 后仅保留 `a:新增 d:删除`。
+- 临时反馈（`YANKED` / `NO ERROR` / `已收藏` 等）走 flash toast，**3s 后自动隐藏**；`FOLLOWING` / `LOCK` / `VISUAL` / pending 徽标为持久状态。
 
 **非目标：** 全屏 HELP 视图、或上下文 SQL 文档。
 
 **验收：**
 
-- 切换 Focus / 开关模态时提示同步变化；终端很窄时截断或降级为更短文案，不撑破布局。
+- 切换 Focus / pending / 模态时提示同步变化；终端很窄时截断或隐藏帮助；flash 到期消失。
 
 ---
 
@@ -416,9 +412,9 @@
 | UI | LogList **顶部内嵌**书签区（非独立 Focus、不占 Tab）；背景与正常 log 略区分（`theme`） |
 | 展示 | 最多 **N=3**（最近添加）；无书签时 **折叠**；N/软上限 v1 为常量（默认软上限 50） |
 | `m` `a` | 收藏当前行并上屏；已存在则提示；达软上限拒绝 |
-| `m` `m` | 靠上 **书签搜索面板**：过滤并选中 → Enter 跳转（`following=false`） |
+| `Space` `m` | 打开统一 **Bookmark fzf Picker**：过滤并选中 → Enter 跳转（`following=false`） |
 | `m` `d` | 删除 **当前 Log 行**对应书签（区同步移除）；未收藏则 status 提示 |
-| 锚定 | ingest 单调 **`row_id`**；缓冲淘汰后失效（`mm` 标失效、不可跳） |
+| 锚定 | ingest 单调 **`row_id`**；缓冲淘汰后在 Picker 标失效、不可跳 |
 | 持久化 | v1 进程退出丢弃 |
 
 **与 H3：** 边轨第三色书签点为可选后续，非本项必做。
@@ -427,13 +423,13 @@
 
 **实现提示：**
 
-- pending `m` 对齐 `c`/`f`/`y`；注意单键 `a` 进 Insert 与 `m` `a` 两键不冲突。
-- `mm` 面板复用靠上 modal + 列表键位（Up/Down/Enter/Esc）。
+- pending `m` 仅处理 `ma`/`md`；书签列表与 CRUD 统一由 Leader `Space m` 的 Picker 承载。
+- Bookmark Picker 支持 Manage/New/Edit、检索、Enter 跳转及带确认的 Ctrl-D/Ctrl-U 删除。
 
 **验收：**
 
-- `ma` 上屏、`md` 下屏、`mm` 跳转正确；淘汰后不崩溃。
-- 书签区不抢 LogList 焦点；H6 含 `ma/mm/md`。
+- `ma` 上屏、`md` 下屏、`Space m` 检索跳转正确；淘汰后不崩溃。
+- 书签区不抢 LogList 焦点；H6 含 Leader 与 `ma/md`。
 
 ---
 
@@ -461,7 +457,8 @@
 | 配置目录 | `$ALOGGREP_HOME`，未设置时默认 **`~/.config/aloggrep`** |
 | CLI | **`--config-path <dir>`** 覆盖配置目录（不是单文件路径） |
 | 主题文件 | `$ALOGGREP_HOME/theme.toml` |
-| 扩展位 | 同目录预留 `config.toml` / `keymap.toml`（v1 **不读**） |
+| 面板配置 | `$ALOGGREP_HOME/config.toml`；读取 `picker_left_ratio`（默认 0.4，clamp 0.2–0.8） |
+| 扩展位 | 同目录预留 `keymap.toml`（v1 **不读**） |
 | 覆盖内容 | UI token（ACCENT、pill、border、selection、preview…）；渲染仍只调 `theme::*` |
 | 日志色 | **不得**外置覆盖；仍以 `aloggrep-core::logcolor` 为唯一源 |
 | 失败 / 热更新 | 缺失或坏文件 → 回退内置 + status；v1 **仅启动时**加载 |
@@ -470,7 +467,7 @@
 
 **验收：**
 
-- 仓库提供示例 `theme.toml`；坏文件回退可感知；`--config-path` 与默认 home 行为有单测或手工说明。
+- 仓库提供示例 `theme.toml` 与 `config.toml`；坏文件回退可感知；`--config-path` 与默认 home 行为有单测。
 
 ---
 
@@ -517,8 +514,8 @@
 | 7 | H4 字段 overlay ✅ → H5 Pretty ✅ | 与 H7 同构键；先 H7 再 overlay 避免键位返工 |
 | 8 | **H10 导出 CLI** ✅ | 过滤模型稳定后编码更准；兑现 M5 切片 |
 | 9 | H3 边轨位置提示 ✅ | 可复用 H2/search 的「可跳转行」扫描 |
-| 10 | M2 书签 ✅ | Log 顶书签区 + `ma`/`mm`/`md` |
-| 11 | M4 主题外置 ✅ | `$ALOGGREP_HOME/theme.toml` + `--config-path` |
+| 10 | M2 书签 ✅ | Log 顶书签区 + `ma`/`md` + `Space m` Picker |
+| 11 | M4 配置外置 ✅ | `theme.toml` + `config.toml` + `--config-path` |
 | — | M1 Histogram / M3 多文件 | **暂缓**（先不做） |
 | — | M5 脚本化对齐 ✅ | **收束为文档**：以 H10 为主切片 + 对照表 |
 
@@ -537,8 +534,8 @@
 | 边轨位置提示 | — | ✅ H3 Log 内侧 minimap |
 | 过滤/搜索预览 | — | ✅ H1 靠上 Preview 窗 |
 | 字段详情 / pretty | `--fields` / 外部工具 | ✅ H4 / ✅ H5 Pretty（同浮层） |
-| 书签 | — | ✅ M2 Log 顶区 + `ma/mm/md` |
-| 主题外置 | — | ✅ M4 `theme.toml` + `--config-path` |
+| 书签 | — | ✅ M2 Log 顶区 + `ma/md` + Bookmark Picker |
+| 主题/面板配置外置 | — | ✅ M4 `theme.toml` + `config.toml` + `--config-path` |
 | 多文件时间归并 | ✅ `--sort-time`（P1-5） | ⏸ M3 暂缓 |
 
 ---

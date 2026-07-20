@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
@@ -22,6 +22,14 @@ const PILL_GAP: u16 = 1;
 /// readable band so Input and Search share one visual scale.
 pub const MODAL_WIDTH_MIN: u16 = 24;
 pub const MODAL_WIDTH_MAX: u16 = 56;
+/// fzf picker outer frame: leave 2 cols margin each side.
+const PICKER_FRAME_WIDTH_MARGIN: u16 = 4;
+/// fzf picker height ≈ 75% of frame, clamped to this minimum.
+const PICKER_FRAME_MIN_HEIGHT: u16 = 10;
+/// Minimum width for each left/right pane inside the picker.
+const PICKER_LR_MIN_WIDTH: u16 = 10;
+/// Search prompt row height at the bottom of the left pane.
+const PICKER_SEARCH_HEIGHT: u16 = 3;
 
 fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
     Block::new()
@@ -33,7 +41,9 @@ fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
 
 /// Unified width for centered Input / Search modals.
 pub fn modal_width(frame_width: u16) -> u16 {
-    frame_width.saturating_sub(4).clamp(MODAL_WIDTH_MIN, MODAL_WIDTH_MAX)
+    frame_width
+        .saturating_sub(4)
+        .clamp(MODAL_WIDTH_MIN, MODAL_WIDTH_MAX)
 }
 
 /// Horizontally and vertically center a `width`×`height` rect inside `frame`.
@@ -55,11 +65,10 @@ pub fn top_modal_rect(frame: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(frame.width).max(1);
     let height = height.min(frame.height).max(1);
     let x = frame.x + (frame.width.saturating_sub(width)) / 2;
-    let y = frame.y.saturating_add(1).min(
-        frame
-            .y
-            .saturating_add(frame.height.saturating_sub(height)),
-    );
+    let y = frame
+        .y
+        .saturating_add(1)
+        .min(frame.y.saturating_add(frame.height.saturating_sub(height)));
     Rect {
         x,
         y,
@@ -80,6 +89,68 @@ pub fn stack_below_rect(anchor: Rect, frame: Rect, height: u16) -> Rect {
         width: anchor.width,
         height,
     }
+}
+
+/// Horizontal center, height ≈ 75% of `frame` (clamped to a readable minimum).
+pub fn picker_frame_rect(frame: Rect) -> Rect {
+    let width = frame
+        .width
+        .saturating_sub(PICKER_FRAME_WIDTH_MARGIN)
+        .max(PICKER_LR_MIN_WIDTH.saturating_mul(2));
+    let height = (frame.height * 3 / 4)
+        .max(PICKER_FRAME_MIN_HEIGHT)
+        .min(frame.height);
+    let x = frame.x + (frame.width.saturating_sub(width)) / 2;
+    let y = frame.y + (frame.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Split `area` into left/right panes by `left_ratio`; each pane is at least
+/// [`PICKER_LR_MIN_WIDTH`] columns wide.
+pub fn split_picker_lr(area: Rect, left_ratio: f32) -> (Rect, Rect) {
+    let total = area.width;
+    let mut left_w = ((total as f32) * left_ratio).round() as u16;
+    left_w = left_w
+        .max(PICKER_LR_MIN_WIDTH)
+        .min(total.saturating_sub(PICKER_LR_MIN_WIDTH));
+    let right_w = total.saturating_sub(left_w);
+    let left = Rect {
+        x: area.x,
+        y: area.y,
+        width: left_w,
+        height: area.height,
+    };
+    let right = Rect {
+        x: area.x + left_w,
+        y: area.y,
+        width: right_w,
+        height: area.height,
+    };
+    (left, right)
+}
+
+/// Left pane vertical stack: candidates fill the top, search prompt pinned to bottom.
+pub fn picker_left_stack(left: Rect) -> (Rect, Rect) {
+    let search_h = PICKER_SEARCH_HEIGHT.min(left.height);
+    let cand_h = left.height.saturating_sub(search_h);
+    let candidates = Rect {
+        x: left.x,
+        y: left.y,
+        width: left.width,
+        height: cand_h,
+    };
+    let search = Rect {
+        x: left.x,
+        y: left.y + cand_h,
+        width: left.width,
+        height: search_h,
+    };
+    (candidates, search)
 }
 
 /// Clear + rounded active shell with a plain title. Returns the inner content rect.
@@ -108,7 +179,10 @@ pub fn render_candidate_list(
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(
-            Paragraph::new(Span::styled(empty_msg, Style::default().add_modifier(Modifier::DIM))),
+            Paragraph::new(Span::styled(
+                empty_msg,
+                Style::default().add_modifier(Modifier::DIM),
+            )),
             inner,
         );
         return;
@@ -185,8 +259,11 @@ fn wrap_ranges(text: &str, width: usize) -> Vec<(usize, usize)> {
             if line_end > line_start {
                 ranges.push((line_start, line_end));
             }
-            let char_offsets: Vec<usize> =
-                text[ws..we].char_indices().map(|(i, _)| ws + i).chain(std::iter::once(we)).collect();
+            let char_offsets: Vec<usize> = text[ws..we]
+                .char_indices()
+                .map(|(i, _)| ws + i)
+                .chain(std::iter::once(we))
+                .collect();
             let mut c = 0usize;
             while c < char_offsets.len() - 1 {
                 let take = width.min(char_offsets.len() - 1 - c);
@@ -315,7 +392,9 @@ fn render_entry_lines(
     let first_width = area_width.saturating_sub(header_width).max(8);
     let cont_width = area_width.saturating_sub(header_width).max(8);
 
-    let tag_style = Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD);
+    let tag_style = Style::default()
+        .fg(theme::accent())
+        .add_modifier(Modifier::BOLD);
     let tag_matches = collect_matches(&row.tag, patterns);
     let msg_matches = collect_matches(&row.msg, patterns);
 
@@ -339,7 +418,10 @@ fn render_entry_lines(
                     theme::muted().add_modifier(Modifier::DIM),
                 ));
                 spans.push(Span::styled(ts.clone(), theme::muted()));
-                spans.push(Span::styled(level_badge.clone(), theme::level_badge_style(row.level)));
+                spans.push(Span::styled(
+                    level_badge.clone(),
+                    theme::level_badge_style(row.level),
+                ));
                 if tag_matches.is_empty() {
                     spans.push(Span::styled(tag_display.clone(), tag_style));
                 } else {
@@ -352,9 +434,17 @@ fn render_entry_lines(
                     spans.push(Span::styled(" ", tag_style));
                 }
             } else {
-                spans.push(Span::styled(cont_prefix.clone(), Style::default().add_modifier(Modifier::DIM)));
+                spans.push(Span::styled(
+                    cont_prefix.clone(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
             }
-            spans.extend(spans_for_range(&row.msg, range, &msg_matches, Style::default()));
+            spans.extend(spans_for_range(
+                &row.msg,
+                range,
+                &msg_matches,
+                Style::default(),
+            ));
             Line::from(spans)
         })
         .collect()
@@ -483,7 +573,13 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
         .visible_rows()
         .enumerate()
         .map(|(i, row)| {
-            let mut item = ListItem::new(render_entry_lines(row, &patterns, inner_width, i + 1, lineno_width));
+            let mut item = ListItem::new(render_entry_lines(
+                row,
+                &patterns,
+                inner_width,
+                i + 1,
+                lineno_width,
+            ));
             if let Some((lo, hi)) = selection {
                 if i >= lo && i <= hi {
                     item = item.style(theme::log_visual_style());
@@ -507,11 +603,8 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     // M2: bookmark strip embedded at top of Log (collapsed when empty).
     let bm_n = app.bookmarks.display_recent().len() as u16;
     let (bm_area, list_area) = if bm_n > 0 && content_area.height > bm_n {
-        let [top, rest] = Layout::vertical([
-            Constraint::Length(bm_n),
-            Constraint::Fill(1),
-        ])
-        .areas(content_area);
+        let [top, rest] =
+            Layout::vertical([Constraint::Length(bm_n), Constraint::Fill(1)]).areas(content_area);
         (Some(top), rest)
     } else {
         (None, content_area)
@@ -541,14 +634,15 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
 
 /// M2: up to 3 newest bookmarks inside the Log region.
 pub fn render_bookmark_strip(app: &App, frame: &mut Frame, area: Rect) {
+    use crate::bookmark::fit_label;
+
     if area.height == 0 {
         return;
     }
-    frame.render_widget(
-        Block::default().style(theme::bookmark_strip_style()),
-        area,
-    );
+    frame.render_widget(Block::default().style(theme::bookmark_strip_style()), area);
     let recent = app.bookmarks.display_recent();
+    // " ★ " / " ☆ " prefix is 3 cols; fit the rest to the strip width.
+    let text_cols = area.width.saturating_sub(3) as usize;
     let lines: Vec<Line> = recent
         .iter()
         .take(area.height as usize)
@@ -560,74 +654,11 @@ pub fn render_bookmark_strip(app: &App, frame: &mut Frame, area: Rect) {
                 theme::bookmark_stale_style()
             };
             let mark = if alive { "★" } else { "☆" };
-            Line::from(Span::styled(format!(" {mark} {}", bm.label), style))
+            let text = fit_label(&bm.label, text_cols);
+            Line::from(Span::styled(format!(" {mark} {text}"), style))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
-}
-
-/// M2 `mm` picker: draft + filtered bookmark list (newest first).
-pub fn render_bookmark_picker(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(picker) = &app.bookmark_picker else {
-        return;
-    };
-    let inner = render_modal_shell("Bookmarks", frame, area);
-    if inner.height == 0 {
-        return;
-    }
-    let [draft_area, list_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(inner);
-    let draft_spans = vec![
-        Span::styled("filter ", theme::muted()),
-        Span::styled(picker.draft.clone(), Style::reset()),
-        theme::caret_bar(),
-    ];
-    frame.render_widget(Paragraph::new(Line::from(draft_spans)), draft_area);
-
-    let filtered = picker.filtered_indices(&app.bookmarks);
-    if filtered.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                "无书签".to_string(),
-                theme::preview_placeholder_style(),
-            )),
-            list_area,
-        );
-        return;
-    }
-    let labels: Vec<String> = filtered
-        .iter()
-        .map(|&i| {
-            let bm = &app.bookmarks.items[i];
-            if app.bookmark_alive(bm.row_id) {
-                format!("★ {}", bm.label)
-            } else {
-                format!("☆ {} (失效)", bm.label)
-            }
-        })
-        .collect();
-    let styles: Vec<Style> = filtered
-        .iter()
-        .map(|&i| {
-            let bm = &app.bookmarks.items[i];
-            if app.bookmark_alive(bm.row_id) {
-                theme::bookmark_label_style()
-            } else {
-                theme::bookmark_stale_style()
-            }
-        })
-        .collect();
-    let selected = picker.selected.min(labels.len() - 1);
-    render_candidate_list("jump", &labels, &styles, selected, "无匹配", frame, list_area);
-}
-
-/// Height for the `mm` modal (draft + up to 8 rows + border).
-pub fn bookmark_picker_height(match_count: usize) -> u16 {
-    let rows = match_count.clamp(1, 8) as u16;
-    rows + 1 + 2 // draft + border
 }
 
 fn group_dot_span(enabled: bool, selected: bool) -> Span<'static> {
@@ -679,7 +710,10 @@ fn search_group_spans(
     spans
 }
 
-fn exclude_entry_spans(e: &crate::filter_model::ExcludeEntry, selected: bool) -> Vec<Span<'static>> {
+fn exclude_entry_spans(
+    e: &crate::filter_model::ExcludeEntry,
+    selected: bool,
+) -> Vec<Span<'static>> {
     let mut spans = vec![group_dot_span(e.enabled, selected)];
     spans.push(Span::raw(" ".repeat(DOT_PILL_GAP as usize)));
     let (text, body) = theme::exclude_pill_style(e.chip.field, &e.chip.value, !e.enabled);
@@ -884,19 +918,27 @@ pub fn render_search_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(search_strip_lines(app, inner.width)), inner);
 }
 
-fn input_content_spans(input: &InputBox, show_caret: bool) -> Vec<Span<'static>> {
+fn committed_chip_spans(
+    chips: &[crate::input::Chip],
+    exclude_mode: bool,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for (i, chip) in input.chips.iter().enumerate() {
+    for (i, chip) in chips.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw(" ".repeat(PILL_GAP as usize)));
         }
-        let (text, body) = if input.exclude_mode {
+        let (text, body) = if exclude_mode {
             theme::exclude_pill_style(chip.field, &chip.value, false)
         } else {
             theme::chip_pill_style(chip.field, &chip.value, false)
         };
         spans.push(Span::styled(text, body));
     }
+    spans
+}
+
+fn input_content_spans(input: &InputBox, show_caret: bool) -> Vec<Span<'static>> {
+    let mut spans = committed_chip_spans(&input.chips, input.exclude_mode);
     // Gap + reset after pills so draft/caret never sit inside the pill fill.
     if !input.chips.is_empty() {
         spans.push(Span::styled(" ".repeat(PILL_GAP as usize), Style::reset()));
@@ -929,7 +971,13 @@ pub fn render_input_modal(input: &InputBox, mode: Mode, frame: &mut Frame, area:
 }
 
 /// Legacy single-row Input render kept for unit tests that draw into a fixed area.
-pub fn render_input_box(input: &InputBox, mode: Mode, focused: bool, frame: &mut Frame, area: Rect) {
+pub fn render_input_box(
+    input: &InputBox,
+    mode: Mode,
+    focused: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let block = rounded_block(theme::numbered_title(5, "Input", focused), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -946,7 +994,9 @@ pub fn render_search_modal(search: &SearchBox, frame: &mut Frame, area: Rect) {
     let spans = vec![
         Span::styled(
             "/",
-            Style::reset().fg(theme::accent()).add_modifier(Modifier::BOLD),
+            Style::reset()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(search.draft.clone(), Style::reset()),
         theme::caret_bar(),
@@ -963,7 +1013,10 @@ pub fn detail_modal_height(frame: Rect, content_rows: usize) -> u16 {
 }
 
 /// Build H4 Fields-mode lines for the current row (used by render + height).
-pub fn detail_field_lines(row: Option<&crate::model::EntryRow>, inner_width: u16) -> Vec<Line<'static>> {
+pub fn detail_field_lines(
+    row: Option<&crate::model::EntryRow>,
+    inner_width: u16,
+) -> Vec<Line<'static>> {
     use crate::input::ChipField;
 
     let label_w = 5usize;
@@ -978,7 +1031,11 @@ pub fn detail_field_lines(row: Option<&crate::model::EntryRow>, inner_width: u16
         return lines;
     };
 
-    let push_kv = |lines: &mut Vec<Line<'static>>, label: &str, label_style: Style, value: String, value_style: Style| {
+    let push_kv = |lines: &mut Vec<Line<'static>>,
+                   label: &str,
+                   label_style: Style,
+                   value: String,
+                   value_style: Style| {
         let label_pad = format!("{label:<width$}", width = label_w);
         let mut first = true;
         for (s, e) in wrap_ranges(&value, value_w) {
@@ -1072,7 +1129,10 @@ pub fn pretty_json_for_row(row: &crate::model::EntryRow) -> (String, bool) {
 }
 
 /// H5 Pretty-mode lines (used by render + height).
-pub fn detail_pretty_lines(row: Option<&crate::model::EntryRow>, inner_width: u16) -> Vec<Line<'static>> {
+pub fn detail_pretty_lines(
+    row: Option<&crate::model::EntryRow>,
+    inner_width: u16,
+) -> Vec<Line<'static>> {
     let width = inner_width.max(1) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(row) = row else {
@@ -1153,7 +1213,10 @@ pub fn render_preview(
                 let e = e.min(line.text.len()).max(s);
                 ListItem::new(Line::from(vec![
                     Span::raw(line.text[..s].to_string()),
-                    Span::styled(line.text[s..e].to_string(), theme::preview_highlight_style()),
+                    Span::styled(
+                        line.text[s..e].to_string(),
+                        theme::preview_highlight_style(),
+                    ),
                     Span::raw(line.text[e..].to_string()),
                 ]))
             } else {
@@ -1164,40 +1227,108 @@ pub fn render_preview(
     frame.render_widget(List::new(items), inner);
 }
 
-/// H7 `c`+`m` draft modal (candidates float below via [`render_msg_chip_popup`]).
-pub fn render_msg_chip_modal(picker: &crate::input::MsgChipPicker, frame: &mut Frame, area: Rect) {
-    let inner = render_modal_shell("msg chip", frame, area);
-    let spans = vec![
-        Span::styled(
-            "msg~",
-            Style::reset()
-                .fg(theme::field_color(crate::input::ChipField::Msg))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(picker.draft.clone(), Style::reset()),
-        theme::caret_bar(),
-    ];
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
-}
-
-/// H7 msg-token candidates — same shell as Input field / Search history popup.
-pub fn render_msg_chip_popup(
-    picker: &crate::input::MsgChipPicker,
+/// fzf left-pane committed pills plus search prompt: `prefix` + draft + caret.
+pub fn render_picker_search_line(
+    prefix: char,
+    text: &str,
+    chips: &[crate::input::Chip],
+    exclude_chips: bool,
     frame: &mut Frame,
     area: Rect,
 ) {
-    let candidates = picker.candidates();
-    let n = candidates.len().min(8);
-    let labels: Vec<String> = candidates.iter().take(n).map(|s| (*s).to_string()).collect();
-    let styles: Vec<Style> = (0..n)
-        .map(|_| Style::default().fg(theme::field_color(crate::input::ChipField::Msg)))
-        .collect();
-    let selected = if n == 0 {
-        0
+    if area.height == 0 {
+        return;
+    }
+    let prompt = Line::from(vec![
+        Span::styled(prefix.to_string(), theme::muted()),
+        Span::styled(text.to_string(), Style::reset()),
+        theme::caret_bar(),
+    ]);
+    let lines = if chips.is_empty() {
+        vec![prompt]
     } else {
-        picker.selected.min(n - 1)
+        vec![
+            Line::from(committed_chip_spans(chips, exclude_chips)),
+            prompt,
+        ]
     };
-    render_candidate_list("片段", &labels, &styles, selected, "无匹配片段", frame, area);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// fzf-style picker shell: left candidates + bottom search, right Preview.
+pub fn render_picker(
+    title: &str,
+    prefix: char,
+    search_text: &str,
+    chips: &[crate::input::Chip],
+    exclude_chips: bool,
+    labels: &[String],
+    styles: &[Style],
+    selected: usize,
+    empty_msg: &str,
+    preview_lines: &[crate::preview::PreviewLine],
+    left_ratio: f32,
+    frame: &mut Frame,
+    frame_area: Rect,
+) {
+    let picker_area = picker_frame_rect(frame_area);
+    frame.render_widget(Clear, picker_area);
+
+    let (left, right) = split_picker_lr(picker_area, left_ratio);
+    let left_inner = render_modal_shell(title, frame, left);
+    let (candidates_area, search_area) = picker_left_stack(left_inner);
+
+    if candidates_area.height > 0 {
+        render_candidate_list(
+            "list",
+            labels,
+            styles,
+            selected,
+            empty_msg,
+            frame,
+            candidates_area,
+        );
+    }
+    render_picker_search_line(
+        prefix,
+        search_text,
+        chips,
+        exclude_chips,
+        frame,
+        search_area,
+    );
+    render_preview("Preview", preview_lines, "无预览", frame, right);
+}
+
+/// Destructive picker action confirmation, overlaid at the picker center.
+fn confirm_dialog_question(confirm: &crate::picker::ConfirmKind) -> String {
+    match confirm {
+        crate::picker::ConfirmKind::DeleteOne { .. } => "删除选中？".to_string(),
+        crate::picker::ConfirmKind::DeleteAll { count } => format!("删除全部 {count} 项？"),
+    }
+}
+
+pub fn render_confirm_dialog(
+    confirm: &crate::picker::ConfirmKind,
+    frame: &mut Frame,
+    frame_area: Rect,
+) {
+    let picker_area = picker_frame_rect(frame_area);
+    let question = confirm_dialog_question(confirm);
+    let width = 34.min(picker_area.width).max(1);
+    let height = 5.min(picker_area.height).max(1);
+    let area = centered_modal_rect(picker_area, width, height);
+    let inner = render_modal_shell("确认删除", frame, area);
+    let text = vec![
+        Line::from(Span::styled(question, Style::default().add_modifier(Modifier::BOLD)))
+            .alignment(Alignment::Center),
+        Line::from(Span::styled(
+            "y/Enter 确认  n/Esc 取消",
+            theme::context_help_style(),
+        ))
+        .alignment(Alignment::Center),
+    ];
+    frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), inner);
 }
 
 /// Search history-chip candidates — same shell as Input field popup.
@@ -1239,7 +1370,15 @@ pub fn render_search_popup(
     } else {
         search.selected.min(n - 1)
     };
-    render_candidate_list("历史", &labels, &styles, selected, "无匹配历史", frame, area);
+    render_candidate_list(
+        "历史",
+        &labels,
+        &styles,
+        selected,
+        "无匹配历史",
+        frame,
+        area,
+    );
 }
 
 pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
@@ -1257,7 +1396,15 @@ pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
     } else {
         input.field_selected.min(matches.len() - 1)
     };
-    render_candidate_list("字段", &labels, &styles, selected, "无匹配字段", frame, area);
+    render_candidate_list(
+        "字段",
+        &labels,
+        &styles,
+        selected,
+        "无匹配字段",
+        frame,
+        area,
+    );
 }
 
 pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
@@ -1284,14 +1431,6 @@ pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     if app.visual_anchor.is_some() {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge("VISUAL", theme::accent()));
-    } else if app.msg_chip_picker.is_some() {
-        spans.push(Span::raw(" "));
-        let label = if app.msg_chip_picker.as_ref().is_some_and(|p| p.as_exclude) {
-            "C m…"
-        } else {
-            "c m…"
-        };
-        spans.push(theme::status_badge(label, theme::warning()));
     } else if app.pending_chip {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge("c…", theme::warning()));
@@ -1301,27 +1440,25 @@ pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     } else if app.pending_lock {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge("f…", theme::warning()));
+    } else if app.pending_m {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_badge("m…", theme::warning()));
     } else if app.pending_yank {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge("y…", theme::warning()));
+    } else if app.pending_d {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_badge("d…", theme::warning()));
     }
+    // Timed flash toast (YANKED / NO ERROR / …); pending badges above are separate.
     if let Some(msg) = &app.status_msg {
-        if msg != "VISUAL"
-            && msg != "y…"
-            && msg != "c…"
-            && msg != "c m…"
-            && msg != "C…"
-            && msg != "C m…"
-            && msg != "f…"
-        {
-            spans.push(Span::raw(" "));
-            let bg = if msg.starts_with("YANK FAILED") {
-                theme::warning()
-            } else {
-                theme::accent()
-            };
-            spans.push(theme::status_badge(msg, bg));
-        }
+        spans.push(Span::raw(" "));
+        let bg = if msg.starts_with("YANK FAILED") {
+            theme::warning()
+        } else {
+            theme::accent()
+        };
+        spans.push(theme::status_badge(msg, bg));
     }
     // Trailing context help (H6): badges keep priority; hint truncates or hides.
     let left_width: usize = spans.iter().map(span_width).sum();
@@ -1357,7 +1494,11 @@ mod tests {
     fn test_render_log_list_shows_tag_and_msg() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I MyTag   : hello world").unwrap()).unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I MyTag   : hello world")
+                .unwrap(),
+        )
+        .unwrap();
         drop(tx);
         app.drain(&rx);
 
@@ -1376,8 +1517,16 @@ mod tests {
     fn test_render_log_list_highlights_selected_row_with_soft_gray_when_focused() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I RowOne  : first").unwrap()).unwrap();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I RowTwo  : second").unwrap()).unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I RowOne  : first")
+                .unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I RowTwo  : second")
+                .unwrap(),
+        )
+        .unwrap();
         drop(tx);
         app.drain(&rx);
         app.cursor = 1; // select the second row
@@ -1394,8 +1543,16 @@ mod tests {
         let buf = terminal.backend().buffer();
         let selected_style = buf[(1, 2)].style();
         let unselected_style = buf[(1, 1)].style();
-        assert_eq!(selected_style.bg, Some(Color::DarkGray), "focused selection must use the soft gray background");
-        assert_ne!(unselected_style.bg, Some(Color::DarkGray), "unselected rows must not get the selection background");
+        assert_eq!(
+            selected_style.bg,
+            Some(Color::DarkGray),
+            "focused selection must use the soft gray background"
+        );
+        assert_ne!(
+            unselected_style.bg,
+            Some(Color::DarkGray),
+            "unselected rows must not get the selection background"
+        );
         assert!(
             !selected_style.add_modifier.contains(Modifier::REVERSED),
             "must not use the old reverse-video style"
@@ -1406,8 +1563,16 @@ mod tests {
     fn test_render_log_list_no_highlight_when_log_list_unfocused() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I RowOne  : first").unwrap()).unwrap();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I RowTwo  : second").unwrap()).unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I RowOne  : first")
+                .unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I RowTwo  : second")
+                .unwrap(),
+        )
+        .unwrap();
         drop(tx);
         app.drain(&rx);
         app.cursor = 1;
@@ -1432,8 +1597,11 @@ mod tests {
     fn test_selection_preserves_keyword_highlight_bg() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error here").unwrap())
-            .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error here")
+                .unwrap(),
+        )
+        .unwrap();
         drop(tx);
         app.drain(&rx);
         app.search_groups
@@ -1466,8 +1634,13 @@ mod tests {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
         for i in 0..30 {
-            tx.send(crate::model::EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I Tag     : line{i}")).unwrap())
-                .unwrap();
+            tx.send(
+                crate::model::EntryRow::from_line(&format!(
+                    "04-02 10:00:00.000  1  1 I Tag     : line{i}"
+                ))
+                .unwrap(),
+            )
+            .unwrap();
         }
         drop(tx);
         app.drain(&rx);
@@ -1478,12 +1651,19 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         app.cursor = 20;
-        terminal.draw(|frame| render_log_list(&mut app, frame, frame.area())).unwrap();
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
         let offset_at_edge = app.list_offset;
-        assert!(offset_at_edge > 0, "cursor near the bottom of a 30-row list in a 5-row viewport must have scrolled");
+        assert!(
+            offset_at_edge > 0,
+            "cursor near the bottom of a 30-row list in a 5-row viewport must have scrolled"
+        );
 
         app.cursor -= 2; // moves, but stays inside the already-scrolled viewport
-        terminal.draw(|frame| render_log_list(&mut app, frame, frame.area())).unwrap();
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
 
         assert_eq!(
             app.list_offset, offset_at_edge,
@@ -1494,7 +1674,10 @@ mod tests {
     #[test]
     fn test_wrap_ranges_breaks_on_whitespace() {
         let ranges = wrap_ranges("hello world foo", 11);
-        let chunks: Vec<&str> = ranges.iter().map(|&(s, e)| &"hello world foo"[s..e]).collect();
+        let chunks: Vec<&str> = ranges
+            .iter()
+            .map(|&(s, e)| &"hello world foo"[s..e])
+            .collect();
         assert_eq!(chunks, vec!["hello world", "foo"]);
     }
 
@@ -1502,7 +1685,10 @@ mod tests {
     fn test_wrap_ranges_hard_cuts_overlong_word() {
         let text = "supercalifragilistic";
         let ranges = wrap_ranges(text, 6);
-        assert!(ranges.len() > 1, "an overlong word must be split into multiple pieces");
+        assert!(
+            ranges.len() > 1,
+            "an overlong word must be split into multiple pieces"
+        );
         for &(s, e) in &ranges {
             assert!(e - s <= 6);
         }
@@ -1523,20 +1709,38 @@ mod tests {
         )
         .unwrap();
         let lines = render_entry_lines(&row, &[], 40, 1, 1);
-        assert!(lines.len() > 1, "a long message should wrap into multiple lines, got {}", lines.len());
+        assert!(
+            lines.len() > 1,
+            "a long message should wrap into multiple lines, got {}",
+            lines.len()
+        );
     }
 
     #[test]
     fn test_render_entry_lines_highlights_only_matched_keyword() {
-        let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred here").unwrap();
+        let row =
+            EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred here")
+                .unwrap();
         let re = Regex::new("(?i)error").unwrap();
         let patterns = [(&re, 0usize, false)];
         let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         assert_eq!(lines.len(), 1);
-        let matched: Vec<&Span> = lines[0].spans.iter().filter(|s| s.content.as_ref() == "error").collect();
-        assert_eq!(matched.len(), 1, "exactly the matched keyword should be its own span");
-        let other_span_styles: Vec<Style> =
-            lines[0].spans.iter().filter(|s| s.content.as_ref() != "error").map(|s| s.style).collect();
+        let matched: Vec<&Span> = lines[0]
+            .spans
+            .iter()
+            .filter(|s| s.content.as_ref() == "error")
+            .collect();
+        assert_eq!(
+            matched.len(),
+            1,
+            "exactly the matched keyword should be its own span"
+        );
+        let other_span_styles: Vec<Style> = lines[0]
+            .spans
+            .iter()
+            .filter(|s| s.content.as_ref() != "error")
+            .map(|s| s.style)
+            .collect();
         assert!(
             other_span_styles.iter().all(|s| *s != matched[0].style),
             "non-matched spans must not share the highlight style"
@@ -1562,19 +1766,30 @@ mod tests {
             .expect("unmatched tag prefix keeps accent style");
         assert_eq!(
             prefix.style,
-            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
         );
     }
 
     #[test]
     fn test_render_entry_lines_multicolor_patterns() {
-        let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : foo and bar here").unwrap();
+        let row =
+            EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : foo and bar here").unwrap();
         let re0 = Regex::new("(?i)foo").unwrap();
         let re1 = Regex::new("(?i)bar").unwrap();
         let patterns = [(&re0, 0usize, true), (&re1, 1usize, false)];
         let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
-        let foo = lines[0].spans.iter().find(|s| s.content.as_ref() == "foo").unwrap();
-        let bar = lines[0].spans.iter().find(|s| s.content.as_ref() == "bar").unwrap();
+        let foo = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "foo")
+            .unwrap();
+        let bar = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "bar")
+            .unwrap();
         assert_eq!(foo.style, theme::highlight_style_active(0));
         assert_eq!(bar.style, theme::highlight_style(1));
         assert!(foo.style.add_modifier.contains(Modifier::UNDERLINED));
@@ -1591,7 +1806,11 @@ mod tests {
             .iter()
             .find(|s| s.content.as_ref().starts_with("Ab"))
             .expect("tag span");
-        assert_eq!(tag_span.content.as_ref(), "Ab ", "short tag must not be padded to 16 columns");
+        assert_eq!(
+            tag_span.content.as_ref(),
+            "Ab ",
+            "short tag must not be padded to 16 columns"
+        );
     }
 
     #[test]
@@ -1603,9 +1822,17 @@ mod tests {
         let lines = render_entry_lines(&row, &[], 40, 1, 1);
         assert!(lines.len() > 1);
         // lineno + timestamp + level + tag
-        let header_width: usize = lines[0].spans.iter().take(4).map(|s| s.content.chars().count()).sum();
+        let header_width: usize = lines[0]
+            .spans
+            .iter()
+            .take(4)
+            .map(|s| s.content.chars().count())
+            .sum();
         let cont = lines[1].spans[0].content.as_ref();
-        assert!(cont.chars().all(|c| c == ' '), "continuation prefix should be spaces");
+        assert!(
+            cont.chars().all(|c| c == ' '),
+            "continuation prefix should be spaces"
+        );
         assert_eq!(cont.chars().count(), header_width);
     }
 
@@ -1614,11 +1841,20 @@ mod tests {
         let row = EntryRow::from_line("04-02 10:00:00.000  1234  5678 I MyTag   : hello").unwrap();
         let lines = render_entry_lines(&row, &[], 200, 12, 3);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains(" 12 "), "lineno should be right-aligned to width 3");
+        assert!(
+            text.contains(" 12 "),
+            "lineno should be right-aligned to width 3"
+        );
         assert!(text.contains("MyTag"));
         assert!(text.contains("hello"));
-        assert!(!text.contains("1234"), "pid must not appear in default display");
-        assert!(!text.contains("5678"), "tid must not appear in default display");
+        assert!(
+            !text.contains("1234"),
+            "pid must not appear in default display"
+        );
+        assert!(
+            !text.contains("5678"),
+            "tid must not appear in default display"
+        );
         assert!(text.contains(" I "), "level badge must remain");
     }
 
@@ -1688,14 +1924,20 @@ mod tests {
         let mut app = App::new(100);
         app.groups.groups.push(Group {
             label: "a".into(),
-            chips: vec![Chip { field: ChipField::Tag, value: "A".into() }],
+            chips: vec![Chip {
+                field: ChipField::Tag,
+                value: "A".into(),
+            }],
             expr: None,
             time: None,
             enabled: true,
         });
         app.groups.groups.push(Group {
             label: "b".into(),
-            chips: vec![Chip { field: ChipField::Msg, value: "B".into() }],
+            chips: vec![Chip {
+                field: ChipField::Msg,
+                value: "B".into(),
+            }],
             expr: None,
             time: None,
             enabled: true,
@@ -1724,7 +1966,10 @@ mod tests {
             before.chars().filter(|c| *c == 'A' || *c == 'B').count(),
             after.chars().filter(|c| *c == 'A' || *c == 'B').count()
         );
-        let corners = before.chars().filter(|c| matches!(*c, '╭' | '╮' | '╰' | '╯')).count();
+        let corners = before
+            .chars()
+            .filter(|c| matches!(*c, '╭' | '╮' | '╰' | '╯'))
+            .count();
         assert_eq!(corners, 4, "only strip outer rounded chrome, got {corners}");
     }
 
@@ -1747,8 +1992,15 @@ mod tests {
             });
         }
         let h = filter_strip_height(&app, 20);
-        assert!(h > 3, "wrapped strip should exceed one content row + chrome, got {h}");
-        assert_eq!(filter_strip_height(&app, 20), h, "height is instantaneous (stable)");
+        assert!(
+            h > 3,
+            "wrapped strip should exceed one content row + chrome, got {h}"
+        );
+        assert_eq!(
+            filter_strip_height(&app, 20),
+            h,
+            "height is instantaneous (stable)"
+        );
         app.groups.groups.clear();
         assert_eq!(filter_strip_height(&app, 20), 0);
     }
@@ -1757,9 +2009,16 @@ mod tests {
     fn test_render_status_bar_shows_search_match_stats() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap()).unwrap();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : hit one").unwrap()).unwrap();
-        tx.send(crate::model::EntryRow::from_line("04-02 10:00:02.000  1  1 I T   : hit two").unwrap()).unwrap();
+        tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap())
+            .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : hit one").unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:02.000  1  1 I T   : hit two").unwrap(),
+        )
+        .unwrap();
         drop(tx);
         app.drain(&rx);
         app.following = false;
@@ -1772,14 +2031,20 @@ mod tests {
             .draw(|frame| render_status_bar(&app, frame, frame.area()))
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
-        assert!(content.contains("[-/2]"), "cursor not on hit: got {content:?}");
+        assert!(
+            content.contains("[-/2]"),
+            "cursor not on hit: got {content:?}"
+        );
 
         app.cursor = 1;
         terminal
             .draw(|frame| render_status_bar(&app, frame, frame.area()))
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
-        assert!(content.contains("[1/2]"), "first hit ordinal: got {content:?}");
+        assert!(
+            content.contains("[1/2]"),
+            "first hit ordinal: got {content:?}"
+        );
     }
 
     #[test]
@@ -1842,10 +2107,8 @@ mod tests {
         ] {
             let _ = i;
             tx.send(
-                EntryRow::from_line(&format!(
-                    "04-02 10:00:00.000  1  1 {level} Tag     : {msg}"
-                ))
-                .unwrap(),
+                EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 {level} Tag     : {msg}"))
+                    .unwrap(),
             )
             .unwrap();
         }
@@ -1862,10 +2125,7 @@ mod tests {
         assert!(marks.iter().any(|m| *m == MinimapMark::Search));
         assert!(marks.iter().any(|m| *m == MinimapMark::Viewport));
         // Index 1 (E) maps near row 1 of 4.
-        assert_eq!(
-            marks[minimap_row_for_index(1, 4, 4)],
-            MinimapMark::Severe
-        );
+        assert_eq!(marks[minimap_row_for_index(1, 4, 4)], MinimapMark::Severe);
     }
 
     #[test]
@@ -1906,6 +2166,122 @@ mod tests {
                 break;
             }
         }
-        assert!(found_mark, "minimap rail should paint │/• inside the log border");
+        assert!(
+            found_mark,
+            "minimap rail should paint │/• inside the log border"
+        );
+    }
+
+    #[test]
+    fn split_picker_lr_respects_ratio() {
+        let area = Rect::new(0, 0, 100, 40);
+        let (l, r) = split_picker_lr(area, 0.4);
+        assert_eq!(l.width, 40);
+        assert_eq!(r.width, 60);
+        assert_eq!(l.height, r.height);
+    }
+
+    #[test]
+    fn picker_left_stack_search_at_bottom() {
+        let left = Rect::new(0, 0, 40, 20);
+        let (cand, search) = picker_left_stack(left);
+        assert_eq!(search.height, 3);
+        assert_eq!(search.y + search.height, left.y + left.height);
+        assert_eq!(cand.y, left.y);
+        assert_eq!(cand.height, left.height - 3);
+    }
+
+    #[test]
+    fn picker_search_area_shows_committed_chip() {
+        use crate::input::{Chip, ChipField};
+
+        let chips = vec![Chip {
+            field: ChipField::Tag,
+            value: "MyTag".into(),
+        }];
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_picker(
+                    "Filter · Edit",
+                    ':',
+                    "",
+                    &chips,
+                    false,
+                    &[],
+                    &[],
+                    0,
+                    "无项目",
+                    &[],
+                    0.4,
+                    frame,
+                    frame.area(),
+                )
+            })
+            .unwrap();
+
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("MyTag"));
+    }
+
+    #[test]
+    fn confirm_dialog_renders_delete_one_copy_over_picker() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_picker(
+                    "Search · Manage",
+                    '/',
+                    "",
+                    &[],
+                    false,
+                    &["error".into()],
+                    &[theme::muted()],
+                    0,
+                    "无项目",
+                    &[],
+                    0.4,
+                    frame,
+                    frame.area(),
+                );
+                render_confirm_dialog(
+                    &crate::picker::ConfirmKind::DeleteOne { index: 0 },
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let content = cell_text(terminal.backend().buffer());
+        assert_eq!(
+            confirm_dialog_question(&crate::picker::ConfirmKind::DeleteOne { index: 0 }),
+            "删除选中？"
+        );
+        assert!(content.contains("y/Enter"));
+        assert!(content.contains("n/Esc"));
+    }
+
+    #[test]
+    fn confirm_dialog_renders_delete_all_count() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_confirm_dialog(
+                    &crate::picker::ConfirmKind::DeleteAll { count: 12 },
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let content = cell_text(terminal.backend().buffer());
+        assert_eq!(
+            confirm_dialog_question(&crate::picker::ConfirmKind::DeleteAll { count: 12 }),
+            "删除全部 12 项？"
+        );
+        assert!(content.contains("12"));
     }
 }

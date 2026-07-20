@@ -8,7 +8,7 @@ pub const BOOKMARK_SOFT_CAP: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bookmark {
     pub row_id: u64,
-    /// Short label for strip / picker (tag + msg).
+    /// Full strip/picker label (tag + first msg line); display truncates by width.
     pub label: String,
 }
 
@@ -33,11 +33,7 @@ impl BookmarkList {
 
     /// Newest-first slice for the Log top strip (≤ [`BOOKMARK_DISPLAY_N`]).
     pub fn display_recent(&self) -> Vec<&Bookmark> {
-        self.items
-            .iter()
-            .rev()
-            .take(BOOKMARK_DISPLAY_N)
-            .collect()
+        self.items.iter().rev().take(BOOKMARK_DISPLAY_N).collect()
     }
 
     /// Push if under cap and not duplicate. Returns `Ok(true)` on insert.
@@ -57,6 +53,29 @@ impl BookmarkList {
         self.items.retain(|b| b.row_id != row_id);
         self.items.len() < before
     }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    pub fn update_label(&mut self, row_id: u64, label: String) -> bool {
+        let Some(bm) = self.items.iter_mut().find(|b| b.row_id == row_id) else {
+            return false;
+        };
+        if bm.label == label {
+            return false;
+        }
+        bm.label = label;
+        true
+    }
+
+    pub fn delete_at(&mut self, index: usize) -> bool {
+        if index >= self.items.len() {
+            return false;
+        }
+        self.items.remove(index);
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,78 +94,32 @@ pub enum JumpResult {
     Filtered,
 }
 
-/// Centered-top picker for `mm`: draft filter + selection over bookmarks.
-#[derive(Debug, Default)]
-pub struct BookmarkPicker {
-    pub draft: String,
-    pub selected: usize,
-}
-
-impl BookmarkPicker {
-    pub fn open() -> Self {
-        Self::default()
-    }
-
-    pub fn push_char(&mut self, c: char) {
-        self.draft.push(c);
-        self.selected = 0;
-    }
-
-    pub fn backspace(&mut self) {
-        self.draft.pop();
-        self.selected = 0;
-    }
-
-    /// Indices into `bookmarks.items` matching draft (ignore-case), newest first.
-    pub fn filtered_indices(&self, bookmarks: &BookmarkList) -> Vec<usize> {
-        let draft = self.draft.to_ascii_lowercase();
-        let mut idxs: Vec<usize> = bookmarks
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| {
-                draft.is_empty() || b.label.to_ascii_lowercase().contains(&draft)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        idxs.reverse(); // newest first
-        idxs
-    }
-
-    pub fn move_selection(&mut self, delta: isize, filtered_len: usize) {
-        if filtered_len == 0 {
-            self.selected = 0;
-            return;
-        }
-        let cur = self.selected.min(filtered_len - 1) as isize;
-        self.selected = (cur + delta).clamp(0, filtered_len as isize - 1) as usize;
-    }
-
-    /// Selected bookmark index into `bookmarks.items`, if any.
-    pub fn selected_item_index(&self, bookmarks: &BookmarkList) -> Option<usize> {
-        let filtered = self.filtered_indices(bookmarks);
-        if filtered.is_empty() {
-            return None;
-        }
-        filtered.get(self.selected.min(filtered.len() - 1)).copied()
-    }
-}
-
-/// Build a compact strip/picker label from row fields.
+/// Build strip/picker label from row fields (full first line; no eager truncate).
 pub fn bookmark_label(tag: &str, msg: &str) -> String {
-    let raw = if tag.is_empty() {
+    let msg = msg.lines().next().unwrap_or("").trim_end();
+    if tag.is_empty() {
         msg.to_string()
+    } else if msg.is_empty() {
+        tag.to_string()
     } else {
         format!("{tag} {msg}")
-    };
-    let mut out = String::new();
-    for (i, ch) in raw.chars().enumerate() {
-        if i >= 56 {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
     }
+}
+
+/// Fit `label` into `max_cols` display cells, appending `…` when truncated.
+pub fn fit_label(label: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    let count = label.chars().count();
+    if count <= max_cols {
+        return label.to_string();
+    }
+    if max_cols == 1 {
+        return "…".to_string();
+    }
+    let mut out: String = label.chars().take(max_cols - 1).collect();
+    out.push('…');
     out
 }
 
@@ -197,32 +170,29 @@ mod tests {
             })
             .unwrap();
         }
-        let d: Vec<_> = list
-            .display_recent()
-            .iter()
-            .map(|b| b.row_id)
-            .collect();
+        let d: Vec<_> = list.display_recent().iter().map(|b| b.row_id).collect();
         assert_eq!(d, vec![5, 4, 3]);
     }
 
     #[test]
-    fn picker_filter_ignore_case() {
-        let mut list = BookmarkList::default();
-        list.try_add(Bookmark {
-            row_id: 1,
-            label: "Hello World".into(),
-        })
-        .unwrap();
-        list.try_add(Bookmark {
-            row_id: 2,
-            label: "other".into(),
-        })
-        .unwrap();
-        let mut p = BookmarkPicker::open();
-        for c in "hello".chars() {
-            p.push_char(c);
-        }
-        let idxs = p.filtered_indices(&list);
-        assert_eq!(idxs, vec![0]);
+    fn bookmark_label_keeps_long_text() {
+        let msg = "x".repeat(80);
+        let label = bookmark_label("Tag", &msg);
+        assert!(label.len() > 56, "must not eagerly truncate at 56");
+        assert!(label.starts_with("Tag "));
+        assert_eq!(label.chars().count(), 4 + 80); // "Tag " + 80
+    }
+
+    #[test]
+    fn bookmark_label_first_line_only() {
+        let label = bookmark_label("T", "line1\nline2");
+        assert_eq!(label, "T line1");
+    }
+
+    #[test]
+    fn fit_label_truncates_with_ellipsis() {
+        assert_eq!(fit_label("abcdef", 4), "abc…");
+        assert_eq!(fit_label("ab", 4), "ab");
+        assert_eq!(fit_label("ab", 0), "");
     }
 }

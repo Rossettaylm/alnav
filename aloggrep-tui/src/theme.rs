@@ -95,7 +95,9 @@ pub fn muted() -> Style {
 /// CLI's `formatter::level_badge`.
 pub fn level_badge_style(level: Level) -> Style {
     match logcolor::level_badge(level) {
-        Badge::Gray => Style::default().fg(Color::White).bg(rgb(logcolor::VERBOSE_BG)),
+        Badge::Gray => Style::default()
+            .fg(Color::White)
+            .bg(rgb(logcolor::VERBOSE_BG)),
         Badge::Blue => Style::default().fg(Color::Black).bg(Color::Blue),
         Badge::Green => Style::default().fg(Color::Black).bg(Color::Green),
         Badge::Yellow => Style::default().fg(Color::Black).bg(Color::Yellow),
@@ -309,7 +311,7 @@ pub fn log_visual_style() -> Style {
     Style::default().bg(t().log_visual_bg)
 }
 
-/// Reverse badge used for transient status hints (FOLLOWING / YANKED / VISUAL).
+/// Reverse badge used for status hints (FOLLOWING / LOCK / VISUAL / flash toasts).
 pub fn status_badge(label: &str, bg: Color) -> Span<'static> {
     Span::styled(
         format!(" {label} "),
@@ -556,7 +558,10 @@ mod tests {
     fn parse_named_and_hex_colors() {
         assert_eq!(parse_color("cyan").unwrap(), Color::Cyan);
         assert_eq!(parse_color("#0ff").unwrap(), Color::Rgb(0, 255, 255));
-        assert_eq!(parse_color("#112233").unwrap(), Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(
+            parse_color("#112233").unwrap(),
+            Color::Rgb(0x11, 0x22, 0x33)
+        );
         assert!(parse_color("nope").is_err());
     }
 

@@ -223,7 +223,15 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
 /// Search draft preview: matching rows with faint highlight ranges.
 /// Empty draft → empty vec (caller shows placeholder / folds).
 pub fn preview_search_lines(app: &App) -> Result<Vec<PreviewLine>, ()> {
-    let draft = app.search_box.draft.trim();
+    preview_search_pattern_lines(app, &app.search_box.draft)
+}
+
+/// Search preview for a caller-owned draft (for example the unified picker).
+pub fn preview_search_pattern_lines(
+    app: &App,
+    pattern: &str,
+) -> Result<Vec<PreviewLine>, ()> {
+    let draft = pattern.trim();
     if draft.is_empty() {
         return Ok(Vec::new());
     }

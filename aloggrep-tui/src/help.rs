@@ -1,35 +1,76 @@
 //! Focus-aware keybinding hints for the status bar (H6).
 //!
-//! All user-facing short help copy lives here so later keybinding work
-//! (H2/H7/…) only updates one table.
+//! Two levels: L1 shows single keys / multi-key prefixes; L2 shows the
+//! follow-up keys while an operator is pending. All copy uses `键:短名`.
 
 use crate::app::{App, Focus};
 
 /// Minimum remaining character budget before we bother showing help.
 pub const MIN_HELP_WIDTH: usize = 8;
 
-/// Short keybinding hint for the current focus / modal state.
+const L1_LOGLIST: &str = "j/k:移 Esc:随 Space:面板 n/N:跳 e/E:错 m:书签 f:锁 c:滤 C:排 y:拷 p/P:详";
+const L1_CHIP_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
+const L1_EXCLUDE_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
+const L1_SEARCH_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
+const L1_INPUT: &str = "Space:草稿 Enter:收/交 !:排除 Esc:取消";
+const L1_SEARCH_MODAL: &str = "Space:草稿 Enter/Tab:确认 Esc:取消";
+const L1_PICKER: &str =
+    "输入:过滤 ↑/↓:选择 Enter:确认 :/Ctrl-A:新 Ctrl-E:改 Ctrl-D:删 Ctrl-U:清 Esc:关闭";
+const L1_CONFIRM: &str = "y/Enter:确认 n/Esc:取消";
+const L1_DETAIL: &str = "p:关 P:切 c/C:滤 j/k:行 Esc:关";
+
+const L2_LEADER: &str = "/:列表 f:滤 s:搜 m:签 x:排除";
+const L2_BOOKMARK: &str = "a:新增 d:删除 Esc:取消";
+const L2_LOCK: &str = "p:pid t:tid u:清 Esc:取消";
+const L2_CHIP_FIELD: &str = "t:tag m:msg g:pkg p:pid T:tid l:级 Esc:取消";
+const L2_YANK: &str = "c:CLI t:tag m:msg g:pkg p:pid T:tid l:级 r:原 y:行 s:时 Esc:取消";
+const L2_STRIP_D: &str = "d:删 i:禁用 Esc:取消";
+
+/// Short keybinding hint for the current focus / modal / pending state.
 pub fn context_help(app: &App) -> &'static str {
+    if app
+        .picker
+        .as_ref()
+        .is_some_and(|session| session.confirm.is_some())
+    {
+        return L1_CONFIRM;
+    }
+    if app.picker.is_some() {
+        return L1_PICKER;
+    }
     if app.search_box.editing {
-        return "Space 入草稿  Enter/Tab 确认  Esc 取消";
-    }
-    if app.msg_chip_picker.is_some() {
-        return "输入过滤  Enter/Tab 确认  Esc 取消";
-    }
-    if app.bookmark_picker.is_some() {
-        return "输入过滤  Enter 跳转  Esc 取消";
+        return L1_SEARCH_MODAL;
     }
     if app.detail_open() {
-        return "p 关  P 字段/Pretty  c/C+字段  j/k 换行  Esc 关浮层";
+        return L1_DETAIL;
     }
+
+    // Operator-pending (L2) takes priority over Focus L1.
+    if app.pending_leader {
+        return L2_LEADER;
+    }
+    if app.pending_m {
+        return L2_BOOKMARK;
+    }
+    if app.pending_lock {
+        return L2_LOCK;
+    }
+    if app.pending_chip || app.pending_exclude {
+        return L2_CHIP_FIELD;
+    }
+    if app.pending_yank {
+        return L2_YANK;
+    }
+    if app.pending_d {
+        return L2_STRIP_D;
+    }
+
     match app.focus {
-        Focus::Input => "Space 入草稿  Enter 收pill/提交  ! 排除模式(空时)  Esc 取消",
-        Focus::ChipStrip => "h/l 组  dd 删  di 禁用",
-        Focus::ExcludeStrip => "h/l 排除  dd 删  di 禁用  (全局 AND NOT)",
-        Focus::SearchStrip => "h/l 组  dd 删  di 禁用",
-        Focus::LogList => {
-            "j/k  e/E  p/P  ma/mm/md  yc  c/C+字段  fp/ft/fu  / 搜索  Esc 跟随"
-        }
+        Focus::Input => L1_INPUT,
+        Focus::ChipStrip => L1_CHIP_STRIP,
+        Focus::ExcludeStrip => L1_EXCLUDE_STRIP,
+        Focus::SearchStrip => L1_SEARCH_STRIP,
+        Focus::LogList => L1_LOGLIST,
     }
 }
 
@@ -66,56 +107,105 @@ mod tests {
 
     #[test]
     fn context_help_by_focus() {
-        assert_eq!(
-            context_help(&app_with_focus(Focus::LogList)),
-            "j/k  e/E  p/P  ma/mm/md  yc  c/C+字段  fp/ft/fu  / 搜索  Esc 跟随"
-        );
+        assert_eq!(context_help(&app_with_focus(Focus::LogList)), L1_LOGLIST);
         assert_eq!(
             context_help(&app_with_focus(Focus::ChipStrip)),
-            "h/l 组  dd 删  di 禁用"
+            L1_CHIP_STRIP
         );
         assert_eq!(
             context_help(&app_with_focus(Focus::ExcludeStrip)),
-            "h/l 排除  dd 删  di 禁用  (全局 AND NOT)"
+            L1_EXCLUDE_STRIP
         );
         assert_eq!(
             context_help(&app_with_focus(Focus::SearchStrip)),
-            "h/l 组  dd 删  di 禁用"
+            L1_SEARCH_STRIP
         );
-        assert_eq!(
-            context_help(&app_with_focus(Focus::Input)),
-            "Space 入草稿  Enter 收pill/提交  ! 排除模式(空时)  Esc 取消"
-        );
+        assert_eq!(context_help(&app_with_focus(Focus::Input)), L1_INPUT);
     }
 
     #[test]
     fn context_help_search_modal_overrides_focus() {
         let mut app = app_with_focus(Focus::LogList);
         app.search_box.editing = true;
-        assert_eq!(
-            context_help(&app),
-            "Space 入草稿  Enter/Tab 确认  Esc 取消"
-        );
+        assert_eq!(context_help(&app), L1_SEARCH_MODAL);
     }
 
     #[test]
     fn context_help_msg_chip_picker_overrides_focus() {
         let mut app = app_with_focus(Focus::LogList);
-        app.msg_chip_picker = crate::input::MsgChipPicker::open("hello world", false);
-        assert_eq!(
-            context_help(&app),
-            "输入过滤  Enter/Tab 确认  Esc 取消"
-        );
+        app.open_picker(crate::picker::PickerKind::MsgChip { exclude: false });
+        assert_eq!(context_help(&app), L1_PICKER);
+    }
+
+    #[test]
+    fn context_help_confirm_overrides_picker() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.open_picker(crate::picker::PickerKind::Search);
+        app.picker
+            .as_mut()
+            .unwrap()
+            .request_delete_all(3);
+        assert_eq!(context_help(&app), L1_CONFIRM);
+    }
+
+    #[test]
+    fn context_help_pending_leader_lists_picker_shortcuts() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_leader = true;
+        assert_eq!(context_help(&app), L2_LEADER);
     }
 
     #[test]
     fn context_help_detail_overrides_focus() {
         let mut app = app_with_focus(Focus::LogList);
         app.detail = crate::app::DetailView::Fields;
-        assert_eq!(
-            context_help(&app),
-            "p 关  P 字段/Pretty  c/C+字段  j/k 换行  Esc 关浮层"
-        );
+        assert_eq!(context_help(&app), L1_DETAIL);
+    }
+
+    #[test]
+    fn context_help_pending_m_is_l2() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_m = true;
+        assert_eq!(context_help(&app), L2_BOOKMARK);
+    }
+
+    #[test]
+    fn context_help_pending_lock_is_l2() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_lock = true;
+        assert_eq!(context_help(&app), L2_LOCK);
+    }
+
+    #[test]
+    fn context_help_pending_chip_and_exclude_share_field_l2() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_chip = true;
+        assert_eq!(context_help(&app), L2_CHIP_FIELD);
+        app.pending_chip = false;
+        app.pending_exclude = true;
+        assert_eq!(context_help(&app), L2_CHIP_FIELD);
+    }
+
+    #[test]
+    fn context_help_pending_yank_is_l2() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_yank = true;
+        assert_eq!(context_help(&app), L2_YANK);
+    }
+
+    #[test]
+    fn context_help_pending_d_is_l2() {
+        let mut app = app_with_focus(Focus::ChipStrip);
+        app.pending_d = true;
+        assert_eq!(context_help(&app), L2_STRIP_D);
+    }
+
+    #[test]
+    fn context_help_modal_beats_pending() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_m = true;
+        app.search_box.editing = true;
+        assert_eq!(context_help(&app), L1_SEARCH_MODAL);
     }
 
     #[test]

@@ -1,8 +1,10 @@
-//! Config directory resolution and theme.toml loading (M4).
+//! Config directory resolution and theme.toml / config.toml loading (M4).
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
 
 use crate::theme::{self, UiTokens};
 
@@ -38,11 +40,86 @@ impl ThemeLoadStatus {
     /// Status-bar hint when the user should notice a fallback.
     pub fn status_hint(&self) -> Option<String> {
         match self {
-            ThemeLoadStatus::Fallback { error, .. } => {
-                Some(format!("THEME 回退: {error}"))
-            }
+            ThemeLoadStatus::Fallback { error, .. } => Some(format!("THEME 回退: {error}")),
             _ => None,
         }
+    }
+}
+
+/// Application settings from `config.toml` (with builtin defaults).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppConfig {
+    pub picker_left_ratio: f32,
+}
+
+impl AppConfig {
+    pub fn default_config() -> Self {
+        Self {
+            picker_left_ratio: 0.4,
+        }
+    }
+
+    pub fn clamp_ratio(r: f32) -> f32 {
+        r.clamp(0.2, 0.8)
+    }
+}
+
+/// Outcome of loading `config.toml` at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigLoadStatus {
+    /// No config.toml — builtin defaults.
+    Builtin,
+    /// Successfully loaded from path.
+    Loaded(PathBuf),
+    /// File present but invalid — builtin + user-visible reason.
+    Fallback { path: PathBuf, error: String },
+}
+
+impl ConfigLoadStatus {
+    /// Status-bar hint when the user should notice a fallback.
+    pub fn status_hint(&self) -> Option<String> {
+        match self {
+            ConfigLoadStatus::Fallback { error, .. } => Some(format!("CONFIG 回退: {error}")),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigToml {
+    picker_left_ratio: Option<f32>,
+}
+
+/// Load `$config_dir/config.toml` and return config + load status.
+pub fn load_config(config_dir: &Path) -> (AppConfig, ConfigLoadStatus) {
+    let path = config_dir.join("config.toml");
+    if !path.is_file() {
+        return (AppConfig::default_config(), ConfigLoadStatus::Builtin);
+    }
+    match fs::read_to_string(&path) {
+        Ok(text) => match toml::from_str::<ConfigToml>(&text) {
+            Ok(t) => {
+                let mut cfg = AppConfig::default_config();
+                if let Some(r) = t.picker_left_ratio {
+                    cfg.picker_left_ratio = AppConfig::clamp_ratio(r);
+                }
+                (cfg, ConfigLoadStatus::Loaded(path))
+            }
+            Err(e) => (
+                AppConfig::default_config(),
+                ConfigLoadStatus::Fallback {
+                    path,
+                    error: e.to_string(),
+                },
+            ),
+        },
+        Err(e) => (
+            AppConfig::default_config(),
+            ConfigLoadStatus::Fallback {
+                path,
+                error: e.to_string(),
+            },
+        ),
     }
 }
 
@@ -61,10 +138,7 @@ pub fn load_theme(config_dir: &Path) -> ThemeLoadStatus {
             }
             Err(e) => {
                 theme::install(UiTokens::builtin());
-                ThemeLoadStatus::Fallback {
-                    path,
-                    error: e,
-                }
+                ThemeLoadStatus::Fallback { path, error: e }
             }
         },
         Err(e) => {
@@ -144,5 +218,31 @@ mod tests {
         assert_eq!(theme::success(), Color::Blue);
         // reset builtin for other tests
         theme::install(UiTokens::builtin());
+    }
+
+    #[test]
+    fn load_config_missing_uses_default_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, st) = load_config(dir.path());
+        assert!((cfg.picker_left_ratio - 0.4).abs() < f32::EPSILON);
+        assert!(matches!(st, ConfigLoadStatus::Builtin));
+    }
+
+    #[test]
+    fn load_config_clamps_out_of_range() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "picker_left_ratio = 0.05\n").unwrap();
+        let (cfg, _) = load_config(dir.path());
+        assert!((cfg.picker_left_ratio - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn load_config_bad_toml_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "picker_left_ratio = {{{").unwrap();
+        let (cfg, st) = load_config(dir.path());
+        assert!((cfg.picker_left_ratio - 0.4).abs() < f32::EPSILON);
+        assert!(matches!(st, ConfigLoadStatus::Fallback { .. }));
+        assert!(st.status_hint().unwrap().contains("CONFIG 回退"));
     }
 }

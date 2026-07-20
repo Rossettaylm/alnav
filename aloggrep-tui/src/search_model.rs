@@ -110,7 +110,7 @@ impl SearchBox {
         self.selected = 0;
     }
 
-    /// Open the search modal (Normal `/`).
+    /// Start editing in the retained SearchBox model.
     pub fn begin_editing(&mut self) {
         self.editing = true;
         self.selected = 0;

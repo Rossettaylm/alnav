@@ -1,19 +1,31 @@
 use std::collections::VecDeque;
 use std::sync::{mpsc::Receiver, OnceLock};
+use std::time::{Duration, Instant};
 
 use aloggrep::crash::CrashDetector;
 use aloggrep::parser::Level;
 
-use crate::bookmark::{
-    bookmark_label, AddError, Bookmark, BookmarkList, BookmarkPicker, JumpResult,
-};
-use crate::filter_model::GroupList;
+use crate::bookmark::{bookmark_label, AddError, Bookmark, BookmarkList, JumpResult};
+use crate::filter_model::{ExcludeEntry, Group, GroupList};
 use crate::model::EntryRow;
 use crate::search_model::{SearchBox, SearchGroup, SearchGroupList};
 
 fn crash_detector() -> &'static CrashDetector {
     static DETECTOR: OnceLock<CrashDetector> = OnceLock::new();
     DETECTOR.get_or_init(CrashDetector::new)
+}
+
+fn group_to_exclude_entry(group: Group) -> Option<ExcludeEntry> {
+    if group.chips.len() != 1 {
+        return None;
+    }
+    let chip = group.chips.first()?.clone();
+    let expr = group.expr?;
+    Some(ExcludeEntry {
+        chip,
+        expr,
+        enabled: group.enabled,
+    })
 }
 
 /// Severe = level E/F, or a crash signature in the message (H2 jump target).
@@ -142,12 +154,12 @@ pub struct App {
     pub pending_exclude: bool,
     /// Armed by `f` on LogList; second key locks pid/tid or clears (H8).
     pub pending_lock: bool,
-    /// Armed by `m` on LogList; second key is `a`/`m`/`d` (M2).
+    /// Armed by `m` on LogList; second key is `a`/`d` (M2).
     pub pending_m: bool,
-    /// Open `c`+`m` token picker (H7); takes key priority like SearchBox.
-    pub msg_chip_picker: Option<crate::input::MsgChipPicker>,
-    /// Open `mm` bookmark picker (M2).
-    pub bookmark_picker: Option<BookmarkPicker>,
+    /// Armed by leader key (`Space`); second key opens fzf-style picker (Task 5).
+    pub pending_leader: bool,
+    /// Open fzf-style picker session (Filter/Search/Bookmark/Exclude/ActionList).
+    pub picker: Option<crate::picker::PickerSession>,
     /// Session bookmarks (M2).
     pub bookmarks: BookmarkList,
     /// Next ingest `row_id` (M2).
@@ -160,14 +172,18 @@ pub struct App {
     pub visual_anchor: Option<usize>,
     pub following: bool,
     pub list_offset: usize,
-    /// Transient status-bar hint (`YANKED`, `VISUAL`, `y…`, errors).
+    /// Transient flash toast (`YANKED`, `NO ERROR`, errors); auto-clears after 3s.
     pub status_msg: Option<String>,
+    /// When `status_msg` flash should disappear (`None` = not a timed flash).
+    pub status_flash_until: Option<Instant>,
     /// Last text prepared for the clipboard (set even if clipboard I/O fails).
     pub last_yanked: Option<String>,
     /// H4 field detail overlay (same shell reserved for H5 Pretty).
     pub detail: DetailView,
     /// Session source for H10 `yc` CLI export (`-f` / `--hdc`).
     pub export_source: crate::export::ExportSource,
+    /// App settings loaded from config.toml (picker layout, etc.).
+    pub config: crate::config::AppConfig,
 }
 
 impl App {
@@ -193,8 +209,8 @@ impl App {
             pending_exclude: false,
             pending_lock: false,
             pending_m: false,
-            msg_chip_picker: None,
-            bookmark_picker: None,
+            pending_leader: false,
+            picker: None,
             bookmarks: BookmarkList::default(),
             next_row_id: 1,
             lock_pid: None,
@@ -203,10 +219,30 @@ impl App {
             following: true,
             list_offset: 0,
             status_msg: None,
+            status_flash_until: None,
             last_yanked: None,
             detail: DetailView::Closed,
             export_source: crate::export::ExportSource::default(),
+            config: crate::config::AppConfig::default_config(),
         }
+    }
+
+    /// Open the requested fzf-style picker and clear all operator-pending state.
+    pub fn open_picker(&mut self, kind: crate::picker::PickerKind) {
+        self.pending_d = false;
+        self.pending_yank = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.pending_m = false;
+        self.pending_leader = false;
+        self.picker = Some(crate::picker::PickerSession::open(kind));
+    }
+
+    /// Close the fzf-style picker without changing live-follow state.
+    pub fn close_picker(&mut self) {
+        self.picker = None;
+        self.pending_leader = false;
     }
 
     /// H10: one-line `aloggrep` command for the current filter state.
@@ -420,42 +456,23 @@ impl App {
     /// Delete the focused group on `kind`. Empty filter strip returns focus
     /// to LogList and rebuilds visible; empty search strip only clamps cursor.
     pub fn delete_focused_strip_group(&mut self, kind: StripKind) {
-        let len = self.strip_len(kind);
-        if len == 0 {
+        if self.strip_len(kind) == 0 {
             return;
         }
         let cursor = *self.strip_cursor_mut(kind);
-        match kind {
-            StripKind::Filter => {
-                self.groups.groups.remove(cursor);
-                if self.group_cursor >= self.groups.groups.len() {
-                    self.group_cursor = self.groups.groups.len().saturating_sub(1);
-                }
-                if self.groups.groups.is_empty() {
-                    self.focus = Focus::LogList;
-                }
-                self.rebuild_visible();
-            }
-            StripKind::Exclude => {
-                self.groups.excludes.remove(cursor);
-                if self.exclude_cursor >= self.groups.excludes.len() {
-                    self.exclude_cursor = self.groups.excludes.len().saturating_sub(1);
-                }
-                if self.groups.excludes.is_empty() {
-                    self.focus = Focus::LogList;
-                }
-                self.rebuild_visible();
-            }
-            StripKind::Search => {
-                self.search_groups.groups.remove(cursor);
-                if self.search_cursor >= self.search_groups.groups.len() {
-                    self.search_cursor = self.search_groups.groups.len().saturating_sub(1);
-                }
-                self.fix_active_search_after_delete(cursor);
-                if self.search_groups.groups.is_empty() {
-                    self.focus = Focus::LogList;
-                }
-            }
+        let deleted = match kind {
+            StripKind::Filter => self.delete_filter_group_at(cursor),
+            StripKind::Exclude => self.delete_exclude_group_at(cursor),
+            StripKind::Search => self.delete_search_group_at(cursor),
+        };
+        debug_assert!(deleted);
+        let empty = match kind {
+            StripKind::Filter => self.groups.groups.is_empty(),
+            StripKind::Exclude => self.groups.excludes.is_empty(),
+            StripKind::Search => self.search_groups.groups.is_empty(),
+        };
+        if empty {
+            self.focus = Focus::LogList;
         }
     }
 
@@ -524,6 +541,27 @@ impl App {
         self.visible.get(self.cursor).map(|&i| &self.rows[i])
     }
 
+    /// Flash a short status-bar toast that auto-hides after 3 seconds.
+    pub fn set_flash(&mut self, msg: impl Into<String>) {
+        self.status_msg = Some(msg.into());
+        self.status_flash_until = Some(Instant::now() + Duration::from_secs(3));
+    }
+
+    /// Clear any timed flash toast immediately.
+    pub fn clear_flash(&mut self) {
+        self.status_msg = None;
+        self.status_flash_until = None;
+    }
+
+    /// Drop flash toast when its deadline has passed (call each frame).
+    pub fn tick_flash(&mut self) {
+        if let Some(until) = self.status_flash_until {
+            if Instant::now() >= until {
+                self.clear_flash();
+            }
+        }
+    }
+
     /// Arm `m` operator-pending (M2 bookmarks).
     pub fn begin_bookmark_op(&mut self) {
         self.clear_visual();
@@ -532,21 +570,22 @@ impl App {
         self.pending_chip = false;
         self.pending_exclude = false;
         self.pending_lock = false;
-        self.msg_chip_picker = None;
+        self.pending_m = false;
+        self.pending_leader = false;
         self.pending_m = true;
-        self.status_msg = Some("m…".into());
     }
 
     pub fn cancel_bookmark_op(&mut self) {
         self.pending_m = false;
-        self.status_msg = None;
+        self.pending_leader = false;
     }
 
     /// `ma`: bookmark current LogList row.
     pub fn bookmark_add_current(&mut self) {
         self.pending_m = false;
+        self.pending_leader = false;
         let Some(row) = self.current_row() else {
-            self.status_msg = Some("无选中行".into());
+            self.set_flash("无选中行");
             return;
         };
         let bm = Bookmark {
@@ -554,35 +593,25 @@ impl App {
             label: bookmark_label(&row.tag, &row.msg),
         };
         match self.bookmarks.try_add(bm) {
-            Ok(()) => self.status_msg = Some("已收藏".into()),
-            Err(AddError::Duplicate) => self.status_msg = Some("已存在".into()),
-            Err(AddError::Full) => self.status_msg = Some("书签已满".into()),
+            Ok(()) => self.set_flash("已收藏"),
+            Err(AddError::Duplicate) => self.set_flash("已存在"),
+            Err(AddError::Full) => self.set_flash("书签已满"),
         }
     }
 
     /// `md`: remove bookmark for current row.
     pub fn bookmark_remove_current(&mut self) {
         self.pending_m = false;
+        self.pending_leader = false;
         let Some(row) = self.current_row() else {
-            self.status_msg = Some("无选中行".into());
+            self.set_flash("无选中行");
             return;
         };
         if self.bookmarks.remove_id(row.row_id) {
-            self.status_msg = Some("已删除".into());
+            self.set_flash("已删除");
         } else {
-            self.status_msg = Some("未收藏".into());
+            self.set_flash("未收藏");
         }
-    }
-
-    /// `mm`: open bookmark picker.
-    pub fn begin_bookmark_picker(&mut self) {
-        self.pending_m = false;
-        self.bookmark_picker = Some(BookmarkPicker::open());
-        self.status_msg = None;
-    }
-
-    pub fn close_bookmark_picker(&mut self) {
-        self.bookmark_picker = None;
     }
 
     /// Jump to a bookmarked row_id; sets `following=false` on success.
@@ -624,11 +653,9 @@ impl App {
         self.pending_exclude = false;
         self.pending_lock = false;
         self.pending_m = false;
-        self.msg_chip_picker = None;
-        self.bookmark_picker = None;
+        self.pending_leader = false;
         self.following = false;
         self.visual_anchor = Some(self.cursor);
-        self.status_msg = Some("VISUAL".into());
     }
 
     /// Arm `c` operator-pending (clear other pendings; stay on LogList).
@@ -638,9 +665,8 @@ impl App {
         self.pending_d = false;
         self.pending_lock = false;
         self.pending_exclude = false;
-        self.msg_chip_picker = None;
+        self.pending_leader = false;
         self.pending_chip = true;
-        self.status_msg = Some("c…".into());
     }
 
     /// Arm `C` operator-pending for exclude-from-cursor (H9).
@@ -650,21 +676,21 @@ impl App {
         self.pending_d = false;
         self.pending_lock = false;
         self.pending_chip = false;
-        self.msg_chip_picker = None;
+        self.pending_leader = false;
         self.pending_exclude = true;
-        self.status_msg = Some("C…".into());
     }
 
     /// Cancel `c`/`C` pending / msg picker without touching `following`.
     pub fn cancel_chip_from_cursor(&mut self) {
         self.pending_chip = false;
         self.pending_exclude = false;
-        self.msg_chip_picker = None;
-        if matches!(
-            self.status_msg.as_deref(),
-            Some("c…") | Some("c m…") | Some("C…") | Some("C m…")
-        ) {
-            self.status_msg = None;
+        self.pending_leader = false;
+        if self
+            .picker
+            .as_ref()
+            .is_some_and(|p| matches!(p.kind, crate::picker::PickerKind::MsgChip { .. }))
+        {
+            self.close_picker();
         }
     }
 
@@ -675,37 +701,35 @@ impl App {
         self.pending_d = false;
         self.pending_chip = false;
         self.pending_exclude = false;
-        self.msg_chip_picker = None;
+        self.pending_leader = false;
         self.pending_lock = true;
-        self.status_msg = Some("f…".into());
     }
 
     /// Cancel `f` pending without clearing lock or touching `following`.
     pub fn cancel_lock_pending(&mut self) {
         self.pending_lock = false;
-        if self.status_msg.as_deref() == Some("f…") {
-            self.status_msg = None;
-        }
+        self.pending_leader = false;
     }
 
     /// `f` `u`: clear session lock and rebuild.
     pub fn clear_session_lock(&mut self) {
         self.pending_lock = false;
+        self.pending_leader = false;
         let had = self.lock_pid.is_some() || self.lock_tid.is_some();
         self.lock_pid = None;
         self.lock_tid = None;
         if had {
             self.rebuild_visible();
-            self.status_msg = Some("UNLOCK".into());
+            self.set_flash("UNLOCK");
         } else {
-            self.status_msg = Some("无锁定".into());
+            self.set_flash("无锁定");
         }
     }
 
     /// `f` `p` / `f` `t`: set, toggle-clear, or switch lock target.
     pub fn apply_session_lock(&mut self, kind: LockKind) {
         let Some(row) = self.current_row() else {
-            self.status_msg = Some("无选中行".into());
+            self.set_flash("无选中行");
             return;
         };
         let value = match kind {
@@ -713,9 +737,9 @@ impl App {
             LockKind::Tid => row.tid.clone(),
         };
         if value.is_empty() {
-            self.status_msg = Some(match kind {
-                LockKind::Pid => "空 pid".into(),
-                LockKind::Tid => "空 tid".into(),
+            self.set_flash(match kind {
+                LockKind::Pid => "空 pid",
+                LockKind::Tid => "空 tid",
             });
             return;
         }
@@ -727,7 +751,7 @@ impl App {
             self.lock_pid = None;
             self.lock_tid = None;
             self.rebuild_visible();
-            self.status_msg = Some("UNLOCK".into());
+            self.set_flash("UNLOCK");
             return;
         }
         match kind {
@@ -741,7 +765,8 @@ impl App {
             }
         }
         self.rebuild_visible();
-        self.status_msg = None; // badge on status_bar shows LOCK …
+        // Persistent LOCK badge is drawn from lock_pid/tid; clear any stale toast.
+        self.clear_flash();
     }
 
     /// Status-bar label when a session lock is active.
@@ -760,7 +785,7 @@ impl App {
     pub fn push_chip_from_field(&mut self, field: crate::input::ChipField) -> bool {
         use crate::input::{Chip, ChipField};
         let Some(row) = self.current_row() else {
-            self.status_msg = Some("无选中行".into());
+            self.set_flash("无选中行");
             return false;
         };
         let yank = match field {
@@ -773,7 +798,7 @@ impl App {
         };
         let value = Self::field_text(row, yank);
         if value.is_empty() {
-            self.status_msg = Some(format!("空 {}", field.keyword()));
+            self.set_flash(format!("空 {}", field.keyword()));
             return false;
         }
         self.push_single_chip_filter(Chip { field, value })
@@ -782,35 +807,50 @@ impl App {
     /// Open msg token picker for the current row (`c`/`C`+`m`).
     pub fn begin_msg_chip_picker(&mut self, as_exclude: bool) {
         let Some(row) = self.current_row() else {
-            self.status_msg = Some("无选中行".into());
+            self.set_flash("无选中行");
             return;
         };
-        match crate::input::MsgChipPicker::open(&row.msg, as_exclude) {
-            Some(picker) => {
-                self.pending_chip = false;
-                self.pending_exclude = false;
-                self.msg_chip_picker = Some(picker);
-                self.status_msg = Some(if as_exclude { "C m…" } else { "c m…" }.into());
-            }
-            None => {
-                self.pending_chip = false;
-                self.pending_exclude = false;
-                self.status_msg = Some("无可选片段".into());
-            }
+        let tokens = crate::input::msg_token_candidates(&row.msg);
+        if tokens.is_empty() {
+            self.pending_chip = false;
+            self.pending_exclude = false;
+            self.pending_leader = false;
+            self.set_flash("无可选片段");
+        } else {
+            self.pending_chip = false;
+            self.pending_exclude = false;
+            self.pending_leader = false;
+            self.open_picker(crate::picker::PickerKind::MsgChip {
+                exclude: as_exclude,
+            });
+            let picker = self.picker.as_mut().expect("picker just opened");
+            picker.enter_new();
+            picker.choices = tokens;
         }
     }
 
     /// Confirm msg picker selection / draft fallback → push msg include or exclude.
     pub fn confirm_msg_chip_picker(&mut self) -> bool {
         use crate::input::{Chip, ChipField};
-        let Some(picker) = self.msg_chip_picker.take() else {
+        let Some((as_exclude, value)) = self.picker.as_ref().and_then(|picker| {
+            let crate::picker::PickerKind::MsgChip { exclude } = picker.kind else {
+                return None;
+            };
+            let visible = crate::picker::PickerSession::filtered_indices(
+                &picker.choices,
+                &picker.draft,
+            );
+            let value = visible
+                .get(picker.selected)
+                .and_then(|&index| picker.choices.get(index))
+                .cloned()
+                .or_else(|| (!picker.draft.is_empty()).then(|| picker.draft.clone()))?;
+            Some((exclude, value))
+        }) else {
+            self.set_flash("无可选片段");
             return false;
         };
-        let as_exclude = picker.as_exclude;
-        let Some(value) = picker.confirm_value() else {
-            self.status_msg = Some("无可选片段".into());
-            return false;
-        };
+        self.close_picker();
         let chip = Chip {
             field: ChipField::Msg,
             value,
@@ -826,7 +866,7 @@ impl App {
     pub fn push_exclude_from_field(&mut self, field: crate::input::ChipField) -> bool {
         use crate::input::{Chip, ChipField};
         let Some(row) = self.current_row() else {
-            self.status_msg = Some("无选中行".into());
+            self.set_flash("无选中行");
             return false;
         };
         let yank = match field {
@@ -839,7 +879,7 @@ impl App {
         };
         let value = Self::field_text(row, yank);
         if value.is_empty() {
-            self.status_msg = Some(format!("空 {}", field.keyword()));
+            self.set_flash(format!("空 {}", field.keyword()));
             return false;
         }
         self.push_exclude_chip(Chip { field, value })
@@ -850,15 +890,15 @@ impl App {
             Ok(true) => {
                 self.following = false;
                 self.rebuild_visible();
-                self.status_msg = Some("EXCLUDE".into());
+                self.set_flash("EXCLUDE");
                 true
             }
             Ok(false) => {
-                self.status_msg = Some("已存在".into());
+                self.set_flash("已存在");
                 false
             }
             Err(e) => {
-                self.status_msg = Some(e);
+                self.set_flash(e);
                 false
             }
         }
@@ -870,25 +910,22 @@ impl App {
             Ok(Some(g)) => g,
             Ok(None) => return false,
             Err(e) => {
-                self.status_msg = Some(e);
+                self.set_flash(e);
                 return false;
             }
         };
         if !self.push_filter_group(group) {
-            self.status_msg = Some("已存在".into());
+            self.set_flash("已存在");
             return false;
         }
         self.following = false;
         self.rebuild_visible();
-        self.status_msg = Some("FILTER".into());
+        self.set_flash("FILTER");
         true
     }
 
     pub fn clear_visual(&mut self) {
         self.visual_anchor = None;
-        if self.status_msg.as_deref() == Some("VISUAL") {
-            self.status_msg = None;
-        }
     }
 
     pub fn field_text(row: &EntryRow, field: YankField) -> String {
@@ -1018,6 +1055,135 @@ impl App {
         true
     }
 
+    pub fn update_filter_group(&mut self, index: usize, mut group: Group) -> bool {
+        if index >= self.groups.groups.len() {
+            return false;
+        }
+        if self
+            .groups
+            .groups
+            .iter()
+            .enumerate()
+            .any(|(i, g)| i != index && g.same_as(&group))
+        {
+            return false;
+        }
+        group.enabled = self.groups.groups[index].enabled;
+        self.groups.groups[index] = group;
+        self.rebuild_visible();
+        true
+    }
+
+    pub fn clear_filter_groups(&mut self) {
+        self.groups.groups.clear();
+        self.group_cursor = 0;
+        self.rebuild_visible();
+    }
+
+    pub fn delete_filter_group_at(&mut self, index: usize) -> bool {
+        if index >= self.groups.groups.len() {
+            return false;
+        }
+        self.groups.groups.remove(index);
+        if self.group_cursor >= self.groups.groups.len() {
+            self.group_cursor = self.groups.groups.len().saturating_sub(1);
+        }
+        self.rebuild_visible();
+        true
+    }
+
+    pub fn update_exclude_group(&mut self, index: usize, group: Group) -> bool {
+        let Some(entry) = group_to_exclude_entry(group) else {
+            return false;
+        };
+        if index >= self.groups.excludes.len() {
+            return false;
+        }
+        if self
+            .groups
+            .excludes
+            .iter()
+            .enumerate()
+            .any(|(i, e)| i != index && e.same_chip_as(&entry.chip))
+        {
+            return false;
+        }
+        let mut entry = entry;
+        entry.enabled = self.groups.excludes[index].enabled;
+        self.groups.excludes[index] = entry;
+        self.rebuild_visible();
+        true
+    }
+
+    pub fn clear_exclude_groups(&mut self) {
+        self.groups.excludes.clear();
+        self.exclude_cursor = 0;
+        self.rebuild_visible();
+    }
+
+    pub fn delete_exclude_group_at(&mut self, index: usize) -> bool {
+        if index >= self.groups.excludes.len() {
+            return false;
+        }
+        self.groups.excludes.remove(index);
+        if self.exclude_cursor >= self.groups.excludes.len() {
+            self.exclude_cursor = self.groups.excludes.len().saturating_sub(1);
+        }
+        self.rebuild_visible();
+        true
+    }
+
+    pub fn update_search_group(&mut self, index: usize, pattern: &str) -> bool {
+        if index >= self.search_groups.groups.len() {
+            return false;
+        }
+        let Some(mut group) = SearchGroup::from_pattern(pattern) else {
+            return false;
+        };
+        if self
+            .search_groups
+            .groups
+            .iter()
+            .enumerate()
+            .any(|(i, g)| i != index && g.same_pattern_as(pattern))
+        {
+            return false;
+        }
+        group.enabled = self.search_groups.groups[index].enabled;
+        self.search_groups.groups[index] = group;
+        true
+    }
+
+    pub fn clear_search_groups(&mut self) {
+        self.search_groups.groups.clear();
+        self.active_search = None;
+        self.search_cursor = 0;
+    }
+
+    pub fn delete_search_group_at(&mut self, index: usize) -> bool {
+        if index >= self.search_groups.groups.len() {
+            return false;
+        }
+        self.search_groups.groups.remove(index);
+        if self.search_cursor >= self.search_groups.groups.len() {
+            self.search_cursor = self.search_groups.groups.len().saturating_sub(1);
+        }
+        self.fix_active_search_after_delete(index);
+        true
+    }
+
+    pub fn update_bookmark_label(&mut self, row_id: u64, label: String) -> bool {
+        self.bookmarks.update_label(row_id, label)
+    }
+
+    pub fn clear_bookmarks(&mut self) {
+        self.bookmarks.clear();
+    }
+
+    pub fn delete_bookmark_at(&mut self, index: usize) -> bool {
+        self.bookmarks.delete_at(index)
+    }
+
     /// Push a search group, or return the index of an existing equivalent.
     /// Always marks the returned index as the globally active search.
     /// Caller always jumps to that group's first match.
@@ -1137,7 +1303,10 @@ mod tests {
         app.drain(&rx2);
 
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.list_offset, 0, "viewport must shift with front eviction");
+        assert_eq!(
+            app.list_offset, 0,
+            "viewport must shift with front eviction"
+        );
         assert_eq!(app.cursor, 0);
     }
 
@@ -1174,7 +1343,10 @@ mod tests {
     fn test_cursor_unaffected_when_evicted_row_was_already_filtered_out() {
         let mut app = App::new(3);
         app.groups = GroupList {
-            groups: vec![filter_group("x", Some(Expr::parse("tag~X", false).unwrap()))],
+            groups: vec![filter_group(
+                "x",
+                Some(Expr::parse("tag~X", false).unwrap()),
+            )],
             excludes: Vec::new(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1194,7 +1366,10 @@ mod tests {
         app.drain(&rx2);
 
         let selected_tag_after = app.rows[app.visible[app.cursor]].tag.clone();
-        assert_eq!(selected_tag_before, selected_tag_after, "cursor should still point at the same logical row");
+        assert_eq!(
+            selected_tag_before, selected_tag_after,
+            "cursor should still point at the same logical row"
+        );
         assert_eq!(selected_tag_after, "X2");
     }
 }
@@ -1260,7 +1435,11 @@ mod focus_tests {
         app.focus = Focus::ChipStrip;
         app.delete_focused_group();
         assert!(!app.groups.groups.is_empty());
-        assert_eq!(app.focus, Focus::ChipStrip, "focus should stay put while groups remain");
+        assert_eq!(
+            app.focus,
+            Focus::ChipStrip,
+            "focus should stay put while groups remain"
+        );
     }
 
     #[test]
@@ -1284,8 +1463,10 @@ mod focus_tests {
             enabled: true,
         });
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I A   : m").unwrap()).unwrap();
-        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I B   : m").unwrap()).unwrap();
+        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I A   : m").unwrap())
+            .unwrap();
+        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I B   : m").unwrap())
+            .unwrap();
         drop(tx);
         app.drain(&rx);
         assert_eq!(app.visible.len(), 1);
@@ -1361,7 +1542,7 @@ mod follow_tests {
         app.drain(&rx);
         assert!(app.following);
         app.move_cursor_manual(0); // still counts as manual
-        // delta 0 doesn't move but we always clear following in move_cursor_manual
+                                   // delta 0 doesn't move but we always clear following in move_cursor_manual
         app.following = true;
         app.move_cursor_manual(1);
         assert!(!app.following);
@@ -1625,7 +1806,10 @@ mod yank_and_search_tests {
         assert_eq!(app.yank_field(YankField::Pid).as_deref(), Some("1234"));
         assert_eq!(app.yank_field(YankField::Tid).as_deref(), Some("5678"));
         assert_eq!(app.yank_field(YankField::Level).as_deref(), Some("I"));
-        assert_eq!(app.yank_field(YankField::Timestamp).as_deref(), Some("04-02 10:00:00.000"));
+        assert_eq!(
+            app.yank_field(YankField::Timestamp).as_deref(),
+            Some("04-02 10:00:00.000")
+        );
     }
 
     #[test]
@@ -1668,6 +1852,138 @@ mod yank_and_search_tests {
         assert_eq!(YankField::from_char('m'), Some(YankField::Msg));
         assert_eq!(YankField::from_char('T'), Some(YankField::Tid));
         assert_eq!(YankField::from_char('x'), None);
+    }
+}
+
+#[cfg(test)]
+mod flash_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn set_flash_stores_msg_and_deadline() {
+        let mut app = App::new(100);
+        app.set_flash("YANKED");
+        assert_eq!(app.status_msg.as_deref(), Some("YANKED"));
+        assert!(app.status_flash_until.is_some());
+    }
+
+    #[test]
+    fn tick_flash_clears_expired() {
+        let mut app = App::new(100);
+        app.set_flash("NO ERROR");
+        app.status_flash_until = Some(Instant::now() - Duration::from_millis(1));
+        app.tick_flash();
+        assert!(app.status_msg.is_none());
+        assert!(app.status_flash_until.is_none());
+    }
+
+    #[test]
+    fn tick_flash_keeps_unexpired() {
+        let mut app = App::new(100);
+        app.set_flash("FILTER");
+        app.tick_flash();
+        assert_eq!(app.status_msg.as_deref(), Some("FILTER"));
+    }
+
+    #[test]
+    fn cancel_pending_does_not_clear_flash() {
+        let mut app = App::new(100);
+        app.set_flash("YANKED");
+        app.begin_bookmark_op();
+        app.cancel_bookmark_op();
+        assert_eq!(app.status_msg.as_deref(), Some("YANKED"));
+        assert!(!app.pending_m);
+    }
+
+    fn sample_tag_group(tag: &str) -> Group {
+        use crate::input::{build_group_from_chips, Chip, ChipField};
+        build_group_from_chips(
+            vec![Chip {
+                field: ChipField::Tag,
+                value: tag.to_string(),
+            }],
+            true,
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn update_and_clear_search_groups() {
+        let mut app = App::new(100);
+        let g = SearchGroup::from_pattern("foo").unwrap();
+        app.push_or_find_search_group(g);
+        assert!(app.update_search_group(0, "bar"));
+        assert!(app.search_groups.groups[0].same_pattern_as("bar"));
+        app.clear_search_groups();
+        assert!(app.search_groups.groups.is_empty());
+        assert!(app.active_search.is_none());
+    }
+
+    #[test]
+    fn update_search_group_dedups_other_indices() {
+        let mut app = App::new(100);
+        app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
+        assert!(!app.update_search_group(0, "BAR"));
+        assert!(app.search_groups.groups[0].same_pattern_as("foo"));
+    }
+
+    #[test]
+    fn update_and_clear_filter_groups() {
+        let mut app = App::new(100);
+        assert!(app.push_filter_group(sample_tag_group("A")));
+        let g2 = sample_tag_group("B");
+        assert!(app.update_filter_group(0, g2));
+        assert!(app.groups.groups[0].same_as(&sample_tag_group("B")));
+        app.clear_filter_groups();
+        assert!(app.groups.groups.is_empty());
+    }
+
+    #[test]
+    fn delete_filter_group_at_out_of_bounds() {
+        let mut app = App::new(100);
+        assert!(!app.delete_filter_group_at(0));
+    }
+
+    #[test]
+    fn clear_bookmarks() {
+        let mut app = App::new(100);
+        app.bookmarks
+            .try_add(Bookmark {
+                row_id: 1,
+                label: "test".into(),
+            })
+            .unwrap();
+        app.clear_bookmarks();
+        assert!(app.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn update_bookmark_label_by_row_id() {
+        let mut app = App::new(100);
+        app.bookmarks
+            .try_add(Bookmark {
+                row_id: 42,
+                label: "old".into(),
+            })
+            .unwrap();
+        assert!(app.update_bookmark_label(42, "new".into()));
+        assert_eq!(app.bookmarks.items[0].label, "new");
+        assert!(!app.update_bookmark_label(99, "x".into()));
+    }
+
+    #[test]
+    fn delete_search_group_at_fixes_active_search() {
+        let mut app = App::new(100);
+        app.push_or_find_search_group(SearchGroup::from_pattern("a").unwrap());
+        app.push_or_find_search_group(SearchGroup::from_pattern("b").unwrap());
+        assert_eq!(app.active_search, Some(1));
+        assert!(app.delete_search_group_at(1));
+        assert_eq!(app.active_search, Some(0));
+        assert!(app.delete_search_group_at(0));
+        assert!(app.active_search.is_none());
     }
 }
 
@@ -1772,7 +2088,8 @@ mod severe_tests {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row_level('I', "T", "normal")).unwrap();
-        tx.send(row_level('I', "AndroidRuntime", "FATAL EXCEPTION: main")).unwrap();
+        tx.send(row_level('I', "AndroidRuntime", "FATAL EXCEPTION: main"))
+            .unwrap();
         tx.send(row_level('I', "T", "after")).unwrap();
         drop(tx);
         app.drain(&rx);
