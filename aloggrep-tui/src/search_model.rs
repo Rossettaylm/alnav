@@ -11,13 +11,15 @@ pub struct SearchGroup {
 }
 
 impl SearchGroup {
-    /// Compile a single pattern. Returns `None` if empty or regex fails
-    /// (caller treats that as a silent no-op).
+    /// Compile a single pattern as a literal ignore-case substring.
+    /// Metacharacters (`(`, `<`, `|`, …) are escaped internally — callers
+    /// pass raw user input. Returns `None` if empty.
     pub fn from_pattern(pattern: &str) -> Option<Self> {
         if pattern.is_empty() {
             return None;
         }
-        let re = Regex::new(&format!("(?i){pattern}")).ok()?;
+        let escaped = regex::escape(pattern);
+        let re = Regex::new(&format!("(?i){escaped}")).ok()?;
         Some(Self {
             pattern: pattern.to_string(),
             re,
@@ -27,6 +29,11 @@ impl SearchGroup {
 
     pub fn matches_msg(&self, msg: &str) -> bool {
         self.re.is_match(msg)
+    }
+
+    /// Match against tag or msg (OR). Used by jump/n/N/stats and highlight.
+    pub fn matches_row(&self, tag: &str, msg: &str) -> bool {
+        self.re.is_match(tag) || self.re.is_match(msg)
     }
 
     /// Case-insensitive equality on the source pattern string.
@@ -65,11 +72,11 @@ impl SearchGroupList {
         out
     }
 
-    pub fn any_match(&self, msg: &str) -> bool {
+    pub fn any_match(&self, tag: &str, msg: &str) -> bool {
         self.groups
             .iter()
             .filter(|g| g.enabled)
-            .any(|g| g.matches_msg(msg))
+            .any(|g| g.matches_row(tag, msg))
     }
 
     /// Index of an existing group with the same pattern (ignore-case), if any.
@@ -110,7 +117,7 @@ impl SearchBox {
     }
 
     /// Indices into `groups` whose pattern has `draft` as an ignore-case prefix.
-    /// Capped at 6 to match the centered modal candidate list height.
+    /// Capped at 6 to match the floating candidate popup height.
     pub fn candidate_indices(&self, groups: &[SearchGroup]) -> Vec<usize> {
         let q = self.draft.to_ascii_lowercase();
         groups
@@ -187,8 +194,29 @@ mod tests {
     }
 
     #[test]
-    fn test_search_group_bad_regex_returns_none() {
-        assert!(SearchGroup::from_pattern("(unclosed").is_none());
+    fn test_search_group_matches_tag_or_msg() {
+        let g = SearchGroup::from_pattern("MyTag").unwrap();
+        assert!(g.matches_row("MyTag", "hello"));
+        assert!(g.matches_row("Other", "see MyTag here"));
+        assert!(!g.matches_row("Other", "hello"));
+    }
+
+    #[test]
+    fn test_search_group_literal_metacharacters() {
+        let g = SearchGroup::from_pattern("(0)").unwrap();
+        assert!(g.matches_msg("code=(0) ok"));
+        assert!(!g.matches_msg("code=0 ok"));
+
+        let g = SearchGroup::from_pattern("(unclosed").unwrap();
+        assert!(g.matches_msg("see (unclosed here"));
+        assert_eq!(g.pattern, "(unclosed");
+
+        let g = SearchGroup::from_pattern("foo <bar>").unwrap();
+        assert!(g.matches_row("T", "foo <bar> baz"));
+
+        let g = SearchGroup::from_pattern("a|b").unwrap();
+        assert!(g.matches_msg("x a|b y"));
+        assert!(!g.matches_msg("x a y"));
     }
 
     #[test]

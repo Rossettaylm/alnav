@@ -1,14 +1,21 @@
 mod app;
+mod bookmark;
+mod config;
+mod export;
 mod filter_model;
+mod help;
 mod ingest;
 mod input;
 mod model;
+mod preview;
 mod search_model;
 mod theme;
 mod ui;
 
 use std::io::{self, IsTerminal};
 use std::time::Duration;
+
+use std::path::PathBuf;
 
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode};
@@ -74,6 +81,10 @@ struct Cli {
     /// Device serial number (for --hdc with multiple devices)
     #[arg(long, value_name = "SERIAL")]
     device: Option<String>,
+
+    /// Config directory override (reads `theme.toml`; default: `$ALOGGREP_HOME` or `~/.config/aloggrep`)
+    #[arg(long, value_name = "DIR")]
+    config_path: Option<PathBuf>,
 }
 
 fn initial_group(cli: &Cli) -> Result<GroupList, String> {
@@ -127,6 +138,7 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
             time,
             enabled: true,
         }],
+        excludes: Vec::new(),
     })
 }
 
@@ -222,9 +234,22 @@ fn main() -> Result<(), String> {
         std::process::exit(2);
     }
 
+    let config_dir = config::resolve_config_dir(cli.config_path.as_deref());
+    let theme_status = config::load_theme(&config_dir);
+
     let groups = initial_group(&cli)?;
     let mut app = App::new(cli.max_lines);
     app.groups = groups;
+    app.export_source = if cli.hdc {
+        export::ExportSource::Hdc {
+            device: cli.device.clone(),
+        }
+    } else {
+        export::ExportSource::File(cli.file.clone().unwrap())
+    };
+    if let Some(hint) = theme_status.status_hint() {
+        app.status_msg = Some(hint);
+    }
 
     let (rx, hdc_child) = if cli.hdc {
         let session = aloggrep::hdc::spawn_hilog(cli.device.as_deref())?;
@@ -263,9 +288,9 @@ fn main() -> Result<(), String> {
     // _hdc_child_guard drops here at end of main(), killing the child if not already killed
 }
 
-/// Anchors the field-candidate dropdown just above the centered Input modal.
-fn popup_rect(input_modal: Rect, frame_area: Rect, match_count: usize) -> Rect {
-    ui::candidate_popup_rect(input_modal, frame_area, match_count)
+/// Anchors the candidate dropdown just below the centered Input/Search modal.
+fn popup_rect(modal: Rect, frame_area: Rect, match_count: usize) -> Rect {
+    ui::candidate_popup_rect(modal, frame_area, match_count)
 }
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
@@ -298,36 +323,108 @@ fn run<B: ratatui::backend::Backend>(
                 let frame_area = frame.area();
                 let outer_w = frame_area.width;
                 let filter_h = ui::filter_strip_height(app, outer_w);
+                let exclude_h = ui::exclude_strip_height(app, outer_w);
                 let search_h = ui::search_strip_height(app, outer_w);
-                let [filter_area, search_strip_area, log_area, status_area] = Layout::vertical([
-                    Constraint::Length(filter_h),
-                    Constraint::Length(search_h),
-                    Constraint::Fill(1),
-                    Constraint::Length(1),
-                ])
-                .areas(frame_area);
+                let [filter_area, exclude_area, search_strip_area, log_area, status_area] =
+                    Layout::vertical([
+                        Constraint::Length(filter_h),
+                        Constraint::Length(exclude_h),
+                        Constraint::Length(search_h),
+                        Constraint::Fill(1),
+                        Constraint::Length(1),
+                    ])
+                    .areas(frame_area);
                 ui::render_chip_strip(app, frame, filter_area);
+                ui::render_exclude_chip_strip(app, frame, exclude_area);
                 ui::render_search_chip_strip(app, frame, search_strip_area);
                 ui::render_log_list(app, frame, log_area);
                 ui::render_status_bar(app, frame, status_area);
 
                 let modal_w = ui::modal_width(frame_area.width);
-                // Search modal takes key priority; do not stack both.
+                // Search / Input use top stack: modal → candidates → Preview (H1).
+                // Msg-chip picker stays centered (no Preview).
                 if app.search_box.editing {
+                    let area = ui::top_modal_rect(frame_area, modal_w, ui::search_modal_height());
+                    ui::render_search_modal(&app.search_box, frame, area);
                     let cand = app
                         .search_box
                         .candidate_indices(&app.search_groups.groups)
                         .len();
-                    let h = ui::search_modal_height(cand);
-                    let area = ui::centered_modal_rect(frame_area, modal_w, h);
-                    ui::render_search_modal(&app.search_box, &app.search_groups.groups, frame, area);
-                } else if app.focus == app::Focus::Input {
-                    let input_area = ui::centered_modal_rect(frame_area, modal_w, 3);
-                    ui::render_input_modal(input, app.mode, frame, input_area);
-                    if let Some(popup) = &input.popup {
-                        let rect = popup_rect(input_area, frame_area, popup.matches().len());
-                        ui::render_popup(input, frame, rect);
+                    let mut stack_bottom = area;
+                    if cand > 0 {
+                        let rect = popup_rect(area, frame_area, cand);
+                        ui::render_search_popup(
+                            &app.search_box,
+                            &app.search_groups.groups,
+                            frame,
+                            rect,
+                        );
+                        stack_bottom = rect;
                     }
+                    let preview_lines = preview::preview_search_lines(app).unwrap_or_default();
+                    let content_rows = if preview_lines.is_empty() {
+                        1
+                    } else {
+                        preview_lines.len()
+                    };
+                    let prev = ui::preview_popup_rect(stack_bottom, frame_area, content_rows);
+                    if prev.height > 0 {
+                        ui::render_preview(
+                            "Preview",
+                            &preview_lines,
+                            "输入以预览",
+                            frame,
+                            prev,
+                        );
+                    }
+                } else if let Some(picker) = &app.msg_chip_picker {
+                    let area = ui::centered_modal_rect(frame_area, modal_w, ui::search_modal_height());
+                    ui::render_msg_chip_modal(picker, frame, area);
+                    let count = picker.candidates().len().max(1);
+                    let rect = popup_rect(area, frame_area, count);
+                    ui::render_msg_chip_popup(picker, frame, rect);
+                } else if app.focus == app::Focus::Input {
+                    let input_area = ui::top_modal_rect(frame_area, modal_w, 3);
+                    ui::render_input_modal(input, app.mode, frame, input_area);
+                    let mut stack_bottom = input_area;
+                    if input.field_popup_visible() {
+                        // `.max(1)` so empty-match state still gets a row for「无匹配字段」.
+                        let count = input.field_candidates().len().max(1);
+                        let rect = popup_rect(input_area, frame_area, count);
+                        ui::render_popup(input, frame, rect);
+                        stack_bottom = rect;
+                    }
+                    let preview_lines = preview::preview_filter_lines(app, input);
+                    let content_rows = if preview_lines.is_empty() {
+                        1
+                    } else {
+                        preview_lines.len()
+                    };
+                    let prev = ui::preview_popup_rect(stack_bottom, frame_area, content_rows);
+                    if prev.height > 0 {
+                        ui::render_preview(
+                            "Preview",
+                            &preview_lines,
+                            "无匹配行",
+                            frame,
+                            prev,
+                        );
+                    }
+                } else if app.bookmark_picker.is_some() {
+                    let n = app
+                        .bookmark_picker
+                        .as_ref()
+                        .map(|p| p.filtered_indices(&app.bookmarks).len())
+                        .unwrap_or(0);
+                    let h = ui::bookmark_picker_height(n);
+                    let area = ui::top_modal_rect(frame_area, modal_w, h);
+                    ui::render_bookmark_picker(app, frame, area);
+                } else if app.detail_open() {
+                    let inner_w = modal_w.saturating_sub(2).max(1);
+                    let content_rows = ui::detail_content_lines(app, inner_w).len().max(1);
+                    let h = ui::detail_modal_height(frame_area, content_rows);
+                    let area = ui::top_modal_rect(frame_area, modal_w, h);
+                    ui::render_detail(app, frame, area);
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -347,10 +444,18 @@ fn run<B: ratatui::backend::Backend>(
             _ => continue,
         };
 
-        // Search-box editing is checked before Ctrl+C / Normal/Insert so that
-        // Ctrl+C cancels the draft like Esc, instead of quitting in Normal.
+        // Search-box / msg-chip picker are checked before Ctrl+C / Normal/Insert
+        // so Ctrl+C cancels the draft like Esc, instead of quitting in Normal.
         if app.search_box.editing {
             handle_search_box_key(app, key);
+            continue;
+        }
+        if app.msg_chip_picker.is_some() {
+            handle_msg_chip_picker_key(app, key);
+            continue;
+        }
+        if app.bookmark_picker.is_some() {
+            handle_bookmark_picker_key(app, key);
             continue;
         }
 
@@ -391,20 +496,134 @@ fn run<B: ratatui::backend::Backend>(
     Ok(())
 }
 
+fn handle_bookmark_picker_key(app: &mut App, key: event::KeyEvent) {
+    use crate::bookmark::JumpResult;
+    use app::Focus;
+
+    let code = key.code;
+    if key.modifiers.contains(event::KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        app.close_bookmark_picker();
+        return;
+    }
+    match code {
+        KeyCode::Esc => {
+            app.close_bookmark_picker();
+        }
+        KeyCode::Up => {
+            if let Some(p) = app.bookmark_picker.as_mut() {
+                let n = p.filtered_indices(&app.bookmarks).len();
+                p.move_selection(-1, n);
+            }
+        }
+        KeyCode::Down => {
+            if let Some(p) = app.bookmark_picker.as_mut() {
+                let n = p.filtered_indices(&app.bookmarks).len();
+                p.move_selection(1, n);
+            }
+        }
+        KeyCode::Enter | KeyCode::Tab => {
+            let idx = app
+                .bookmark_picker
+                .as_ref()
+                .and_then(|p| p.selected_item_index(&app.bookmarks));
+            app.close_bookmark_picker();
+            if let Some(i) = idx {
+                let row_id = app.bookmarks.items[i].row_id;
+                match app.jump_to_bookmark(row_id) {
+                    JumpResult::Ok => {
+                        app.focus = Focus::LogList;
+                        app.status_msg = None;
+                    }
+                    JumpResult::Evicted => {
+                        app.status_msg = Some("已失效".into());
+                    }
+                    JumpResult::Filtered => {
+                        app.status_msg = Some("已过滤".into());
+                    }
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(p) = app.bookmark_picker.as_mut() {
+                p.backspace();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(p) = app.bookmark_picker.as_mut() {
+                p.push_char(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     use app::Mode;
+
+    if app.bookmark_picker.is_some() {
+        app.close_bookmark_picker();
+        return;
+    }
+    if app.pending_m {
+        app.cancel_bookmark_op();
+        return;
+    }
+    if app.pending_chip || app.pending_exclude || app.msg_chip_picker.is_some() {
+        app.cancel_chip_from_cursor();
+        return;
+    }
+    if app.pending_lock {
+        app.cancel_lock_pending();
+        return;
+    }
 
     match app.mode {
         Mode::Normal => app.should_quit = true,
         Mode::Insert => {
-            if input.popup.is_some() {
-                input.cancel_popup();
-            } else {
-                *input = input::InputBox::default();
-                app.mode = Mode::Normal;
-                focus_loglist(app);
+            // Field popup is draft-driven; cancel always resets Input like Esc.
+            *input = input::InputBox::default();
+            app.mode = Mode::Normal;
+            focus_loglist(app);
+        }
+    }
+}
+
+/// H7 `c`+`m` token picker: Space/chars filter draft; Up/Down; Enter|Tab confirm.
+/// Esc / Ctrl+C cancel without resume_following.
+fn handle_msg_chip_picker_key(app: &mut App, key: event::KeyEvent) {
+    let is_ctrl_c =
+        key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_chip_from_cursor();
+        }
+        _ if is_ctrl_c => {
+            app.cancel_chip_from_cursor();
+        }
+        KeyCode::Up => {
+            if let Some(p) = app.msg_chip_picker.as_mut() {
+                p.move_selection(-1);
             }
         }
+        KeyCode::Down => {
+            if let Some(p) = app.msg_chip_picker.as_mut() {
+                p.move_selection(1);
+            }
+        }
+        KeyCode::Enter | KeyCode::Tab => {
+            let _ = app.confirm_msg_chip_picker();
+        }
+        KeyCode::Backspace => {
+            if let Some(p) = app.msg_chip_picker.as_mut() {
+                p.backspace();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(p) = app.msg_chip_picker.as_mut() {
+                p.push_char(c);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -495,7 +714,9 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
     use app::StripKind;
     if !matches!(
         (kind, app.focus),
-        (StripKind::Filter, app::Focus::ChipStrip) | (StripKind::Search, app::Focus::SearchStrip)
+        (StripKind::Filter, app::Focus::ChipStrip)
+            | (StripKind::Exclude, app::Focus::ExcludeStrip)
+            | (StripKind::Search, app::Focus::SearchStrip)
     ) {
         return false;
     }
@@ -586,6 +807,12 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                     return;
                 }
                 KeyCode::Char(c) => {
+                    // H10: `yc` exports CLI command (before YankField — `c` is not a field).
+                    if c == 'c' {
+                        let cmd = app.export_cli_command();
+                        apply_yank(app, cmd);
+                        return;
+                    }
                     if let Some(field) = YankField::from_char(c) {
                         if let Some(text) = app.yank_field(field) {
                             apply_yank(app, text);
@@ -603,8 +830,135 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         }
     }
 
-    // Filter / Search strip: `dd` delete, `di` toggle disable.
+    // Chip-from-cursor operator pending (`c` + field letter). Esc clears pending
+    // without resume_following (same as Search cancel / yank Esc).
+    if app.pending_chip {
+        app.pending_chip = false;
+        if app.focus == Focus::LogList {
+            match code {
+                KeyCode::Esc => {
+                    app.cancel_chip_from_cursor();
+                    return;
+                }
+                KeyCode::Char(c) => {
+                    use app::ChipFieldKey;
+                    use input::ChipField;
+                    match ChipFieldKey::from_char(c) {
+                        ChipFieldKey::Field(ChipField::Msg) => {
+                            app.begin_msg_chip_picker(false);
+                        }
+                        ChipFieldKey::Field(field) => {
+                            let _ = app.push_chip_from_field(field);
+                        }
+                        ChipFieldKey::Unsupported => {
+                            app.status_msg = Some("不支持 raw/timestamp".into());
+                        }
+                        ChipFieldKey::Unknown => {
+                            app.status_msg = Some("未知字段".into());
+                        }
+                    }
+                    return;
+                }
+                _ => {
+                    app.status_msg = Some("未知字段".into());
+                    return;
+                }
+            }
+        }
+    }
+
+    // Exclude-from-cursor operator pending (`C` + field). Esc clears pending only.
+    if app.pending_exclude {
+        app.pending_exclude = false;
+        if app.focus == Focus::LogList {
+            match code {
+                KeyCode::Esc => {
+                    app.cancel_chip_from_cursor();
+                    return;
+                }
+                KeyCode::Char(c) => {
+                    use app::ChipFieldKey;
+                    use input::ChipField;
+                    match ChipFieldKey::from_char(c) {
+                        ChipFieldKey::Field(ChipField::Msg) => {
+                            app.begin_msg_chip_picker(true);
+                        }
+                        ChipFieldKey::Field(field) => {
+                            let _ = app.push_exclude_from_field(field);
+                        }
+                        ChipFieldKey::Unsupported => {
+                            app.status_msg = Some("不支持 raw/timestamp".into());
+                        }
+                        ChipFieldKey::Unknown => {
+                            app.status_msg = Some("未知字段".into());
+                        }
+                    }
+                    return;
+                }
+                _ => {
+                    app.status_msg = Some("未知字段".into());
+                    return;
+                }
+            }
+        }
+    }
+
+    // Session lock operator pending (`f` + p/t/u). Esc clears pending only;
+    // does not clear lock or resume_following.
+    if app.pending_lock {
+        app.pending_lock = false;
+        if app.focus == Focus::LogList {
+            match code {
+                KeyCode::Esc => {
+                    app.cancel_lock_pending();
+                    return;
+                }
+                KeyCode::Char('p') => {
+                    app.apply_session_lock(app::LockKind::Pid);
+                    return;
+                }
+                KeyCode::Char('t') => {
+                    app.apply_session_lock(app::LockKind::Tid);
+                    return;
+                }
+                KeyCode::Char('u') => {
+                    app.clear_session_lock();
+                    return;
+                }
+                KeyCode::Char(_) => {
+                    app.status_msg = Some("未知".into());
+                    return;
+                }
+                _ => {
+                    app.status_msg = Some("未知".into());
+                    return;
+                }
+            }
+        }
+    }
+
+    // Bookmark operator pending (`m` + a/m/d). Esc clears pending only.
+    if app.pending_m {
+        app.pending_m = false;
+        if app.focus == Focus::LogList {
+            match code {
+                KeyCode::Esc => app.cancel_bookmark_op(),
+                KeyCode::Char('a') => app.bookmark_add_current(),
+                KeyCode::Char('m') => app.begin_bookmark_picker(),
+                KeyCode::Char('d') => app.bookmark_remove_current(),
+                _ => app.status_msg = Some("未知".into()),
+            }
+        } else {
+            app.status_msg = None;
+        }
+        return;
+    }
+
+    // Filter / Exclude / Search strip: `dd` delete, `di` toggle disable.
     if handle_strip_d_chord(app, StripKind::Filter, code) {
+        return;
+    }
+    if handle_strip_d_chord(app, StripKind::Exclude, code) {
         return;
     }
     if handle_strip_d_chord(app, StripKind::Search, code) {
@@ -629,11 +983,16 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             }
         }
         (_, KeyCode::Char('1')) => app.focus = Focus::ChipStrip,
-        (_, KeyCode::Char('2')) => app.focus = Focus::SearchStrip,
-        (_, KeyCode::Char('3')) => app.focus = Focus::LogList,
-        (_, KeyCode::Char('4')) => focus_input_insert(app),
+        (_, KeyCode::Char('2')) => app.focus = Focus::ExcludeStrip,
+        (_, KeyCode::Char('3')) => app.focus = Focus::SearchStrip,
+        (_, KeyCode::Char('4')) => app.focus = Focus::LogList,
+        (_, KeyCode::Char('5')) => focus_input_insert(app),
         (_, KeyCode::Esc) => {
-            if app.focus == Focus::LogList {
+            // H4: Esc closes detail only — does not resume_following.
+            if app.detail_open() {
+                app.close_detail();
+                app.focus = Focus::LogList;
+            } else if app.focus == Focus::LogList {
                 focus_loglist_and_follow(app);
             } else {
                 focus_loglist(app);
@@ -651,7 +1010,30 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             app.following = false;
             app.jump_bottom();
         }
+        (Focus::LogList, KeyCode::Char('p')) => {
+            app.toggle_detail_fields();
+        }
+        (Focus::LogList, KeyCode::Char('P')) => {
+            app.toggle_detail_pretty();
+        }
+        (Focus::LogList, KeyCode::Char('c')) => {
+            app.begin_chip_from_cursor();
+        }
+        (Focus::LogList, KeyCode::Char('C')) => {
+            app.begin_exclude_from_cursor();
+        }
+        (Focus::LogList, KeyCode::Char('f')) => {
+            app.begin_lock_from_cursor();
+        }
+        (Focus::LogList, KeyCode::Char('m')) => {
+            app.begin_bookmark_op();
+        }
         (Focus::LogList, KeyCode::Char('y')) => {
+            app.pending_chip = false;
+            app.pending_exclude = false;
+            app.pending_lock = false;
+            app.pending_m = false;
+            app.msg_chip_picker = None;
             app.pending_yank = true;
             app.status_msg = Some("y…".into());
         }
@@ -667,8 +1049,20 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (Focus::LogList, KeyCode::Char('N')) => {
             let _ = app.find_match(-1);
         }
+        (Focus::LogList, KeyCode::Char('e')) => {
+            if !app.find_severe(1) {
+                app.status_msg = Some("NO ERROR".into());
+            }
+        }
+        (Focus::LogList, KeyCode::Char('E')) => {
+            if !app.find_severe(-1) {
+                app.status_msg = Some("NO ERROR".into());
+            }
+        }
         (Focus::ChipStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Filter, -1),
         (Focus::ChipStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Filter, 1),
+        (Focus::ExcludeStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Exclude, -1),
+        (Focus::ExcludeStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Exclude, 1),
         (Focus::SearchStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Search, -1),
         (Focus::SearchStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Search, 1),
         (_, KeyCode::Char('a') | KeyCode::Char('i') | KeyCode::Char('o')) => {
@@ -682,36 +1076,37 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
 }
 
 fn handle_insert_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) -> Result<(), String> {
-    if input.popup.is_some() {
-        match code {
-            KeyCode::Up => input.popup.as_mut().unwrap().move_selection(-1),
-            KeyCode::Down => input.popup.as_mut().unwrap().move_selection(1),
-            KeyCode::Enter | KeyCode::Tab => input.confirm_popup(),
-            KeyCode::Esc => input.cancel_popup(),
-            KeyCode::Backspace => input.popup.as_mut().unwrap().backspace(),
-            KeyCode::Char(c) => input.popup.as_mut().unwrap().push_char(c),
-            _ => {}
-        }
-        return Ok(());
-    }
-
-    // Tab/BackTab cycle focus while editing (digits stay literal chars).
-    // Enter two-step: pending draft → commit pill; chips ready → submit group;
-    // empty input → jump focus to LogList.
-    // Filter chips always compile case-insensitively. Space is literal text.
+    // Field candidates are draft-driven (no `/` open). Align with Search:
+    // Up/Down move selection; Enter/Tab confirm when candidates exist.
+    // Tab/BackTab cycle focus when there are no field candidates.
+    // Enter two-step (no candidates): pending draft → commit pill; chips ready
+    // → submit group; empty input → jump focus to LogList.
+    // `/` and Space are literal draft chars. Filter chips always ignore-case.
     match code {
         KeyCode::Esc => {
             *input = input::InputBox::default();
             app.mode = app::Mode::Normal;
             focus_loglist(app);
         }
+        KeyCode::Up => {
+            if input.field_popup_visible() {
+                input.move_field_selection(-1);
+            }
+        }
+        KeyCode::Down => {
+            if input.field_popup_visible() {
+                input.move_field_selection(1);
+            }
+        }
         KeyCode::Tab => {
-            app.cycle_focus_forward();
-            app.mode = if app.focus == app::Focus::Input {
-                app::Mode::Insert
-            } else {
-                app::Mode::Normal
-            };
+            if !input.confirm_field_candidate() {
+                app.cycle_focus_forward();
+                app.mode = if app.focus == app::Focus::Input {
+                    app::Mode::Insert
+                } else {
+                    app::Mode::Normal
+                };
+            }
         }
         KeyCode::BackTab => {
             app.cycle_focus_backward();
@@ -721,13 +1116,29 @@ fn handle_insert_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) 
                 app::Mode::Normal
             };
         }
-        KeyCode::Char('/') => input.open_popup(),
         KeyCode::Enter => {
-            if input.has_pending_draft() {
+            if input.confirm_field_candidate() {
+                // picked field; draft cleared
+            } else if input.has_pending_draft() {
                 input.commit_draft_as_chip();
             } else if input.is_empty() {
                 app.mode = app::Mode::Normal;
                 app.focus = app::Focus::LogList;
+            } else if input.exclude_mode {
+                // H9: all pills become global excludes (not a Filter group).
+                let chips = std::mem::take(&mut input.chips);
+                let mut any = false;
+                for chip in chips {
+                    if app.push_exclude_chip(chip) {
+                        any = true;
+                    }
+                }
+                input.exclude_mode = false;
+                if !any && app.status_msg.is_none() {
+                    app.status_msg = Some("已存在".into());
+                }
+                app.mode = app::Mode::Normal;
+                focus_loglist_and_follow(app);
             } else if let Some(group) = input.build_group(true)? {
                 if app.push_filter_group(group) {
                     app.rebuild_visible();
@@ -737,6 +1148,11 @@ fn handle_insert_key(app: &mut App, input: &mut input::InputBox, code: KeyCode) 
             }
         }
         KeyCode::Backspace => input.backspace(),
+        KeyCode::Char('!') if input.is_empty() => {
+            if !input.toggle_exclude_mode() {
+                input.push_char('!');
+            }
+        }
         KeyCode::Char(c) => input.push_char(c),
         _ => {}
     }
@@ -749,25 +1165,37 @@ mod dispatch_tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     #[test]
-    fn test_popup_rect_anchors_above_input_modal_and_clamps_to_space_above() {
-        let input_modal = Rect { x: 12, y: 10, width: 40, height: 3 };
+    fn test_popup_rect_anchors_below_modal_and_clamps_to_space_below() {
+        let modal = Rect { x: 12, y: 10, width: 40, height: 3 };
         let frame_area = Rect { x: 0, y: 0, width: 80, height: 24 };
-        let rect = popup_rect(input_modal, frame_area, 20); // way more matches than fit
-        // desired = min(6,20)+2 = 8; space above = 10; height = 8; y = 10-8 = 2
-        assert_eq!(rect.height, 8);
-        assert_eq!(rect.y, 2, "popup should sit directly above the Input modal");
-        assert_eq!(rect.x, input_modal.x);
-        assert_eq!(rect.width, input_modal.width);
-        assert!(rect.y + rect.height <= input_modal.y, "popup must not overlap the Input modal");
+        let rect = popup_rect(modal, frame_area, 20); // way more matches than fit
+        // desired = min(8,20)+2 = 10; space below = 24-(10+3)=11; height = 10; y = 13
+        assert_eq!(rect.height, 10);
+        assert_eq!(rect.y, 13, "popup should sit directly below the modal");
+        assert_eq!(rect.x, modal.x);
+        assert_eq!(rect.width, modal.width);
+        assert!(rect.y >= modal.y + modal.height, "popup must not overlap the modal");
     }
 
     #[test]
-    fn test_popup_rect_clamps_when_little_space_above() {
-        let input_modal = Rect { x: 12, y: 3, width: 40, height: 3 };
+    fn test_popup_rect_clamps_when_little_space_below() {
+        let modal = Rect { x: 12, y: 16, width: 40, height: 3 };
         let frame_area = Rect { x: 0, y: 0, width: 80, height: 20 };
-        let rect = popup_rect(input_modal, frame_area, 6);
-        assert_eq!(rect.height, 3);
-        assert_eq!(rect.y, 0);
+        // space below = 20-(16+3)=1; desired=8 → height=1
+        let rect = popup_rect(modal, frame_area, 6);
+        assert_eq!(rect.height, 1);
+        assert_eq!(rect.y, 19);
+    }
+
+    #[test]
+    fn test_top_modal_rect_is_near_top() {
+        let frame = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let rect = ui::top_modal_rect(frame, 40, 3);
+        assert_eq!(rect.y, 1);
+        assert_eq!(rect.width, 40);
+        let below = ui::stack_below_rect(rect, frame, 5);
+        assert_eq!(below.y, rect.y + rect.height);
+        assert_eq!(below.x, rect.x);
     }
 
     #[test]
@@ -828,21 +1256,24 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_number_keys_switch_focus_and_4_enters_insert() {
+    fn test_number_keys_switch_focus_and_5_enters_insert() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
 
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('4'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('5'));
         assert_eq!(app.focus, app::Focus::Input);
-        assert_eq!(app.mode, app::Mode::Insert, "4 focuses Input in Insert (no idle Normal)");
+        assert_eq!(app.mode, app::Mode::Insert, "5 focuses Input in Insert (no idle Normal)");
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('1'));
         assert_eq!(app.focus, app::Focus::ChipStrip);
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('2'));
-        assert_eq!(app.focus, app::Focus::SearchStrip);
+        assert_eq!(app.focus, app::Focus::ExcludeStrip);
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('3'));
+        assert_eq!(app.focus, app::Focus::SearchStrip);
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('4'));
         assert_eq!(app.focus, app::Focus::LogList);
     }
 
@@ -939,17 +1370,74 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_ctrl_c_with_popup_open_only_closes_popup() {
+    fn test_ctrl_c_with_field_popup_visible_resets_input() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
-        input.push_char('x');
-        input.open_popup(); // commits "x" as a msg chip, opens popup
-        assert_eq!(input.chips.len(), 1);
+        input.push_char('t'); // auto field popup visible
+        assert!(input.field_popup_visible());
         handle_ctrl_c(&mut app, &mut input);
-        assert!(input.popup.is_none());
-        assert_eq!(input.chips.len(), 1, "chip built before opening the popup should survive Ctrl+C");
-        assert_eq!(app.mode, app::Mode::Insert, "should stay in Insert, not quit or fully reset");
+        assert!(input.is_empty());
+        assert!(!input.field_popup_visible());
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn test_slash_is_literal_in_input_draft() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        handle_insert_key(&mut app, &mut input, KeyCode::Char('/')).unwrap();
+        assert_eq!(input.draft, "/");
+        assert!(input.field_popup_visible());
+        assert!(input.field_candidates().is_empty(), "/ matches no field keyword");
+        assert!(input.draft_field.is_none());
+    }
+
+    #[test]
+    fn test_enter_with_field_candidates_confirms_field() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        for c in "tag".chars() {
+            handle_insert_key(&mut app, &mut input, KeyCode::Char(c)).unwrap();
+        }
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        assert_eq!(input.draft_field, Some(input::ChipField::Tag));
+        assert!(input.draft.is_empty());
+        assert!(input.chips.is_empty(), "confirming a field must not commit a pill");
+        assert!(!input.field_popup_visible());
+    }
+
+    #[test]
+    fn test_tab_with_field_candidates_confirms_field() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        handle_insert_key(&mut app, &mut input, KeyCode::Char('t')).unwrap();
+        handle_insert_key(&mut app, &mut input, KeyCode::Down).unwrap(); // tid
+        handle_insert_key(&mut app, &mut input, KeyCode::Tab).unwrap();
+        assert_eq!(input.draft_field, Some(input::ChipField::Tid));
+        assert_eq!(app.focus, app::Focus::Input, "Tab must not cycle focus when confirming a field");
+        assert_eq!(app.mode, app::Mode::Insert);
+    }
+
+    #[test]
+    fn test_enter_without_field_candidates_commits_pill() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        for c in "error".chars() {
+            handle_insert_key(&mut app, &mut input, KeyCode::Char(c)).unwrap();
+        }
+        assert!(input.field_popup_visible());
+        assert!(input.field_candidates().is_empty());
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap();
+        assert_eq!(input.chips.len(), 1);
+        assert_eq!(input.chips[0].field, input::ChipField::Msg);
+        assert_eq!(input.chips[0].value, "error");
+        assert!(!input.field_popup_visible());
     }
 
     #[test]
@@ -1002,7 +1490,9 @@ mod dispatch_tests {
         assert_eq!(app.focus, app::Focus::ChipStrip);
         assert_eq!(app.mode, app::Mode::Normal);
         assert_eq!(input.draft, "x");
-        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // ChipStrip → SearchStrip
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // ChipStrip → ExcludeStrip
+        assert_eq!(app.focus, app::Focus::ExcludeStrip);
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → SearchStrip
         handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → LogList
         handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → Input + Insert
         assert_eq!(app.focus, app::Focus::Input);
@@ -1113,7 +1603,7 @@ mod dispatch_tests {
         handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.search_box.editing);
         assert_eq!(app.search_groups.groups.len(), 1);
-        assert!(app.search_groups.any_match("an error occurred"));
+        assert!(app.search_groups.any_match("", "an error occurred"));
     }
 
     #[test]
@@ -1207,7 +1697,8 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_search_box_invalid_regex_does_not_drop_prior_groups() {
+    fn test_search_box_literal_metacharacters_do_not_drop_prior_groups() {
+        // Patterns are literal (regex-escaped); metacharacters are valid input.
         let mut app = App::new(100);
         app.search_groups
             .groups
@@ -1218,8 +1709,9 @@ mod dispatch_tests {
         }
         handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.search_box.editing);
-        assert_eq!(app.search_groups.groups.len(), 1);
-        assert!(app.search_groups.any_match("existing"));
+        assert_eq!(app.search_groups.groups.len(), 2);
+        assert!(app.search_groups.any_match("", "existing"));
+        assert!(app.search_groups.any_match("", "see (unclosed here"));
     }
 
     #[test]
@@ -1395,5 +1887,612 @@ mod dispatch_tests {
         assert_eq!(app.cursor, 3);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('N'));
         assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn test_e_and_shift_e_jump_severe_rows() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : aaa",
+                "04-02 10:00:01.000  1  1 E Tag     : err one",
+                "04-02 10:00:02.000  1  1 I Tag     : bbb",
+                "04-02 10:00:03.000  1  1 F Tag     : fatal",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
+        assert_eq!(app.cursor, 1);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
+        assert_eq!(app.cursor, 3);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('E'));
+        assert_eq!(app.cursor, 1);
+        assert_ne!(app.status_msg.as_deref(), Some("NO ERROR"));
+    }
+
+    #[test]
+    fn test_e_sets_no_error_when_no_severe() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &["04-02 10:00:00.000  1  1 I Tag     : aaa"],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.status_msg.as_deref(), Some("NO ERROR"));
+    }
+
+    #[test]
+    fn test_e_does_not_interfere_with_search_n() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : hit info",
+                "04-02 10:00:01.000  1  1 E Tag     : other err",
+                "04-02 10:00:02.000  1  1 I Tag     : hit two",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        app.push_or_find_search_group(search_model::SearchGroup::from_pattern("hit").unwrap());
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
+        assert_eq!(app.cursor, 2, "n follows search, not severe");
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
+        assert_eq!(app.cursor, 1, "e follows severe, not search");
+    }
+
+    #[test]
+    fn test_ct_pushes_tag_chip_and_narrows_visible() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Keep    : a",
+                "04-02 10:00:01.000  1  1 I Drop    : b",
+                "04-02 10:00:02.000  1  1 I Keep    : c",
+            ],
+        );
+        app.following = true;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        assert!(app.pending_chip);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert!(!app.pending_chip);
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.groups.groups[0].chips[0].value, "Keep");
+        assert_eq!(app.visible.len(), 2);
+        assert!(!app.following, "chip-from-cursor leaves following off");
+        assert_eq!(app.status_msg.as_deref(), Some("FILTER"));
+    }
+
+    #[test]
+    fn test_cl_uses_level_gte_semantics() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : info",
+                "04-02 10:00:01.000  1  1 W Tag     : warn",
+                "04-02 10:00:02.000  1  1 E Tag     : err",
+                "04-02 10:00:03.000  1  1 F Tag     : fatal",
+            ],
+        );
+        app.following = false;
+        app.cursor = 1; // W
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('l'));
+        assert_eq!(app.visible.len(), 3, "level>=W keeps W/E/F");
+        let levels: Vec<_> = app
+            .visible
+            .iter()
+            .map(|&i| app.rows[i].level.as_char())
+            .collect();
+        assert_eq!(levels, vec!['W', 'E', 'F']);
+    }
+
+    #[test]
+    fn test_ct_duplicate_does_not_push() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I MyTag   : x"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert_eq!(app.groups.groups.len(), 1);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.status_msg.as_deref(), Some("已存在"));
+    }
+
+    #[test]
+    fn test_cm_opens_picker_enter_pushes_token() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : hello timeout world",
+                "04-02 10:00:01.000  1  1 I Tag     : other",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        assert!(app.msg_chip_picker.is_some());
+        // filter to "timeout"
+        handle_msg_chip_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('t'), event::KeyModifiers::NONE),
+        );
+        handle_msg_chip_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
+        );
+        assert!(app.msg_chip_picker.is_none());
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.groups.groups[0].chips[0].value, "timeout");
+        assert_eq!(app.visible.len(), 1);
+    }
+
+    #[test]
+    fn test_cm_draft_fallback_when_no_candidate() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : hello world",
+                "04-02 10:00:01.000  1  1 I Tag     : customxyz",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        for c in "customxyz".chars() {
+            handle_msg_chip_picker_key(
+                &mut app,
+                event::KeyEvent::new(KeyCode::Char(c), event::KeyModifiers::NONE),
+            );
+        }
+        assert!(app.msg_chip_picker.as_ref().unwrap().candidates().is_empty());
+        handle_msg_chip_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
+        );
+        assert_eq!(app.groups.groups[0].chips[0].value, "customxyz");
+        assert_eq!(app.visible.len(), 1);
+    }
+
+    #[test]
+    fn test_chip_pending_esc_does_not_resume_following() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        assert!(app.pending_chip);
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert!(!app.pending_chip);
+        assert!(!app.following, "Esc while pending_c must not resume following");
+        assert!(app.groups.groups.is_empty());
+    }
+
+    #[test]
+    fn test_c_unsupported_and_unknown_field() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+        assert_eq!(app.status_msg.as_deref(), Some("不支持 raw/timestamp"));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('x'));
+        assert_eq!(app.status_msg.as_deref(), Some("未知字段"));
+        assert!(app.groups.groups.is_empty());
+    }
+
+    #[test]
+    fn test_fp_locks_pid_and_ft_clears_pid_lock() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  111  1 I Tag     : a",
+                "04-02 10:00:01.000  222  2 I Tag     : b",
+                "04-02 10:00:02.000  111  3 I Tag     : c",
+            ],
+        );
+        app.following = true;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        assert!(app.pending_lock);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert_eq!(app.lock_pid.as_deref(), Some("111"));
+        assert!(app.lock_tid.is_none());
+        assert_eq!(app.visible.len(), 2);
+        assert!(app.following, "lock coexists with following");
+        assert_eq!(app.lock_badge_label().as_deref(), Some("LOCK pid=111"));
+
+        app.cursor = 0; // still on a pid=111 row after rebuild+follow
+        // switch to tid lock on current row (tid=1 on first visible)
+        let tid = app.rows[app.visible[app.cursor]].tid.clone();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert!(app.lock_pid.is_none(), "tid lock clears pid lock");
+        assert_eq!(app.lock_tid.as_deref(), Some(tid.as_str()));
+    }
+
+    #[test]
+    fn test_fp_toggle_same_value_and_fu_clear() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  111  1 I Tag     : a",
+                "04-02 10:00:01.000  222  2 I Tag     : b",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert_eq!(app.visible.len(), 1);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert!(app.lock_pid.is_none());
+        assert_eq!(app.visible.len(), 2);
+        assert_eq!(app.status_msg.as_deref(), Some("UNLOCK"));
+
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('u'));
+        assert!(app.lock_pid.is_none());
+        assert_eq!(app.visible.len(), 2);
+    }
+
+    #[test]
+    fn test_esc_resume_following_keeps_lock() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  111  1 I Tag     : a",
+                "04-02 10:00:01.000  222  2 I Tag     : b",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert_eq!(app.lock_pid.as_deref(), Some("111"));
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert!(app.following);
+        assert_eq!(app.lock_pid.as_deref(), Some("111"));
+        assert_eq!(app.visible.len(), 1);
+    }
+
+    #[test]
+    fn test_lock_pending_esc_does_not_resume_or_clear_lock() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  111  1 I Tag     : a"]);
+        app.following = false;
+        app.lock_pid = Some("111".into());
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert!(!app.pending_lock);
+        assert!(!app.following);
+        assert_eq!(app.lock_pid.as_deref(), Some("111"));
+    }
+
+    #[test]
+    fn test_ct_exclude_hides_tag_and_dd_clears() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Keep    : a",
+                "04-02 10:00:01.000  1  1 I Spam    : b",
+                "04-02 10:00:02.000  1  1 I Keep    : c",
+            ],
+        );
+        app.following = false;
+        app.cursor = 1; // Spam
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('C'));
+        assert!(app.pending_exclude);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert_eq!(app.groups.excludes.len(), 1);
+        assert!(app.groups.excludes[0].chip.value.eq_ignore_ascii_case("Spam"));
+        assert_eq!(app.visible.len(), 2);
+        app.focus = app::Focus::ExcludeStrip;
+        app.exclude_cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+        assert!(app.groups.excludes.is_empty());
+        assert_eq!(app.focus, app::Focus::LogList);
+        assert_eq!(app.visible.len(), 3);
+    }
+
+    #[test]
+    fn test_exclude_di_restores_visibility() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Spam    : a",
+                "04-02 10:00:01.000  1  1 I Keep    : b",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('C'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert_eq!(app.visible.len(), 1);
+        app.focus = app::Focus::ExcludeStrip;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+        assert!(!app.groups.excludes[0].enabled);
+        assert_eq!(app.visible.len(), 2);
+    }
+
+    #[test]
+    fn test_input_bang_exclude_mode_submit() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Noise   : a",
+                "04-02 10:00:01.000  1  1 I Keep    : b",
+            ],
+        );
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        handle_insert_key(&mut app, &mut input, KeyCode::Char('!')).unwrap();
+        assert!(input.exclude_mode);
+        // pick tag field via draft prefix
+        input.push_char('t');
+        input.push_char('a');
+        assert!(input.confirm_field_candidate());
+        for c in "Noise".chars() {
+            input.push_char(c);
+        }
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // commit pill
+        handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // submit excludes
+        assert_eq!(app.groups.excludes.len(), 1);
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.rows[app.visible[0]].tag, "Keep");
+    }
+
+    #[test]
+    fn test_exclude_strip_height_zero_when_empty() {
+        let app = App::new(100);
+        assert_eq!(ui::exclude_strip_height(&app, 80), 0);
+    }
+
+    #[test]
+    fn test_p_toggles_detail_fields() {
+        use crate::app::DetailView;
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I TagA    : one",
+                "04-02 10:00:01.000  2  2 E TagB    : two",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert_eq!(app.detail, DetailView::Fields);
+        let lines = ui::detail_field_lines(app.current_row(), 40);
+        let joined: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("TagA"), "detail shows selected tag");
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('j'));
+        let lines2 = ui::detail_field_lines(app.current_row(), 40);
+        let joined2: String = lines2
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined2.contains("TagB"), "detail follows cursor");
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert_eq!(app.detail, DetailView::Closed);
+    }
+
+    #[test]
+    fn test_detail_esc_closes_without_resume_following() {
+        use crate::app::DetailView;
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert_eq!(app.detail, DetailView::Fields);
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert_eq!(app.detail, DetailView::Closed);
+        assert!(!app.following, "Esc must not resume_following");
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn test_detail_c_field_still_works() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Keep    : a",
+                "04-02 10:00:01.000  1  1 I Drop    : b",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.visible.len(), 1);
+        assert!(app.detail_open(), "c+t keeps detail open");
+    }
+
+    #[test]
+    fn test_P_opens_pretty_and_switches_with_fields() {
+        use crate::app::DetailView;
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &["04-02 10:00:00.000  1  1 I Tag     : {\"a\":1,\"b\":[2,3]}"],
+        );
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
+        assert_eq!(app.detail, DetailView::Pretty);
+        let (text, ok) = ui::pretty_json_for_row(app.current_row().unwrap());
+        assert!(ok);
+        assert!(text.contains('\n'), "pretty should indent");
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
+        assert_eq!(app.detail, DetailView::Fields);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
+        assert_eq!(app.detail, DetailView::Pretty);
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert_eq!(app.detail, DetailView::Closed);
+        assert!(!app.following);
+    }
+
+    #[test]
+    fn test_pretty_non_json_shows_note() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : not-json-at-all"]);
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
+        let lines = ui::detail_pretty_lines(app.current_row(), 40);
+        let joined: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("非 JSON"));
+        assert!(joined.contains("not-json-at-all"));
+    }
+
+    #[test]
+    fn test_p_closes_pretty_mode() {
+        use crate::app::DetailView;
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : {\"x\":1}"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
+        assert_eq!(app.detail, DetailView::Pretty);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
+        assert_eq!(app.detail, DetailView::Closed);
+    }
+
+    #[test]
+    fn test_yc_yanks_cli_command() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.export_source = export::ExportSource::File("demo.log".into());
+        drain_lines(&mut app, &["04-02 10:00:00.000  99  1 I MyTag   : hello"]);
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
+        assert!(app.pending_yank);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        assert!(!app.pending_yank);
+        let cmd = app.last_yanked.as_deref().unwrap();
+        assert!(cmd.starts_with("aloggrep -f 'demo.log' -i -e "));
+        assert!(cmd.contains(r#"tag ~ "MyTag""#), "{cmd}");
+    }
+
+    #[test]
+    fn test_ma_md_bookmark_and_mm_jump() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I TagA    : first",
+                "04-02 10:00:01.000  1  1 I TagB    : second",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        assert!(app.pending_m);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.status_msg.as_deref(), Some("已收藏"));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.status_msg.as_deref(), Some("已存在"));
+        app.cursor = 1;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        assert!(app.bookmark_picker.is_some());
+        handle_bookmark_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
+        );
+        assert!(app.bookmark_picker.is_none());
+        assert_eq!(app.cursor, 0);
+        assert!(!app.following);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+        assert!(app.bookmarks.is_empty());
+        assert_eq!(app.status_msg.as_deref(), Some("已删除"));
+    }
+
+    #[test]
+    fn test_ma_does_not_enter_insert() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert_eq!(app.focus, app::Focus::LogList);
+        assert_eq!(app.bookmarks.len(), 1);
     }
 }

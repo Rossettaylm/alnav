@@ -94,15 +94,37 @@ impl TimeBound {
     }
 }
 
-/// OR'd list of groups. Empty list = no filtering (everything visible).
-/// All-disabled is treated the same as empty (everything visible).
+/// One global exclude chip (H9): positive `expr` is matched as AND NOT.
+#[derive(Debug)]
+pub struct ExcludeEntry {
+    pub chip: Chip,
+    pub expr: Expr,
+    pub enabled: bool,
+}
+
+impl ExcludeEntry {
+    /// Ignore-case field+value equality (for dedup).
+    pub fn same_chip_as(&self, chip: &Chip) -> bool {
+        self.chip.field == chip.field
+            && self.chip.value.eq_ignore_ascii_case(&chip.value)
+    }
+}
+
+/// OR'd list of groups, plus global AND-NOT excludes (H9).
+/// Empty / all-disabled includes = no include filtering (everything eligible).
+/// Each enabled exclude independently ANDs a NOT.
 #[derive(Default)]
 pub struct GroupList {
     pub groups: Vec<Group>,
+    pub excludes: Vec<ExcludeEntry>,
 }
 
 impl GroupList {
     pub fn matches(&self, row: &EntryRow) -> bool {
+        self.include_matches(row) && self.excludes_allow(row)
+    }
+
+    fn include_matches(&self, row: &EntryRow) -> bool {
         let mut any_enabled = false;
         for g in &self.groups {
             if !g.enabled {
@@ -114,6 +136,35 @@ impl GroupList {
             }
         }
         !any_enabled
+    }
+
+    /// False when any enabled exclude's positive expr matches the row.
+    fn excludes_allow(&self, row: &EntryRow) -> bool {
+        let le = row.as_log_entry();
+        for e in &self.excludes {
+            if e.enabled && e.expr.matches(&le) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Compile and append an exclude chip. Returns false on duplicate.
+    pub fn push_exclude(&mut self, chip: Chip) -> Result<bool, String> {
+        if self.excludes.iter().any(|e| e.same_chip_as(&chip)) {
+            return Ok(false);
+        }
+        let group = crate::input::build_group_from_chips(vec![chip.clone()], true)?
+            .ok_or_else(|| "empty exclude".to_string())?;
+        let expr = group
+            .expr
+            .ok_or_else(|| "exclude needs an expression".to_string())?;
+        self.excludes.push(ExcludeEntry {
+            chip,
+            expr,
+            enabled: true,
+        });
+        Ok(true)
     }
 }
 
@@ -150,6 +201,7 @@ mod tests {
         let expr = Expr::parse("tag~A and level>=W", false).unwrap();
         let list = GroupList {
             groups: vec![group("tag:A AND level:W", Some(expr))],
+            ..Default::default()
         };
         assert!(list.matches(&row("A", "m", "E")));
         assert!(!list.matches(&row("A", "m", "I")));
@@ -162,6 +214,7 @@ mod tests {
         let g2 = Expr::parse("tag~B", false).unwrap();
         let list = GroupList {
             groups: vec![group("tag:A", Some(g1)), group("tag:B", Some(g2))],
+            ..Default::default()
         };
         assert!(list.matches(&row("A", "m", "I")));
         assert!(list.matches(&row("B", "m", "I")));
@@ -182,6 +235,7 @@ mod tests {
                 time: Some(bound),
                 enabled: true,
             }],
+            ..Default::default()
         };
         assert!(list.matches(&row("A", "m", "I"))); // entry ts is exactly 10:00:00.000
     }
@@ -197,6 +251,7 @@ mod tests {
                 time: None,
                 enabled: false,
             }],
+            ..Default::default()
         };
         // all-disabled ≡ empty → everything visible
         assert!(list.matches(&row("B", "m", "I")));
@@ -221,8 +276,73 @@ mod tests {
                     enabled: true,
                 },
             ],
+            excludes: Vec::new(),
         };
         assert!(!list.matches(&row("A", "m", "I")));
         assert!(list.matches(&row("B", "m", "I")));
+    }
+
+    #[test]
+    fn test_exclude_and_not_after_include() {
+        let mut list = GroupList {
+            groups: vec![group(
+                "tag:A",
+                Some(Expr::parse("tag~A", true).unwrap()),
+            )],
+            excludes: Vec::new(),
+        };
+        assert!(list
+            .push_exclude(Chip {
+                field: ChipField::Msg,
+                value: "spam".into(),
+            })
+            .unwrap());
+        assert!(list.matches(&row("A", "ok", "I")));
+        assert!(!list.matches(&row("A", "has spam here", "I")));
+        assert!(!list.matches(&row("B", "ok", "I")));
+    }
+
+    #[test]
+    fn test_exclude_only_subtracts_from_all() {
+        let mut list = GroupList::default();
+        assert!(list
+            .push_exclude(Chip {
+                field: ChipField::Tag,
+                value: "Noise".into(),
+            })
+            .unwrap());
+        assert!(list.matches(&row("Keep", "m", "I")));
+        assert!(!list.matches(&row("Noise", "m", "I")));
+    }
+
+    #[test]
+    fn test_exclude_di_disables() {
+        let mut list = GroupList::default();
+        list.push_exclude(Chip {
+            field: ChipField::Tag,
+            value: "Spam".into(),
+        })
+        .unwrap();
+        assert!(!list.matches(&row("Spam", "m", "I")));
+        list.excludes[0].enabled = false;
+        assert!(list.matches(&row("Spam", "m", "I")));
+    }
+
+    #[test]
+    fn test_exclude_dedup_ignore_case() {
+        let mut list = GroupList::default();
+        assert!(list
+            .push_exclude(Chip {
+                field: ChipField::Tag,
+                value: "Foo".into(),
+            })
+            .unwrap());
+        assert!(!list
+            .push_exclude(Chip {
+                field: ChipField::Tag,
+                value: "foo".into(),
+            })
+            .unwrap());
+        assert_eq!(list.excludes.len(), 1);
     }
 }

@@ -39,20 +39,22 @@ pub struct InputBox {
     pub chips: Vec<Chip>,
     pub draft: String,
     pub draft_field: Option<ChipField>,
-    pub popup: Option<Popup>,
+    /// Highlighted index into [`Self::field_candidates`] (not into `CHIP_FIELDS`).
+    pub field_selected: usize,
+    /// H9: when true, Enter submits chips as global excludes (not a Filter group).
+    /// Only toggled via `!` while chips+draft are empty.
+    pub exclude_mode: bool,
 }
 
 impl InputBox {
-    /// `/` always means "finish whatever token is in progress (if any), then
-    /// start choosing the next field" (see design doc "Insert 模式").
-    /// Committing the in-progress token is the caller's job (Task 11 opens
-    /// the popup right after calling this); this method only does the commit.
+    /// Commit the in-progress token as a chip (default field = msg).
     pub fn commit_draft_as_chip(&mut self) {
         if self.draft.is_empty() && self.draft_field.is_none() {
             return;
         }
         let field = self.draft_field.take().unwrap_or(ChipField::Msg);
         let value = std::mem::take(&mut self.draft);
+        self.field_selected = 0;
         if !value.is_empty() {
             self.chips.push(Chip { field, value });
         }
@@ -60,6 +62,7 @@ impl InputBox {
 
     pub fn push_char(&mut self, c: char) {
         self.draft.push(c);
+        self.field_selected = 0;
     }
 
     /// Backspace cascade: draft text -> un-pick the draft's field -> pop the
@@ -67,6 +70,7 @@ impl InputBox {
     pub fn backspace(&mut self) {
         if !self.draft.is_empty() {
             self.draft.pop();
+            self.field_selected = 0;
         } else if self.draft_field.is_some() {
             self.draft_field = None;
         } else {
@@ -76,10 +80,20 @@ impl InputBox {
 
     pub fn set_field(&mut self, field: ChipField) {
         self.draft_field = Some(field);
+        self.field_selected = 0;
     }
 
     pub fn is_empty(&self) -> bool {
         self.chips.is_empty() && self.draft.is_empty() && self.draft_field.is_none()
+    }
+
+    /// Toggle exclude mode; only allowed when chips and draft are fully empty.
+    pub fn toggle_exclude_mode(&mut self) -> bool {
+        if !self.is_empty() {
+            return false;
+        }
+        self.exclude_mode = !self.exclude_mode;
+        true
     }
 
     /// True when Enter should commit a pill rather than submit the group:
@@ -88,24 +102,48 @@ impl InputBox {
         !self.draft.is_empty() || self.draft_field.is_some()
     }
 
-    /// `/`: finish the in-progress token, then open the field popup.
-    pub fn open_popup(&mut self) {
-        self.commit_draft_as_chip();
-        self.popup = Some(Popup::default());
+    /// Field-candidate panel is shown whenever draft is non-empty and no field
+    /// has been picked yet (value typing after a field pick hides it).
+    pub fn field_popup_visible(&self) -> bool {
+        !self.draft.is_empty() && self.draft_field.is_none()
     }
 
-    /// Enter/Tab inside the popup: pick the highlighted field and close it.
-    pub fn confirm_popup(&mut self) {
-        if let Some(popup) = &self.popup {
-            if let Some(field) = popup.selected_field() {
-                self.set_field(field);
-            }
+    /// Fields whose keyword has `draft` as an ignore-case prefix.
+    /// Empty when the panel is not visible.
+    pub fn field_candidates(&self) -> Vec<ChipField> {
+        if !self.field_popup_visible() {
+            return Vec::new();
         }
-        self.popup = None;
+        let q = self.draft.to_ascii_lowercase();
+        CHIP_FIELDS
+            .into_iter()
+            .filter(|f| f.keyword().starts_with(&q))
+            .collect()
     }
 
-    pub fn cancel_popup(&mut self) {
-        self.popup = None;
+    pub fn move_field_selection(&mut self, delta: isize) {
+        let len = self.field_candidates().len();
+        if len == 0 {
+            return;
+        }
+        let new = self.field_selected as isize + delta;
+        self.field_selected = new.clamp(0, len as isize - 1) as usize;
+    }
+
+    /// Enter/Tab with field candidates: pick selected field, clear draft.
+    /// Returns `true` if a field was confirmed; `false` when no candidates
+    /// (caller falls through to pill commit / focus cycle).
+    pub fn confirm_field_candidate(&mut self) -> bool {
+        let candidates = self.field_candidates();
+        if candidates.is_empty() {
+            return false;
+        }
+        let sel = self.field_selected.min(candidates.len() - 1);
+        let field = candidates[sel];
+        self.draft.clear();
+        self.field_selected = 0;
+        self.draft_field = Some(field);
+        true
     }
 
     /// Compile already-committed chips into a `Group` via `Expr::from_filters`
@@ -116,68 +154,126 @@ impl InputBox {
         if self.chips.is_empty() {
             return Ok(None);
         }
-        let mut tag = Vec::new();
-        let mut msg = Vec::new();
-        let mut pkg = Vec::new();
-        let mut pid = Vec::new();
-        let mut tid = Vec::new();
-        let mut level: Option<&str> = None; // last Level chip wins if more than one
-        for chip in &self.chips {
-            match chip.field {
-                ChipField::Tag => tag.push(chip.value.clone()),
-                ChipField::Msg => msg.push(chip.value.clone()),
-                ChipField::Pkg => pkg.push(chip.value.clone()),
-                ChipField::Pid => pid.push(chip.value.clone()),
-                ChipField::Tid => tid.push(chip.value.clone()),
-                ChipField::Level => level = Some(chip.value.as_str()),
-            }
-        }
-        let expr = Expr::from_filters(
-            &tag, &msg, &pkg, &pid, &tid, level, case_insensitive, SameFieldOp::And,
-        )?;
-        let label = self
-            .chips
-            .iter()
-            .map(|c| format!("{}:{}", c.field.keyword(), c.value))
-            .collect::<Vec<_>>()
-            .join(" AND ");
         let chips = std::mem::take(&mut self.chips);
-        Ok(Some(Group {
-            label,
-            chips,
-            expr,
-            time: None,
-            enabled: true,
-        }))
+        build_group_from_chips(chips, case_insensitive)
     }
 }
 
-#[derive(Default)]
-pub struct Popup {
-    pub query: String,
-    pub selected: usize,
+/// Compile a chip list into a `Group` (same rules as [`InputBox::build_group`]).
+pub fn build_group_from_chips(
+    chips: Vec<Chip>,
+    case_insensitive: bool,
+) -> Result<Option<Group>, String> {
+    if chips.is_empty() {
+        return Ok(None);
+    }
+    let mut tag = Vec::new();
+    let mut msg = Vec::new();
+    let mut pkg = Vec::new();
+    let mut pid = Vec::new();
+    let mut tid = Vec::new();
+    let mut level: Option<&str> = None; // last Level chip wins if more than one
+    for chip in &chips {
+        match chip.field {
+            ChipField::Tag => tag.push(chip.value.clone()),
+            ChipField::Msg => msg.push(chip.value.clone()),
+            ChipField::Pkg => pkg.push(chip.value.clone()),
+            ChipField::Pid => pid.push(chip.value.clone()),
+            ChipField::Tid => tid.push(chip.value.clone()),
+            ChipField::Level => level = Some(chip.value.as_str()),
+        }
+    }
+    let expr = Expr::from_filters(
+        &tag, &msg, &pkg, &pid, &tid, level, case_insensitive, SameFieldOp::And,
+    )?;
+    let label = chips
+        .iter()
+        .map(|c| format!("{}:{}", c.field.keyword(), c.value))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    Ok(Some(Group {
+        label,
+        chips,
+        expr,
+        time: None,
+        enabled: true,
+    }))
 }
 
-impl Popup {
-    pub fn matches(&self) -> Vec<ChipField> {
-        CHIP_FIELDS
-            .into_iter()
-            .filter(|f| f.keyword().starts_with(self.query.to_ascii_lowercase().as_str()))
+/// H7 `c`+`m`: split msg into alphanumeric tokens (len ≥ 2, ignore-case dedupe, ≤8).
+pub fn tokenize_msg_tokens(msg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut start: Option<usize> = None;
+    for (i, ch) in msg.char_indices() {
+        if ch.is_ascii_alphanumeric() {
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if let Some(s) = start.take() {
+            push_msg_token(&msg[s..i], &mut out, &mut seen);
+        }
+    }
+    if let Some(s) = start {
+        push_msg_token(&msg[s..], &mut out, &mut seen);
+    }
+    out
+}
+
+fn push_msg_token(
+    token: &str,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if token.len() < 2 || out.len() >= 8 {
+        return;
+    }
+    let key = token.to_ascii_lowercase();
+    if seen.insert(key) {
+        out.push(token.to_string());
+    }
+}
+
+/// H7/H9 msg-token picker: draft filters tokens with ignore-case contains.
+#[derive(Debug, Clone)]
+pub struct MsgChipPicker {
+    pub tokens: Vec<String>,
+    pub draft: String,
+    pub selected: usize,
+    /// When true, confirm pushes an exclude chip (H9 `C`+`m`).
+    pub as_exclude: bool,
+}
+
+impl MsgChipPicker {
+    /// `None` when msg has no usable tokens.
+    pub fn open(msg: &str, as_exclude: bool) -> Option<Self> {
+        let tokens = tokenize_msg_tokens(msg);
+        if tokens.is_empty() {
+            return None;
+        }
+        Some(Self {
+            tokens,
+            draft: String::new(),
+            selected: 0,
+            as_exclude,
+        })
+    }
+
+    /// Filtered labels (empty draft → all tokens).
+    pub fn candidates(&self) -> Vec<&str> {
+        if self.draft.is_empty() {
+            return self.tokens.iter().map(String::as_str).collect();
+        }
+        let q = self.draft.to_ascii_lowercase();
+        self.tokens
+            .iter()
+            .filter(|t| t.to_ascii_lowercase().contains(&q))
+            .map(String::as_str)
             .collect()
     }
 
-    pub fn push_char(&mut self, c: char) {
-        self.query.push(c);
-        self.selected = 0;
-    }
-
-    pub fn backspace(&mut self) {
-        self.query.pop();
-        self.selected = 0;
-    }
-
     pub fn move_selection(&mut self, delta: isize) {
-        let len = self.matches().len();
+        let len = self.candidates().len();
         if len == 0 {
             return;
         }
@@ -185,8 +281,29 @@ impl Popup {
         self.selected = new.clamp(0, len as isize - 1) as usize;
     }
 
-    pub fn selected_field(&self) -> Option<ChipField> {
-        self.matches().get(self.selected).copied()
+    pub fn push_char(&mut self, c: char) {
+        self.draft.push(c);
+        self.selected = 0;
+    }
+
+    pub fn backspace(&mut self) {
+        if !self.draft.is_empty() {
+            self.draft.pop();
+            self.selected = 0;
+        }
+    }
+
+    /// Selected token, or full draft when filter miss; `None` if both empty.
+    pub fn confirm_value(&self) -> Option<String> {
+        let cands = self.candidates();
+        if !cands.is_empty() {
+            let sel = self.selected.min(cands.len() - 1);
+            return Some(cands[sel].to_string());
+        }
+        if !self.draft.is_empty() {
+            return Some(self.draft.clone());
+        }
+        None
     }
 }
 
@@ -248,59 +365,90 @@ mod tests {
 }
 
 #[cfg(test)]
-mod popup_tests {
+mod field_popup_tests {
     use super::*;
 
     #[test]
-    fn test_popup_filters_by_prefix() {
-        let mut popup = Popup::default();
-        popup.push_char('t');
-        let matches = popup.matches();
+    fn test_field_popup_hidden_when_draft_empty() {
+        let input = InputBox::default();
+        assert!(!input.field_popup_visible());
+        assert!(input.field_candidates().is_empty());
+    }
+
+    #[test]
+    fn test_field_popup_visible_and_filters_by_draft_prefix() {
+        let mut input = InputBox::default();
+        input.push_char('t');
+        assert!(input.field_popup_visible());
+        let matches = input.field_candidates();
         assert!(matches.contains(&ChipField::Tag));
         assert!(matches.contains(&ChipField::Tid));
         assert!(!matches.contains(&ChipField::Msg));
     }
 
     #[test]
-    fn test_popup_move_selection_clamps() {
-        let mut popup = Popup::default();
-        popup.move_selection(-5);
-        assert_eq!(popup.selected, 0);
-    }
-
-    #[test]
-    fn test_open_confirm_popup_sets_draft_field() {
+    fn test_field_popup_hidden_after_field_picked() {
         let mut input = InputBox::default();
-        input.push_char('x'); // in-progress msg draft
-        input.open_popup();
-        assert!(input.chips[0].value == "x"); // draft was committed as msg:x
-        assert!(input.popup.is_some());
-
-        input.popup.as_mut().unwrap().push_char('t');
-        input.popup.as_mut().unwrap().push_char('a');
-        input.popup.as_mut().unwrap().push_char('g');
-        input.confirm_popup();
-
+        input.push_char('t');
+        assert!(input.confirm_field_candidate());
         assert_eq!(input.draft_field, Some(ChipField::Tag));
-        assert!(input.popup.is_none());
+        assert!(input.draft.is_empty());
+        assert!(!input.field_popup_visible());
+        input.push_char('x');
+        assert!(!input.field_popup_visible(), "value typing must not show field popup");
     }
 
     #[test]
-    fn test_cancel_popup_leaves_draft_field_unset() {
+    fn test_confirm_field_candidate_clears_draft() {
         let mut input = InputBox::default();
-        input.open_popup();
-        input.cancel_popup();
-        assert!(input.popup.is_none());
+        for c in "tag".chars() {
+            input.push_char(c);
+        }
+        assert!(input.confirm_field_candidate());
+        assert_eq!(input.draft_field, Some(ChipField::Tag));
+        assert!(input.draft.is_empty());
+        assert_eq!(input.field_selected, 0);
+    }
+
+    #[test]
+    fn test_confirm_field_candidate_noop_when_no_matches() {
+        let mut input = InputBox::default();
+        input.push_char('z');
+        assert!(input.field_popup_visible());
+        assert!(input.field_candidates().is_empty());
+        assert!(!input.confirm_field_candidate());
+        assert_eq!(input.draft, "z");
         assert!(input.draft_field.is_none());
     }
 
     #[test]
-    fn test_popup_move_selection_noop_when_no_matches() {
-        let mut popup = Popup::default();
-        popup.push_char('z'); // no field keyword starts with "z"
-        assert!(popup.matches().is_empty());
-        popup.move_selection(1); // must not panic
-        assert_eq!(popup.selected, 0);
+    fn test_commit_pill_hides_popup() {
+        let mut input = InputBox::default();
+        for c in "error".chars() {
+            input.push_char(c);
+        }
+        assert!(input.field_popup_visible());
+        input.commit_draft_as_chip();
+        assert!(!input.field_popup_visible());
+        assert!(input.draft.is_empty());
+    }
+
+    #[test]
+    fn test_move_field_selection_clamps() {
+        let mut input = InputBox::default();
+        input.push_char('t'); // tag, tid
+        input.move_field_selection(-5);
+        assert_eq!(input.field_selected, 0);
+        input.move_field_selection(10);
+        assert_eq!(input.field_selected, 1);
+    }
+
+    #[test]
+    fn test_move_field_selection_noop_when_no_matches() {
+        let mut input = InputBox::default();
+        input.push_char('z');
+        input.move_field_selection(1);
+        assert_eq!(input.field_selected, 0);
     }
 }
 
@@ -318,11 +466,10 @@ mod build_group_tests {
         let mut input = InputBox::default();
         input.set_field(ChipField::Tag);
         input.push_char('A');
-        input.open_popup(); // commits tag:A, opens popup
-        input.popup.as_mut().unwrap().push_char('l');
-        input.confirm_popup(); // picks Level
+        input.commit_draft_as_chip();
+        input.push_char('l');
+        assert!(input.confirm_field_candidate()); // Level
         input.push_char('W');
-
         input.commit_draft_as_chip(); // level:W
         let group = input.build_group(false).unwrap().unwrap();
         assert_eq!(group.label, "tag:A AND level:W");
@@ -354,9 +501,9 @@ mod build_group_tests {
         for c in "trace=".chars() {
             input.push_char(c);
         }
-        input.open_popup();
-        input.popup.as_mut().unwrap().push_char('m');
-        input.confirm_popup(); // Msg again
+        input.commit_draft_as_chip();
+        input.push_char('m');
+        assert!(input.confirm_field_candidate()); // Msg
         for c in "0x1100".chars() {
             input.push_char(c);
         }
@@ -386,6 +533,29 @@ mod build_group_tests {
     }
 
     #[test]
+    fn test_build_group_literal_metacharacters() {
+        let row = |msg: &str| {
+            EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I Tag   : {msg}")).unwrap()
+        };
+        let mut input = InputBox::default();
+        for c in "(0)".chars() {
+            input.push_char(c);
+        }
+        input.commit_draft_as_chip();
+        let group = input.build_group(true).unwrap().unwrap();
+        assert!(group.matches(&row("code=(0) ok")));
+        assert!(!group.matches(&row("code=0 ok")));
+
+        let mut input = InputBox::default();
+        for c in "foo <bar>".chars() {
+            input.push_char(c);
+        }
+        input.commit_draft_as_chip();
+        let group = input.build_group(false).unwrap().unwrap();
+        assert!(group.matches(&row("see foo <bar> here")));
+    }
+
+    #[test]
     fn test_has_pending_draft() {
         let mut input = InputBox::default();
         assert!(!input.has_pending_draft());
@@ -396,5 +566,48 @@ mod build_group_tests {
         input.commit_draft_as_chip();
         assert!(!input.has_pending_draft());
         assert!(!input.chips.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod msg_tokenize_tests {
+    use super::*;
+
+    #[test]
+    fn tokenize_splits_on_non_alnum_drops_short_dedupes_caps() {
+        // `_` and `!` are separators; "AB" dedupes against earlier "ab"; "z" dropped (len<2).
+        let tokens = tokenize_msg_tokens("ab cd!ef_gh AB xy z more1 more2 more3 more4");
+        assert_eq!(
+            tokens,
+            vec!["ab", "cd", "ef", "gh", "xy", "more1", "more2", "more3"]
+        );
+        assert!(!tokens.iter().any(|t| t == "z"));
+        assert!(!tokens.iter().any(|t| t == "more4")); // capped at 8
+    }
+
+    #[test]
+    fn tokenize_empty_or_punctuation_only() {
+        assert!(tokenize_msg_tokens("").is_empty());
+        assert!(tokenize_msg_tokens("!!! ---").is_empty());
+        assert!(tokenize_msg_tokens("a b").is_empty()); // both len < 2
+    }
+
+    #[test]
+    fn msg_picker_contains_filter_and_draft_fallback() {
+        let mut p = MsgChipPicker::open("hello world timeout", false).unwrap();
+        assert_eq!(p.candidates().len(), 3);
+        p.push_char('t');
+        p.push_char('i');
+        assert_eq!(p.candidates(), vec!["timeout"]);
+        assert_eq!(p.confirm_value().as_deref(), Some("timeout"));
+
+        p.draft = "zzz".into();
+        assert!(p.candidates().is_empty());
+        assert_eq!(p.confirm_value().as_deref(), Some("zzz"));
+    }
+
+    #[test]
+    fn msg_picker_none_without_tokens() {
+        assert!(MsgChipPicker::open("a!", false).is_none());
     }
 }

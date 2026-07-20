@@ -1,13 +1,31 @@
 use std::collections::VecDeque;
-use std::sync::mpsc::Receiver;
+use std::sync::{mpsc::Receiver, OnceLock};
 
+use aloggrep::crash::CrashDetector;
+use aloggrep::parser::Level;
+
+use crate::bookmark::{
+    bookmark_label, AddError, Bookmark, BookmarkList, BookmarkPicker, JumpResult,
+};
 use crate::filter_model::GroupList;
 use crate::model::EntryRow;
 use crate::search_model::{SearchBox, SearchGroup, SearchGroupList};
 
+fn crash_detector() -> &'static CrashDetector {
+    static DETECTOR: OnceLock<CrashDetector> = OnceLock::new();
+    DETECTOR.get_or_init(CrashDetector::new)
+}
+
+/// Severe = level E/F, or a crash signature in the message (H2 jump target).
+pub fn is_severe_row(row: &EntryRow) -> bool {
+    matches!(row.level, Level::E | Level::F)
+        || crash_detector().detect(&row.as_log_entry()).is_some()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     ChipStrip,
+    ExcludeStrip,
     SearchStrip,
     LogList,
     Input,
@@ -23,6 +41,7 @@ pub enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripKind {
     Filter,
+    Exclude,
     Search,
 }
 
@@ -55,6 +74,48 @@ impl YankField {
     }
 }
 
+/// Result of mapping a second key after operator `c` (H7 field alphabet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipFieldKey {
+    Field(crate::input::ChipField),
+    /// `r`/`y` (raw) or `s` (timestamp) — not valid for filter chips.
+    Unsupported,
+    Unknown,
+}
+
+impl ChipFieldKey {
+    /// Same letters as [`YankField::from_char`], minus raw/timestamp.
+    pub fn from_char(c: char) -> Self {
+        use crate::input::ChipField;
+        match c {
+            't' => Self::Field(ChipField::Tag),
+            'm' => Self::Field(ChipField::Msg),
+            'g' => Self::Field(ChipField::Pkg),
+            'p' => Self::Field(ChipField::Pid),
+            'T' => Self::Field(ChipField::Tid),
+            'l' => Self::Field(ChipField::Level),
+            'r' | 'y' | 's' => Self::Unsupported,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Second key for operator `f` (H8 session lock).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockKind {
+    Pid,
+    Tid,
+}
+
+/// H4/H5 shared row-detail overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailView {
+    #[default]
+    Closed,
+    Fields,
+    Pretty,
+}
+
 pub struct App {
     pub rows: VecDeque<EntryRow>,
     pub visible: Vec<usize>,
@@ -70,10 +131,30 @@ pub struct App {
     pub focus: Focus,
     pub mode: Mode,
     pub group_cursor: usize,
+    pub exclude_cursor: usize,
     pub search_cursor: usize,
     /// Armed by first `d` on a chip strip; second `d` deletes, `i` toggles disable.
     pub pending_d: bool,
     pub pending_yank: bool,
+    /// Armed by `c` on LogList; second key picks a field (H7).
+    pub pending_chip: bool,
+    /// Armed by `C` on LogList; second key picks a field to exclude (H9).
+    pub pending_exclude: bool,
+    /// Armed by `f` on LogList; second key locks pid/tid or clears (H8).
+    pub pending_lock: bool,
+    /// Armed by `m` on LogList; second key is `a`/`m`/`d` (M2).
+    pub pending_m: bool,
+    /// Open `c`+`m` token picker (H7); takes key priority like SearchBox.
+    pub msg_chip_picker: Option<crate::input::MsgChipPicker>,
+    /// Open `mm` bookmark picker (M2).
+    pub bookmark_picker: Option<BookmarkPicker>,
+    /// Session bookmarks (M2).
+    pub bookmarks: BookmarkList,
+    /// Next ingest `row_id` (M2).
+    pub next_row_id: u64,
+    /// Session lock: at most one of pid/tid is set (H8; AND after chip filter).
+    pub lock_pid: Option<String>,
+    pub lock_tid: Option<String>,
     /// When `Some`, LogList is in visual-line mode; value is the anchor
     /// index into `visible` (same coordinate space as `cursor`).
     pub visual_anchor: Option<usize>,
@@ -83,6 +164,10 @@ pub struct App {
     pub status_msg: Option<String>,
     /// Last text prepared for the clipboard (set even if clipboard I/O fails).
     pub last_yanked: Option<String>,
+    /// H4 field detail overlay (same shell reserved for H5 Pretty).
+    pub detail: DetailView,
+    /// Session source for H10 `yc` CLI export (`-f` / `--hdc`).
+    pub export_source: crate::export::ExportSource,
 }
 
 impl App {
@@ -100,15 +185,78 @@ impl App {
             focus: Focus::LogList,
             mode: Mode::Normal,
             group_cursor: 0,
+            exclude_cursor: 0,
             search_cursor: 0,
             pending_d: false,
             pending_yank: false,
+            pending_chip: false,
+            pending_exclude: false,
+            pending_lock: false,
+            pending_m: false,
+            msg_chip_picker: None,
+            bookmark_picker: None,
+            bookmarks: BookmarkList::default(),
+            next_row_id: 1,
+            lock_pid: None,
+            lock_tid: None,
             visual_anchor: None,
             following: true,
             list_offset: 0,
             status_msg: None,
             last_yanked: None,
+            detail: DetailView::Closed,
+            export_source: crate::export::ExportSource::default(),
         }
+    }
+
+    /// H10: one-line `aloggrep` command for the current filter state.
+    pub fn export_cli_command(&self) -> String {
+        crate::export::build_cli_command(
+            &self.export_source,
+            &self.groups,
+            self.lock_pid.as_deref(),
+            self.lock_tid.as_deref(),
+        )
+    }
+
+    pub fn detail_open(&self) -> bool {
+        !matches!(self.detail, DetailView::Closed)
+    }
+
+    /// Toggle overlay with `p`: open → Fields; any open mode → Closed.
+    /// Does not change `following`.
+    pub fn toggle_detail_fields(&mut self) {
+        self.detail = match self.detail {
+            DetailView::Closed => DetailView::Fields,
+            DetailView::Fields | DetailView::Pretty => DetailView::Closed,
+        };
+    }
+
+    /// H5 `P`: Closed/Fields → Pretty; Pretty → Fields. Does not change `following`.
+    pub fn toggle_detail_pretty(&mut self) {
+        self.detail = match self.detail {
+            DetailView::Closed | DetailView::Fields => DetailView::Pretty,
+            DetailView::Pretty => DetailView::Fields,
+        };
+    }
+
+    /// Close detail overlay without touching `following`.
+    pub fn close_detail(&mut self) {
+        self.detail = DetailView::Closed;
+    }
+
+    /// Chip filter then session lock (H8). Used by drain and rebuild.
+    pub fn row_passes_filters(&self, row: &EntryRow) -> bool {
+        if !self.groups.matches(row) {
+            return false;
+        }
+        if let Some(pid) = &self.lock_pid {
+            return row.pid == *pid;
+        }
+        if let Some(tid) = &self.lock_tid {
+            return row.tid == *tid;
+        }
+        true
     }
 
     /// Drain everything currently available on the channel without blocking.
@@ -120,7 +268,9 @@ impl App {
         }
     }
 
-    fn push_row(&mut self, row: EntryRow) {
+    fn push_row(&mut self, mut row: EntryRow) {
+        row.row_id = self.next_row_id;
+        self.next_row_id = self.next_row_id.wrapping_add(1);
         if self.rows.len() >= self.max_lines {
             self.rows.pop_front();
             // `visible` stays sorted ascending, so only index 0 can ever need removing.
@@ -151,7 +301,7 @@ impl App {
                 }
             }
         }
-        let matches = self.groups.matches(&row);
+        let matches = self.row_passes_filters(&row);
         self.rows.push_back(row);
         if matches {
             self.visible.push(self.rows.len() - 1);
@@ -159,13 +309,13 @@ impl App {
         self.follow_tick();
     }
 
-    /// Full rescan, used when the filter groups themselves change.
+    /// Full rescan, used when the filter groups or session lock change.
     pub fn rebuild_visible(&mut self) {
         self.visible = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| self.groups.matches(row))
+            .filter(|(_, row)| self.row_passes_filters(row))
             .map(|(i, _)| i)
             .collect();
         if self.following {
@@ -219,7 +369,8 @@ impl App {
 
     pub fn cycle_focus_forward(&mut self) {
         self.focus = match self.focus {
-            Focus::ChipStrip => Focus::SearchStrip,
+            Focus::ChipStrip => Focus::ExcludeStrip,
+            Focus::ExcludeStrip => Focus::SearchStrip,
             Focus::SearchStrip => Focus::LogList,
             Focus::LogList => Focus::Input,
             Focus::Input => Focus::ChipStrip,
@@ -229,7 +380,8 @@ impl App {
     pub fn cycle_focus_backward(&mut self) {
         self.focus = match self.focus {
             Focus::ChipStrip => Focus::Input,
-            Focus::SearchStrip => Focus::ChipStrip,
+            Focus::ExcludeStrip => Focus::ChipStrip,
+            Focus::SearchStrip => Focus::ExcludeStrip,
             Focus::LogList => Focus::SearchStrip,
             Focus::Input => Focus::LogList,
         };
@@ -238,6 +390,7 @@ impl App {
     fn strip_len(&self, kind: StripKind) -> usize {
         match kind {
             StripKind::Filter => self.groups.groups.len(),
+            StripKind::Exclude => self.groups.excludes.len(),
             StripKind::Search => self.search_groups.groups.len(),
         }
     }
@@ -245,6 +398,7 @@ impl App {
     fn strip_cursor_mut(&mut self, kind: StripKind) -> &mut usize {
         match kind {
             StripKind::Filter => &mut self.group_cursor,
+            StripKind::Exclude => &mut self.exclude_cursor,
             StripKind::Search => &mut self.search_cursor,
         }
     }
@@ -278,6 +432,16 @@ impl App {
                     self.group_cursor = self.groups.groups.len().saturating_sub(1);
                 }
                 if self.groups.groups.is_empty() {
+                    self.focus = Focus::LogList;
+                }
+                self.rebuild_visible();
+            }
+            StripKind::Exclude => {
+                self.groups.excludes.remove(cursor);
+                if self.exclude_cursor >= self.groups.excludes.len() {
+                    self.exclude_cursor = self.groups.excludes.len().saturating_sub(1);
+                }
+                if self.groups.excludes.is_empty() {
                     self.focus = Focus::LogList;
                 }
                 self.rebuild_visible();
@@ -344,6 +508,11 @@ impl App {
                 g.enabled = !g.enabled;
                 self.rebuild_visible();
             }
+            StripKind::Exclude => {
+                let e = &mut self.groups.excludes[cursor];
+                e.enabled = !e.enabled;
+                self.rebuild_visible();
+            }
             StripKind::Search => {
                 let g = &mut self.search_groups.groups[cursor];
                 g.enabled = !g.enabled;
@@ -353,6 +522,85 @@ impl App {
 
     pub fn current_row(&self) -> Option<&EntryRow> {
         self.visible.get(self.cursor).map(|&i| &self.rows[i])
+    }
+
+    /// Arm `m` operator-pending (M2 bookmarks).
+    pub fn begin_bookmark_op(&mut self) {
+        self.clear_visual();
+        self.pending_yank = false;
+        self.pending_d = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.msg_chip_picker = None;
+        self.pending_m = true;
+        self.status_msg = Some("m…".into());
+    }
+
+    pub fn cancel_bookmark_op(&mut self) {
+        self.pending_m = false;
+        self.status_msg = None;
+    }
+
+    /// `ma`: bookmark current LogList row.
+    pub fn bookmark_add_current(&mut self) {
+        self.pending_m = false;
+        let Some(row) = self.current_row() else {
+            self.status_msg = Some("无选中行".into());
+            return;
+        };
+        let bm = Bookmark {
+            row_id: row.row_id,
+            label: bookmark_label(&row.tag, &row.msg),
+        };
+        match self.bookmarks.try_add(bm) {
+            Ok(()) => self.status_msg = Some("已收藏".into()),
+            Err(AddError::Duplicate) => self.status_msg = Some("已存在".into()),
+            Err(AddError::Full) => self.status_msg = Some("书签已满".into()),
+        }
+    }
+
+    /// `md`: remove bookmark for current row.
+    pub fn bookmark_remove_current(&mut self) {
+        self.pending_m = false;
+        let Some(row) = self.current_row() else {
+            self.status_msg = Some("无选中行".into());
+            return;
+        };
+        if self.bookmarks.remove_id(row.row_id) {
+            self.status_msg = Some("已删除".into());
+        } else {
+            self.status_msg = Some("未收藏".into());
+        }
+    }
+
+    /// `mm`: open bookmark picker.
+    pub fn begin_bookmark_picker(&mut self) {
+        self.pending_m = false;
+        self.bookmark_picker = Some(BookmarkPicker::open());
+        self.status_msg = None;
+    }
+
+    pub fn close_bookmark_picker(&mut self) {
+        self.bookmark_picker = None;
+    }
+
+    /// Jump to a bookmarked row_id; sets `following=false` on success.
+    pub fn jump_to_bookmark(&mut self, row_id: u64) -> JumpResult {
+        let Some(row_idx) = self.rows.iter().position(|r| r.row_id == row_id) else {
+            return JumpResult::Evicted;
+        };
+        let Some(vis) = self.visible.iter().position(|&i| i == row_idx) else {
+            return JumpResult::Filtered;
+        };
+        self.following = false;
+        self.cursor = vis;
+        JumpResult::Ok
+    }
+
+    /// Whether `row_id` is still present in the ring buffer.
+    pub fn bookmark_alive(&self, row_id: u64) -> bool {
+        self.rows.iter().any(|r| r.row_id == row_id)
     }
 
     /// Inclusive `[lo, hi]` range over `visible` indices while in visual-line
@@ -372,9 +620,268 @@ impl App {
             return;
         }
         self.pending_yank = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.pending_m = false;
+        self.msg_chip_picker = None;
+        self.bookmark_picker = None;
         self.following = false;
         self.visual_anchor = Some(self.cursor);
         self.status_msg = Some("VISUAL".into());
+    }
+
+    /// Arm `c` operator-pending (clear other pendings; stay on LogList).
+    pub fn begin_chip_from_cursor(&mut self) {
+        self.clear_visual();
+        self.pending_yank = false;
+        self.pending_d = false;
+        self.pending_lock = false;
+        self.pending_exclude = false;
+        self.msg_chip_picker = None;
+        self.pending_chip = true;
+        self.status_msg = Some("c…".into());
+    }
+
+    /// Arm `C` operator-pending for exclude-from-cursor (H9).
+    pub fn begin_exclude_from_cursor(&mut self) {
+        self.clear_visual();
+        self.pending_yank = false;
+        self.pending_d = false;
+        self.pending_lock = false;
+        self.pending_chip = false;
+        self.msg_chip_picker = None;
+        self.pending_exclude = true;
+        self.status_msg = Some("C…".into());
+    }
+
+    /// Cancel `c`/`C` pending / msg picker without touching `following`.
+    pub fn cancel_chip_from_cursor(&mut self) {
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.msg_chip_picker = None;
+        if matches!(
+            self.status_msg.as_deref(),
+            Some("c…") | Some("c m…") | Some("C…") | Some("C m…")
+        ) {
+            self.status_msg = None;
+        }
+    }
+
+    /// Arm `f` operator-pending (H8 session lock).
+    pub fn begin_lock_from_cursor(&mut self) {
+        self.clear_visual();
+        self.pending_yank = false;
+        self.pending_d = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.msg_chip_picker = None;
+        self.pending_lock = true;
+        self.status_msg = Some("f…".into());
+    }
+
+    /// Cancel `f` pending without clearing lock or touching `following`.
+    pub fn cancel_lock_pending(&mut self) {
+        self.pending_lock = false;
+        if self.status_msg.as_deref() == Some("f…") {
+            self.status_msg = None;
+        }
+    }
+
+    /// `f` `u`: clear session lock and rebuild.
+    pub fn clear_session_lock(&mut self) {
+        self.pending_lock = false;
+        let had = self.lock_pid.is_some() || self.lock_tid.is_some();
+        self.lock_pid = None;
+        self.lock_tid = None;
+        if had {
+            self.rebuild_visible();
+            self.status_msg = Some("UNLOCK".into());
+        } else {
+            self.status_msg = Some("无锁定".into());
+        }
+    }
+
+    /// `f` `p` / `f` `t`: set, toggle-clear, or switch lock target.
+    pub fn apply_session_lock(&mut self, kind: LockKind) {
+        let Some(row) = self.current_row() else {
+            self.status_msg = Some("无选中行".into());
+            return;
+        };
+        let value = match kind {
+            LockKind::Pid => row.pid.clone(),
+            LockKind::Tid => row.tid.clone(),
+        };
+        if value.is_empty() {
+            self.status_msg = Some(match kind {
+                LockKind::Pid => "空 pid".into(),
+                LockKind::Tid => "空 tid".into(),
+            });
+            return;
+        }
+        let same = match kind {
+            LockKind::Pid => self.lock_pid.as_deref() == Some(value.as_str()),
+            LockKind::Tid => self.lock_tid.as_deref() == Some(value.as_str()),
+        };
+        if same {
+            self.lock_pid = None;
+            self.lock_tid = None;
+            self.rebuild_visible();
+            self.status_msg = Some("UNLOCK".into());
+            return;
+        }
+        match kind {
+            LockKind::Pid => {
+                self.lock_pid = Some(value);
+                self.lock_tid = None;
+            }
+            LockKind::Tid => {
+                self.lock_tid = Some(value);
+                self.lock_pid = None;
+            }
+        }
+        self.rebuild_visible();
+        self.status_msg = None; // badge on status_bar shows LOCK …
+    }
+
+    /// Status-bar label when a session lock is active.
+    pub fn lock_badge_label(&self) -> Option<String> {
+        if let Some(pid) = &self.lock_pid {
+            return Some(format!("LOCK pid={pid}"));
+        }
+        if let Some(tid) = &self.lock_tid {
+            return Some(format!("LOCK tid={tid}"));
+        }
+        None
+    }
+
+    /// Push a single-field filter group from the current row (H7, non-msg path).
+    /// Returns `true` when a new group was pushed.
+    pub fn push_chip_from_field(&mut self, field: crate::input::ChipField) -> bool {
+        use crate::input::{Chip, ChipField};
+        let Some(row) = self.current_row() else {
+            self.status_msg = Some("无选中行".into());
+            return false;
+        };
+        let yank = match field {
+            ChipField::Tag => YankField::Tag,
+            ChipField::Msg => YankField::Msg,
+            ChipField::Pkg => YankField::Pkg,
+            ChipField::Pid => YankField::Pid,
+            ChipField::Tid => YankField::Tid,
+            ChipField::Level => YankField::Level,
+        };
+        let value = Self::field_text(row, yank);
+        if value.is_empty() {
+            self.status_msg = Some(format!("空 {}", field.keyword()));
+            return false;
+        }
+        self.push_single_chip_filter(Chip { field, value })
+    }
+
+    /// Open msg token picker for the current row (`c`/`C`+`m`).
+    pub fn begin_msg_chip_picker(&mut self, as_exclude: bool) {
+        let Some(row) = self.current_row() else {
+            self.status_msg = Some("无选中行".into());
+            return;
+        };
+        match crate::input::MsgChipPicker::open(&row.msg, as_exclude) {
+            Some(picker) => {
+                self.pending_chip = false;
+                self.pending_exclude = false;
+                self.msg_chip_picker = Some(picker);
+                self.status_msg = Some(if as_exclude { "C m…" } else { "c m…" }.into());
+            }
+            None => {
+                self.pending_chip = false;
+                self.pending_exclude = false;
+                self.status_msg = Some("无可选片段".into());
+            }
+        }
+    }
+
+    /// Confirm msg picker selection / draft fallback → push msg include or exclude.
+    pub fn confirm_msg_chip_picker(&mut self) -> bool {
+        use crate::input::{Chip, ChipField};
+        let Some(picker) = self.msg_chip_picker.take() else {
+            return false;
+        };
+        let as_exclude = picker.as_exclude;
+        let Some(value) = picker.confirm_value() else {
+            self.status_msg = Some("无可选片段".into());
+            return false;
+        };
+        let chip = Chip {
+            field: ChipField::Msg,
+            value,
+        };
+        if as_exclude {
+            self.push_exclude_chip(chip)
+        } else {
+            self.push_single_chip_filter(chip)
+        }
+    }
+
+    /// Push a single-field exclude from the current row (H9, non-msg path).
+    pub fn push_exclude_from_field(&mut self, field: crate::input::ChipField) -> bool {
+        use crate::input::{Chip, ChipField};
+        let Some(row) = self.current_row() else {
+            self.status_msg = Some("无选中行".into());
+            return false;
+        };
+        let yank = match field {
+            ChipField::Tag => YankField::Tag,
+            ChipField::Msg => YankField::Msg,
+            ChipField::Pkg => YankField::Pkg,
+            ChipField::Pid => YankField::Pid,
+            ChipField::Tid => YankField::Tid,
+            ChipField::Level => YankField::Level,
+        };
+        let value = Self::field_text(row, yank);
+        if value.is_empty() {
+            self.status_msg = Some(format!("空 {}", field.keyword()));
+            return false;
+        }
+        self.push_exclude_chip(Chip { field, value })
+    }
+
+    pub fn push_exclude_chip(&mut self, chip: crate::input::Chip) -> bool {
+        match self.groups.push_exclude(chip) {
+            Ok(true) => {
+                self.following = false;
+                self.rebuild_visible();
+                self.status_msg = Some("EXCLUDE".into());
+                true
+            }
+            Ok(false) => {
+                self.status_msg = Some("已存在".into());
+                false
+            }
+            Err(e) => {
+                self.status_msg = Some(e);
+                false
+            }
+        }
+    }
+
+    fn push_single_chip_filter(&mut self, chip: crate::input::Chip) -> bool {
+        use crate::input::build_group_from_chips;
+        let group = match build_group_from_chips(vec![chip], true) {
+            Ok(Some(g)) => g,
+            Ok(None) => return false,
+            Err(e) => {
+                self.status_msg = Some(e);
+                return false;
+            }
+        };
+        if !self.push_filter_group(group) {
+            self.status_msg = Some("已存在".into());
+            return false;
+        }
+        self.following = false;
+        self.rebuild_visible();
+        self.status_msg = Some("FILTER".into());
+        true
     }
 
     pub fn clear_visual(&mut self) {
@@ -418,8 +925,29 @@ impl App {
         self.last_yanked = Some(text);
     }
 
+    /// Jump to the next (`dir > 0`) or previous (`dir < 0`) severe visible row
+    /// (level E/F or crash). Wraps like vim `wrapscan`. Independent of search.
+    pub fn find_severe(&mut self, dir: i8) -> bool {
+        let n = self.visible.len();
+        if n == 0 {
+            return false;
+        }
+        let step: isize = if dir >= 0 { 1 } else { -1 };
+        let start = self.cursor as isize;
+        for offset in 1..=n as isize {
+            let idx = (start + offset * step).rem_euclid(n as isize) as usize;
+            let row_idx = self.visible[idx];
+            if is_severe_row(&self.rows[row_idx]) {
+                self.following = false;
+                self.cursor = idx;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Jump to the next (`dir > 0`) or previous (`dir < 0`) visible row whose
-    /// `msg` matches the globally active search group. Wraps like vim `wrapscan`.
+    /// tag or msg matches the globally active search group. Wraps like vim `wrapscan`.
     pub fn find_match(&mut self, dir: i8) -> bool {
         let Some(active_idx) = self.active_search else {
             return false;
@@ -441,7 +969,8 @@ impl App {
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
             let row_idx = self.visible[idx];
-            let hit = self.search_groups.groups[active_idx].matches_msg(&self.rows[row_idx].msg);
+            let row = &self.rows[row_idx];
+            let hit = self.search_groups.groups[active_idx].matches_row(&row.tag, &row.msg);
             if hit {
                 self.following = false;
                 self.cursor = idx;
@@ -462,7 +991,8 @@ impl App {
         }
         for idx in 0..self.visible.len() {
             let row_idx = self.visible[idx];
-            if group.matches_msg(&self.rows[row_idx].msg) {
+            let row = &self.rows[row_idx];
+            if group.matches_row(&row.tag, &row.msg) {
                 self.following = false;
                 self.cursor = idx;
                 return true;
@@ -513,7 +1043,8 @@ impl App {
         let mut total = 0usize;
         let mut current = None;
         for (idx, &row_idx) in self.visible.iter().enumerate() {
-            if group.matches_msg(&self.rows[row_idx].msg) {
+            let row = &self.rows[row_idx];
+            if group.matches_row(&row.tag, &row.msg) {
                 total += 1;
                 if idx == self.cursor {
                     current = Some(total);
@@ -585,6 +1116,7 @@ mod tests {
                 "keep-A",
                 Some(Expr::parse("tag~A", false).unwrap()),
             )],
+            excludes: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         // Two matching rows fill visible; then non-matching rows churn the ring
@@ -643,6 +1175,7 @@ mod tests {
         let mut app = App::new(3);
         app.groups = GroupList {
             groups: vec![filter_group("x", Some(Expr::parse("tag~X", false).unwrap()))],
+            excludes: Vec::new(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(row("N1")).unwrap(); // filtered out, not in `visible`
@@ -690,6 +1223,8 @@ mod focus_tests {
         assert_eq!(app.focus, Focus::Input);
         app.cycle_focus_forward();
         assert_eq!(app.focus, Focus::ChipStrip);
+        app.cycle_focus_forward();
+        assert_eq!(app.focus, Focus::ExcludeStrip);
         app.cycle_focus_forward();
         assert_eq!(app.focus, Focus::SearchStrip);
         app.cycle_focus_forward();
@@ -843,6 +1378,7 @@ mod follow_tests {
                 time: None,
                 enabled: true,
             }],
+            excludes: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         tx.send(row("A")).unwrap();
@@ -979,7 +1515,27 @@ mod search_tests {
         app.following = false;
         app.cursor = 0;
         app.push_or_find_search_group(SearchGroup::from_pattern("ERROR").unwrap());
-        assert!(app.search_groups.any_match("an error occurred"));
+        assert!(app.search_groups.any_match("", "an error occurred"));
+    }
+
+    #[test]
+    fn test_find_match_hits_tag_only() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_with_msg("Other", "aaa")).unwrap();
+        tx.send(row_with_msg("MyTag", "bbb")).unwrap();
+        tx.send(row_with_msg("Other", "ccc")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+        app.push_or_find_search_group(SearchGroup::from_pattern("MyTag").unwrap());
+        assert_eq!(app.search_match_stats(), Some((None, 1)));
+        assert!(app.jump_first_match());
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.rows[app.visible[app.cursor]].tag, "MyTag");
+        assert!(app.find_match(1));
+        assert_eq!(app.cursor, 1, "only one tag hit; wrap lands on same row");
     }
 
     #[test]
@@ -1112,5 +1668,118 @@ mod yank_and_search_tests {
         assert_eq!(YankField::from_char('m'), Some(YankField::Msg));
         assert_eq!(YankField::from_char('T'), Some(YankField::Tid));
         assert_eq!(YankField::from_char('x'), None);
+    }
+}
+
+#[cfg(test)]
+mod severe_tests {
+    use super::*;
+    use crate::filter_model::Group;
+    use aloggrep::expr::{Expr, SameFieldOp};
+    use std::sync::mpsc;
+
+    fn row_level(level: char, tag: &str, msg: &str) -> EntryRow {
+        EntryRow::from_line(&format!(
+            "04-02 10:00:00.000  1234  5678 {level} {tag}   : {msg}"
+        ))
+        .unwrap()
+    }
+
+    fn filter_group(label: &str, expr: Option<Expr>) -> Group {
+        Group {
+            label: label.into(),
+            chips: Vec::new(),
+            expr,
+            time: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn test_find_severe_next_prev_and_wrap() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_level('I', "T", "ok")).unwrap();
+        tx.send(row_level('E', "T", "err one")).unwrap();
+        tx.send(row_level('I', "T", "ok2")).unwrap();
+        tx.send(row_level('F', "T", "fatal")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+
+        assert!(app.find_severe(1));
+        assert_eq!(app.cursor, 1);
+        assert!(!app.following);
+        assert!(app.find_severe(1));
+        assert_eq!(app.cursor, 3);
+        assert!(app.find_severe(1)); // wrap
+        assert_eq!(app.cursor, 1);
+        assert!(app.find_severe(-1)); // wrap backward to last
+        assert_eq!(app.cursor, 3);
+    }
+
+    #[test]
+    fn test_find_severe_noop_when_none() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_level('I', "T", "ok")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = true;
+        app.cursor = 0;
+        assert!(!app.find_severe(1));
+        assert_eq!(app.cursor, 0);
+        assert!(app.following, "no jump must not clear following");
+    }
+
+    #[test]
+    fn test_find_severe_respects_visible_filter() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_level('E', "Keep", "err keep")).unwrap();
+        tx.send(row_level('E', "Drop", "err drop")).unwrap();
+        tx.send(row_level('I', "Keep", "ok")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+
+        let expr = Expr::from_filters(
+            &[String::from("Keep")],
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            true,
+            SameFieldOp::And,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(app.push_filter_group(filter_group("tag=Keep", Some(expr))));
+        app.rebuild_visible();
+        assert_eq!(app.visible.len(), 2);
+        app.following = false;
+        app.cursor = 0; // on Keep E
+
+        assert!(app.find_severe(1));
+        // Only one severe in visible; wrap lands on same Keep E (index 0), not Drop.
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.rows[app.visible[app.cursor]].tag, "Keep");
+    }
+
+    #[test]
+    fn test_find_severe_hits_crash_message_even_if_info_level() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_level('I', "T", "normal")).unwrap();
+        tx.send(row_level('I', "AndroidRuntime", "FATAL EXCEPTION: main")).unwrap();
+        tx.send(row_level('I', "T", "after")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.cursor = 0;
+        assert!(is_severe_row(&app.rows[app.visible[1]]));
+        assert!(app.find_severe(1));
+        assert_eq!(app.cursor, 1);
     }
 }

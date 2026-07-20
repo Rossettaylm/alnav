@@ -2,8 +2,9 @@ use aloggrep::parser::{Level, LogEntry};
 
 #[derive(Debug, Clone)]
 pub struct EntryRow {
-    #[allow(dead_code)] // reserved for a future row-detail overlay (explicitly out of scope for v1, see design doc YAGNI list)
     pub raw: String,
+    /// Monotonic ingest id assigned by [`crate::app::App`] (M2 bookmarks).
+    pub row_id: u64,
     pub timestamp: String,
     pub pid: String,
     pub tid: String,
@@ -17,10 +18,13 @@ impl EntryRow {
     /// Parse `line`; returns `None` for lines that don't match any known
     /// log format (they are dropped, same as the CLI's default no-multiline
     /// behavior — see design doc "数据模型" section).
+    ///
+    /// `row_id` is left `0`; [`crate::app::App`] assigns a real id on ingest.
     pub fn from_line(line: &str) -> Option<Self> {
         let entry = LogEntry::parse(line)?;
         Some(EntryRow {
             raw: line.to_string(),
+            row_id: 0,
             timestamp: entry.timestamp.to_string(),
             pid: entry.pid.to_string(),
             tid: entry.tid.to_string(),

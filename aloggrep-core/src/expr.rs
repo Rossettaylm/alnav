@@ -307,9 +307,10 @@ impl Expr {
 
     /// Combine scalar field filters into one expression.
     ///
-    /// Different fields (and `level`) are always AND'd. Multiple values for
-    /// the *same* field follow `same_field`:
-    /// - [`SameFieldOp::Or`] — one regex alternation (`a|b`), CLI default
+    /// Each field value is treated as a **literal** substring (regex
+    /// metacharacters are escaped). Different fields (and `level`) are always
+    /// AND'd. Multiple values for the *same* field follow `same_field`:
+    /// - [`SameFieldOp::Or`] — alternation of escaped literals (`a|b`), CLI default
     /// - [`SameFieldOp::And`] — separate match nodes AND'd (TUI chip groups)
     ///
     /// Returns `Ok(None)` if every input is empty (no filter to apply).
@@ -374,16 +375,25 @@ impl Expr {
         if values.is_empty() {
             return Ok(None);
         }
-        let joined = values.join("|");
+        // Escape each value so user input is a literal substring; `|` between
+        // values remains alternation (SameFieldOp::Or).
+        let joined = values
+            .iter()
+            .map(|v| regex::escape(v))
+            .collect::<Vec<_>>()
+            .join("|");
         let pattern = if case_insensitive { format!("(?i){joined}") } else { joined.clone() };
         Regex::new(&pattern).map(Some).map_err(|e| format!("bad {label} pattern '{}': {}", joined, e))
     }
 
     fn compile_one(value: &str, case_insensitive: bool, label: &str) -> Result<Regex, String> {
+        // Literal substring match: metacharacters like `(`, `<`, `|` need no
+        // manual escaping from the caller (TUI chips / startup filters).
+        let escaped = regex::escape(value);
         let pattern = if case_insensitive {
-            format!("(?i){value}")
+            format!("(?i){escaped}")
         } else {
-            value.to_string()
+            escaped
         };
         Regex::new(&pattern).map_err(|e| format!("bad {label} pattern '{}': {}", value, e))
     }
@@ -472,6 +482,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("bogus"));
+    }
+
+    #[test]
+    fn test_from_filters_literal_metacharacters() {
+        let expr = Expr::from_filters(
+            &[],
+            &["(0)".to_string()],
+            &[], &[], &[], None, true, SameFieldOp::And,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expr.matches(&entry("T", "code=(0) ok", Level::I)));
+        assert!(!expr.matches(&entry("T", "code=0 ok", Level::I)));
+
+        let expr = Expr::from_filters(
+            &[],
+            &["foo <bar>".to_string()],
+            &[], &[], &[], None, false, SameFieldOp::And,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expr.matches(&entry("T", "see foo <bar> here", Level::I)));
+
+        // Literal `|` inside one value — not alternation.
+        let expr = Expr::from_filters(
+            &[],
+            &["a|b".to_string()],
+            &[], &[], &[], None, false, SameFieldOp::And,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expr.matches(&entry("T", "x a|b y", Level::I)));
+        assert!(!expr.matches(&entry("T", "x a y", Level::I)));
+        assert!(!expr.matches(&entry("T", "x b y", Level::I)));
+    }
+
+    #[test]
+    fn test_from_filters_or_still_alternates_literal_values() {
+        let expr = Expr::from_filters(
+            &[],
+            &["(0)".to_string(), "<tag>".to_string()],
+            &[], &[], &[], None, false, SameFieldOp::Or,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expr.matches(&entry("T", "val=(0)", Level::I)));
+        assert!(expr.matches(&entry("T", "see <tag>", Level::I)));
+        assert!(!expr.matches(&entry("T", "val=0", Level::I)));
     }
 }
 
