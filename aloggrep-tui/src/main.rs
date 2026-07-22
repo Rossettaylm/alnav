@@ -9,9 +9,10 @@ mod input;
 mod model;
 mod picker;
 mod preview;
-mod search_model;
+mod highlight_model;
 mod theme;
 mod ui;
+mod vocab;
 
 use std::io::{self, IsTerminal};
 use std::time::Duration;
@@ -37,6 +38,7 @@ use filter_model::{Group, GroupList, TimeBound};
 /// the rendered viewport height (that's `ui.rs`'s job at render time), so a
 /// fixed page size is the simplest correct approach.
 const PAGE_SIZE: isize = 10;
+const LEVEL_CANDIDATES: &[&str] = &["V", "D", "I", "W", "E", "F"];
 
 #[derive(Parser)]
 #[command(
@@ -77,7 +79,7 @@ struct Cli {
     ignore_case: bool,
 
     /// Max in-memory lines before the oldest are evicted (streaming modes)
-    #[arg(long, default_value_t = 100_000)]
+    #[arg(long, default_value_t = 500_000)]
     max_lines: usize,
 
     /// Capture logs directly from hdc hilog (HarmonyOS device)
@@ -415,8 +417,8 @@ fn run<B: ratatui::backend::Backend>(
                 let outer_w = frame_area.width;
                 let filter_h = ui::filter_strip_height(app, outer_w);
                 let exclude_h = ui::exclude_strip_height(app, outer_w);
-                let search_h = ui::search_strip_height(app, outer_w);
-                let [filter_area, exclude_area, search_strip_area, log_area, status_area] =
+                let search_h = ui::highlight_strip_height(app, outer_w);
+                let [filter_area, exclude_area, highlight_strip_area, log_area, status_area] =
                     Layout::vertical([
                         Constraint::Length(filter_h),
                         Constraint::Length(exclude_h),
@@ -427,7 +429,7 @@ fn run<B: ratatui::backend::Backend>(
                     .areas(frame_area);
                 ui::render_chip_strip(app, frame, filter_area);
                 ui::render_exclude_chip_strip(app, frame, exclude_area);
-                ui::render_search_chip_strip(app, frame, search_strip_area);
+                ui::render_highlight_chip_strip(app, frame, highlight_strip_area);
                 ui::render_log_list(app, frame, log_area);
                 ui::render_status_bar(app, frame, status_area);
 
@@ -435,12 +437,15 @@ fn run<B: ratatui::backend::Backend>(
                 if let Some(data) = picker_render_data(app) {
                     ui::render_picker(
                         &data.title,
-                        data.prefix,
+                        &data.mode,
                         &data.text,
+                        &data.match_query,
                         &data.chips,
                         data.exclude_chips,
+                        data.draft_field,
                         &data.labels,
                         &data.styles,
+                        &data.checked,
                         data.selected,
                         &data.empty_msg,
                         &data.preview,
@@ -456,19 +461,19 @@ fn run<B: ratatui::backend::Backend>(
                         ui::render_confirm_dialog(confirm, frame, frame_area);
                     }
                 // Search / Input use top stack: modal → candidates → Preview (H1).
-                } else if app.search_box.editing {
+                } else if app.highlight_box.editing {
                     let area = ui::top_modal_rect(frame_area, modal_w, ui::search_modal_height());
-                    ui::render_search_modal(&app.search_box, frame, area);
+                    ui::render_highlight_modal(&app.highlight_box, frame, area);
                     let cand = app
-                        .search_box
-                        .candidate_indices(&app.search_groups.groups)
+                        .highlight_box
+                        .candidate_indices(&app.highlight_groups.groups)
                         .len();
                     let mut stack_bottom = area;
                     if cand > 0 {
                         let rect = popup_rect(area, frame_area, cand);
-                        ui::render_search_popup(
-                            &app.search_box,
-                            &app.search_groups.groups,
+                        ui::render_highlight_popup(
+                            &app.highlight_box,
+                            &app.highlight_groups.groups,
                             frame,
                             rect,
                         );
@@ -536,8 +541,8 @@ fn run<B: ratatui::backend::Backend>(
             handle_picker_key(app, key);
             continue;
         }
-        if app.search_box.editing {
-            handle_search_box_key(app, key);
+        if app.highlight_box.editing {
+            handle_highlight_box_key(app, key);
             continue;
         }
         // Ctrl+C: quit from Normal (like `q`), but only cancel in-progress
@@ -579,36 +584,41 @@ fn run<B: ratatui::backend::Backend>(
 
 struct PickerRenderData {
     title: String,
-    prefix: char,
+    mode: crate::picker::PickerMode,
     text: String,
+    /// Query used to color substring matches in the candidate list.
+    match_query: String,
     chips: Vec<input::Chip>,
     exclude_chips: bool,
+    /// Confirmed field awaiting a value (`tag:` prefix); Filter/Exclude New·Edit only.
+    draft_field: Option<input::ChipField>,
     labels: Vec<String>,
     styles: Vec<ratatui::style::Style>,
+    checked: Vec<bool>,
     selected: usize,
     empty_msg: String,
     preview: Vec<preview::PreviewLine>,
 }
 
 fn picker_render_data(app: &App) -> Option<PickerRenderData> {
-    use crate::picker::{PickerKind, PickerMode, PickerSession};
+    use crate::picker::{PickerKind, PickerMode, PickerSession, UnifiedKind};
 
     let session = app.picker.as_ref()?;
     let base_title = match session.kind {
-        PickerKind::ActionList => "Actions",
+        PickerKind::Unified => "Manage",
         PickerKind::Filter => "Filter",
-        PickerKind::Search => "Search",
+        PickerKind::Highlight => "Highlight",
         PickerKind::Bookmark => "Bookmark",
         PickerKind::Exclude => "Exclude",
         PickerKind::MsgChip { .. } => "Message",
     };
     let mode_name = match session.mode {
-        PickerMode::Manage => "Manage",
+        PickerMode::Manage => "Search",
         PickerMode::New => "New",
         PickerMode::Edit { .. } => "Edit",
     };
     let title = format!("{base_title} · {mode_name}");
-    let prefix = session.prompt_prefix();
+    let mode = session.mode.clone();
     let text = match session.mode {
         PickerMode::Manage => session.query.clone(),
         PickerMode::New | PickerMode::Edit { .. } => match session.kind {
@@ -620,94 +630,128 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
             _ => session.draft.clone(),
         },
     };
+    let match_query = text.clone();
     let mut selected = session.selected;
     let mut chips = Vec::new();
     let mut exclude_chips = false;
+    let mut draft_field = None;
     let mut labels = Vec::new();
     let mut styles = Vec::new();
+    let mut checked = Vec::new();
     let mut preview_lines = Vec::new();
     let mut empty_msg = "无项目".to_string();
 
     match session.mode {
         PickerMode::Manage => {
-            let all = picker_labels(app, session.kind);
-            let visible = PickerSession::filtered_indices(&all, &session.query);
-            labels = visible.iter().map(|&index| all[index].clone()).collect();
-            styles = vec![theme::muted(); labels.len()];
-
-            if let Some(&source_index) = visible.get(session.selected) {
-                match session.kind {
-                    PickerKind::ActionList => {
-                        const DESCRIPTIONS: [&str; 4] = [
-                            "管理包含过滤条件",
-                            "管理搜索与高亮",
-                            "管理会话书签",
-                            "管理排除条件",
-                        ];
-                        preview_lines.push(preview::PreviewLine {
-                            text: DESCRIPTIONS[source_index].to_string(),
-                            highlight: None,
-                        });
+            let all = unified_picker_items(app);
+            let all_labels: Vec<String> = all.iter().map(|item| item.label.clone()).collect();
+            let visible = PickerSession::filtered_indices(&all_labels, &session.query);
+            labels = visible.iter().map(|&index| all[index].label.clone()).collect();
+            styles = visible
+                .iter()
+                .map(|&index| {
+                    let item = &all[index];
+                    if item.enabled {
+                        theme::unified_kind_style(item.id.kind)
+                    } else {
+                        theme::disabled_chip_style()
                     }
-                    PickerKind::Search => {
-                        preview_lines = preview::preview_search_pattern_lines(
+                })
+                .collect();
+            checked = visible
+                .iter()
+                .map(|&index| session.checked.contains(&all[index].id))
+                .collect();
+
+            if let Some(&src) = visible.get(session.selected) {
+                let item = &all[src];
+                match item.id.kind {
+                    UnifiedKind::Highlight => {
+                        preview_lines = preview::preview_highlight_pattern_lines(
                             app,
-                            &app.search_groups.groups[source_index].pattern,
+                            &app.highlight_groups.groups[item.id.source_index].pattern,
                         )
                         .unwrap_or_default();
                     }
-                    PickerKind::Filter => {
+                    UnifiedKind::Filter => {
                         let input = input::InputBox {
-                            chips: app.groups.groups[source_index].chips.clone(),
+                            chips: app.groups.groups[item.id.source_index].chips.clone(),
                             ..input::InputBox::default()
                         };
                         preview_lines = preview::preview_filter_lines(app, &input);
                     }
-                    PickerKind::Exclude => {
+                    UnifiedKind::Exclude => {
                         let input = input::InputBox {
-                            chips: vec![app.groups.excludes[source_index].chip.clone()],
+                            chips: vec![app.groups.excludes[item.id.source_index].chip.clone()],
                             exclude_mode: true,
                             ..input::InputBox::default()
                         };
                         preview_lines = preview::preview_filter_lines(app, &input);
                     }
-                    PickerKind::Bookmark | PickerKind::MsgChip { .. } => {}
+                    UnifiedKind::Bookmark => {}
                 }
             }
         }
         PickerMode::New | PickerMode::Edit { .. } => match session.kind {
-            PickerKind::Search => {
-                let search_box = crate::search_model::SearchBox {
-                    draft: session.draft.clone(),
-                    editing: true,
-                    selected: session.selected,
-                };
-                let indices = search_box.candidate_indices(&app.search_groups.groups);
-                labels = indices
-                    .iter()
-                    .map(|&index| app.search_groups.groups[index].pattern.clone())
-                    .collect();
-                styles = vec![theme::muted(); labels.len()];
+            PickerKind::Highlight => {
+                if !session.draft.is_empty() {
+                    labels = app.vocab.all_candidates(&session.draft);
+                    styles = vec![theme::muted(); labels.len()];
+                } else {
+                    let highlight_box = crate::highlight_model::HighlightBox {
+                        draft: session.draft.clone(),
+                        editing: true,
+                        selected: session.selected,
+                    };
+                    let indices = highlight_box.candidate_indices(&app.highlight_groups.groups);
+                    labels = indices
+                        .iter()
+                        .map(|&index| app.highlight_groups.groups[index].pattern.clone())
+                        .collect();
+                    styles = vec![theme::muted(); labels.len()];
+                }
                 preview_lines =
-                    preview::preview_search_pattern_lines(app, &session.draft).unwrap_or_default();
-                empty_msg = "输入搜索词".to_string();
+                    preview::preview_highlight_pattern_lines(app, &session.draft).unwrap_or_default();
+                empty_msg = "输入高亮词".to_string();
             }
             PickerKind::Filter | PickerKind::Exclude => {
                 if let Some(input) = session.input.as_ref() {
                     chips = input.chips.clone();
                     exclude_chips = input.exclude_mode;
-                    let fields = input.field_candidates();
-                    labels = fields
-                        .iter()
-                        .map(|field| field.keyword().to_string())
-                        .collect();
-                    styles = fields
-                        .iter()
-                        .map(|field| {
-                            ratatui::style::Style::default().fg(theme::field_color(*field))
-                        })
-                        .collect();
-                    selected = input.field_selected;
+                    draft_field = input.draft_field;
+                    match input.draft_field {
+                        None => {
+                            let fields = input.field_candidates();
+                            labels = fields.iter().map(|f| f.keyword().to_string()).collect();
+                            styles = fields
+                                .iter()
+                                .map(|f| ratatui::style::Style::default().fg(theme::field_color(*f)))
+                                .collect();
+                            selected = input.field_selected;
+                        }
+                        Some(field) => {
+                            use crate::input::ChipField;
+                            let q = &input.draft;
+                            labels = match field {
+                                ChipField::Tag => app.vocab.tag_candidates(q),
+                                ChipField::Pkg => app.vocab.pkg_candidates(q),
+                                ChipField::Msg => app.vocab.msg_candidates(q),
+                                ChipField::Level => {
+                                    let ql = q.to_lowercase();
+                                    LEVEL_CANDIDATES
+                                        .iter()
+                                        .filter(|&&s| ql.is_empty() || s.to_lowercase().contains(&ql))
+                                        .map(|&s| s.to_string())
+                                        .collect()
+                                }
+                                ChipField::Pid | ChipField::Tid => vec![],
+                            };
+                            styles = vec![
+                                ratatui::style::Style::default().fg(theme::field_color(field));
+                                labels.len()
+                            ];
+                        }
+                    }
                     preview_lines = preview::preview_filter_lines(app, input);
                 }
                 empty_msg = "Enter 收 pill / 提交".to_string();
@@ -729,116 +773,132 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                 ];
                 empty_msg = "输入消息片段".to_string();
             }
-            PickerKind::ActionList => {}
+            PickerKind::Unified => {}
         },
     }
 
     Some(PickerRenderData {
         title,
-        prefix,
+        mode,
         text,
+        match_query,
         chips,
         exclude_chips,
+        draft_field,
         labels,
         styles,
+        checked,
         selected,
         empty_msg,
         preview: preview_lines,
     })
 }
 
-fn picker_labels(app: &App, kind: crate::picker::PickerKind) -> Vec<String> {
-    use crate::picker::{PickerKind, ACTION_LIST_LABELS};
+/// Aggregate Filter → Highlight → Exclude → Bookmark (newest-first) for Manage.
+fn unified_picker_items(app: &App) -> Vec<crate::picker::UnifiedItem> {
+    use crate::picker::{UnifiedId, UnifiedItem, UnifiedKind};
 
-    match kind {
-        PickerKind::ActionList => ACTION_LIST_LABELS
-            .iter()
-            .map(|label| (*label).to_string())
-            .collect(),
-        PickerKind::Filter => app
-            .groups
-            .groups
-            .iter()
-            .map(|group| group.label.clone())
-            .collect(),
-        PickerKind::Search => app
-            .search_groups
-            .groups
-            .iter()
-            .map(|group| group.pattern.clone())
-            .collect(),
-        PickerKind::Bookmark => app
-            .bookmarks
-            .items
-            .iter()
-            .rev()
-            .map(|bookmark| bookmark.label.clone())
-            .collect(),
-        PickerKind::Exclude => app
-            .groups
-            .excludes
-            .iter()
-            .map(|entry| format!("{}:{}", entry.chip.field.keyword(), entry.chip.value))
-            .collect(),
-        PickerKind::MsgChip { .. } => Vec::new(),
+    let mut items = Vec::new();
+    for (source_index, group) in app.groups.groups.iter().enumerate() {
+        items.push(UnifiedItem {
+            id: UnifiedId {
+                kind: UnifiedKind::Filter,
+                source_index,
+            },
+            label: format!("[{}]: {}", UnifiedKind::Filter.tag(), group.label),
+            enabled: group.enabled,
+        });
     }
+    for (source_index, group) in app.highlight_groups.groups.iter().enumerate() {
+        items.push(UnifiedItem {
+            id: UnifiedId {
+                kind: UnifiedKind::Highlight,
+                source_index,
+            },
+            label: format!("[{}]: {}", UnifiedKind::Highlight.tag(), group.pattern),
+            enabled: group.enabled,
+        });
+    }
+    for (source_index, entry) in app.groups.excludes.iter().enumerate() {
+        let body = format!("{}:{}", entry.chip.field.keyword(), entry.chip.value);
+        items.push(UnifiedItem {
+            id: UnifiedId {
+                kind: UnifiedKind::Exclude,
+                source_index,
+            },
+            label: format!("[{}]: {body}", UnifiedKind::Exclude.tag()),
+            enabled: entry.enabled,
+        });
+    }
+    for (displayed, bookmark) in app.bookmarks.items.iter().enumerate().rev() {
+        items.push(UnifiedItem {
+            id: UnifiedId {
+                kind: UnifiedKind::Bookmark,
+                source_index: displayed,
+            },
+            label: format!("[{}]: {}", UnifiedKind::Bookmark.tag(), bookmark.label),
+            enabled: bookmark.enabled,
+        });
+    }
+    items
 }
 
-fn picker_selected_source_index(app: &App) -> Option<usize> {
+fn unified_visible_ids(app: &App) -> Vec<crate::picker::UnifiedId> {
+    use crate::picker::PickerSession;
+
+    let session = match app.picker.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let all = unified_picker_items(app);
+    let labels: Vec<String> = all.iter().map(|item| item.label.clone()).collect();
+    let visible = PickerSession::filtered_indices(&labels, &session.query);
+    visible.iter().map(|&i| all[i].id).collect()
+}
+
+fn unified_selected_id(app: &App) -> Option<crate::picker::UnifiedId> {
     let session = app.picker.as_ref()?;
-    let labels = picker_labels(app, session.kind);
-    let visible =
-        crate::picker::PickerSession::filtered_indices(&labels, &session.query);
-    let displayed = visible.get(session.selected).copied()?;
-    if session.kind == crate::picker::PickerKind::Bookmark {
-        Some(app.bookmarks.items.len().checked_sub(displayed + 1)?)
-    } else {
-        Some(displayed)
-    }
+    let ids = unified_visible_ids(app);
+    ids.get(session.selected).copied()
 }
 
 fn confirm_picker_delete(app: &mut App) {
-    use crate::picker::{ConfirmKind, PickerKind};
+    use crate::picker::ConfirmKind;
 
-    let Some((kind, confirm)) = app
+    let Some(confirm) = app
         .picker
         .as_ref()
-        .and_then(|session| session.confirm.clone().map(|confirm| (session.kind, confirm)))
+        .and_then(|session| session.confirm.clone())
     else {
         return;
     };
-    match confirm {
-        ConfirmKind::DeleteOne { index } => match kind {
-            PickerKind::Filter => {
-                app.delete_filter_group_at(index);
-            }
-            PickerKind::Search => {
-                app.delete_search_group_at(index);
-            }
-            PickerKind::Bookmark => {
-                app.delete_bookmark_at(index);
-            }
-            PickerKind::Exclude => {
-                app.delete_exclude_group_at(index);
-            }
-            PickerKind::ActionList | PickerKind::MsgChip { .. } => {}
-        },
-        ConfirmKind::DeleteAll { .. } => match kind {
-            PickerKind::Filter => app.clear_filter_groups(),
-            PickerKind::Search => app.clear_search_groups(),
-            PickerKind::Bookmark => app.clear_bookmarks(),
-            PickerKind::Exclude => app.clear_exclude_groups(),
-            PickerKind::ActionList | PickerKind::MsgChip { .. } => {}
-        },
+    let ConfirmKind::DeleteMany { mut items } = confirm;
+    // Delete high indices first within each kind so earlier indices stay valid.
+    items.sort_by(|a, b| {
+        a.kind
+            .tag()
+            .cmp(b.kind.tag())
+            .then(b.source_index.cmp(&a.source_index))
+    });
+    for id in &items {
+        app.delete_unified_at(id.kind, id.source_index);
     }
-    let count = picker_labels(app, kind).len();
+    let count = unified_picker_items(app).len();
     if let Some(session) = app.picker.as_mut() {
         session.cancel_confirm();
+        session.checked.clear();
         session.selected = session.selected.min(count.saturating_sub(1));
     }
 }
 
-fn submit_search_picker(app: &mut App) {
+fn replace_last_token(draft: &str, replacement: &str) -> String {
+    match draft.rfind(' ') {
+        Some(pos) => format!("{} {}", &draft[..pos], replacement),
+        None => replacement.to_string(),
+    }
+}
+
+fn submit_highlight_picker(app: &mut App) {
     use crate::picker::PickerMode;
 
     let Some((mode, draft, candidate_selected)) = app
@@ -854,30 +914,29 @@ fn submit_search_picker(app: &mut App) {
     else {
         return;
     };
-    let mut search_box = crate::search_model::SearchBox {
+    let mut highlight_box = crate::highlight_model::HighlightBox {
         draft,
         editing: true,
         selected: candidate_selected,
     };
-    let Ok(Some(group)) = search_box.confirm_or_submit(&app.search_groups.groups) else {
+    let Ok(Some(group)) = highlight_box.confirm_or_submit(&app.highlight_groups.groups) else {
         return;
     };
     let selected = match mode {
-        PickerMode::New => app.push_or_find_search_group(group),
+        PickerMode::New => app.push_or_find_highlight_group(group),
         PickerMode::Edit { index } => {
             if !app.update_search_group(index, &group.pattern) {
                 app.set_flash("已存在");
                 return;
             }
-            app.active_search = Some(index);
+            app.active_highlight = Some(index);
             index
         }
         PickerMode::Manage => return,
     };
-    if let Some(session) = app.picker.as_mut() {
-        session.back_to_manage();
-        session.selected = selected;
-    }
+    app.active_highlight = Some(selected);
+    app.jump_first_match_of(selected);
+    app.close_picker();
 }
 
 fn submit_filter_picker(app: &mut App) {
@@ -994,10 +1053,12 @@ fn submit_filter_picker(app: &mut App) {
         }
         _ => return,
     };
-    if let Some(session) = app.picker.as_mut() {
-        session.back_to_manage();
-        session.selected = selected;
+    match kind {
+        PickerKind::Filter => app.group_cursor = selected,
+        PickerKind::Exclude => app.exclude_cursor = selected,
+        _ => {}
     }
+    app.close_picker();
 }
 
 fn submit_bookmark_picker(app: &mut App) {
@@ -1010,14 +1071,13 @@ fn submit_bookmark_picker(app: &mut App) {
     else {
         return;
     };
-    let selected = match mode {
+    match mode {
         PickerMode::New => {
             let before = app.bookmarks.len();
             app.bookmark_add_current();
             if app.bookmarks.len() == before {
                 return;
             }
-            0
         }
         PickerMode::Edit { index } => {
             if draft.is_empty() {
@@ -1030,14 +1090,10 @@ fn submit_bookmark_picker(app: &mut App) {
             if !app.update_bookmark_label(row_id, draft) {
                 return;
             }
-            app.bookmarks.len().saturating_sub(index + 1)
         }
         PickerMode::Manage => return,
     };
-    if let Some(session) = app.picker.as_mut() {
-        session.back_to_manage();
-        session.selected = selected;
-    }
+    app.close_picker();
 }
 
 fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
@@ -1059,23 +1115,8 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
 
     let is_ctrl_c = key.code == KeyCode::Char('c') && ctrl;
     if key.code == KeyCode::Esc || is_ctrl_c {
-        if app
-            .picker
-            .as_ref()
-            .is_some_and(|session| matches!(session.kind, PickerKind::MsgChip { .. }))
-        {
-            app.close_picker();
-            return;
-        }
-        if app
-            .picker
-            .as_ref()
-            .is_some_and(|session| !matches!(session.mode, PickerMode::Manage))
-        {
-            app.picker.as_mut().unwrap().back_to_manage();
-        } else {
-            app.close_picker();
-        }
+        // Any mode: close the picker (confirm dialog handled above).
+        app.close_picker();
         return;
     }
 
@@ -1088,112 +1129,109 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
     };
 
     if matches!(mode, PickerMode::Manage) {
-        let labels = picker_labels(app, kind);
+        let ids = unified_visible_ids(app);
         match key.code {
-            KeyCode::Up => app.picker.as_mut().unwrap().selected =
-                app.picker.as_ref().unwrap().selected.saturating_sub(1),
+            KeyCode::Up => {
+                app.picker.as_mut().unwrap().selected =
+                    app.picker.as_ref().unwrap().selected.saturating_sub(1);
+            }
             KeyCode::Down => {
                 let session = app.picker.as_mut().unwrap();
-                let count = PickerSession::filtered_indices(&labels, &session.query).len();
-                session.selected = (session.selected + 1).min(count.saturating_sub(1));
+                session.selected = (session.selected + 1).min(ids.len().saturating_sub(1));
             }
             KeyCode::Backspace => {
                 let session = app.picker.as_mut().unwrap();
                 session.query.pop();
                 session.selected = 0;
             }
-            KeyCode::Char(':') if !ctrl => app.picker.as_mut().unwrap().enter_new(),
-            KeyCode::Char('a') if ctrl => app.picker.as_mut().unwrap().enter_new(),
-            KeyCode::Char('e') if ctrl => {
-                let Some(index) = picker_selected_source_index(app) else {
+            KeyCode::Tab => {
+                let Some(id) = unified_selected_id(app) else {
                     return;
                 };
-                match kind {
-                    PickerKind::Search => {
-                        let pattern = app.search_groups.groups[index].pattern.clone();
-                        app.picker.as_mut().unwrap().enter_edit(index, pattern);
+                let session = app.picker.as_mut().unwrap();
+                if session.checked.contains(&id) {
+                    session.checked.remove(&id);
+                } else {
+                    session.checked.insert(id);
+                }
+                let count = ids.len();
+                session.selected = (session.selected + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Char('e') if ctrl => {
+                if app.picker.as_ref().is_some_and(|s| s.checked.len() > 1) {
+                    app.set_flash("不支持批量编辑");
+                    return;
+                }
+                let Some(id) = (|| {
+                    let session = app.picker.as_ref()?;
+                    if session.checked.len() == 1 {
+                        session.checked.iter().next().copied()
+                    } else {
+                        unified_selected_id(app)
                     }
-                    PickerKind::Filter => {
+                })() else {
+                    return;
+                };
+                use crate::picker::UnifiedKind;
+                match id.kind {
+                    UnifiedKind::Highlight => {
+                        let pattern =
+                            app.highlight_groups.groups[id.source_index].pattern.clone();
+                        let session = app.picker.as_mut().unwrap();
+                        session.kind = id.kind.as_picker_kind();
+                        session.enter_edit(id.source_index, pattern);
+                    }
+                    UnifiedKind::Filter => {
                         let input = crate::input::InputBox {
-                            chips: app.groups.groups[index].chips.clone(),
+                            chips: app.groups.groups[id.source_index].chips.clone(),
                             ..crate::input::InputBox::default()
                         };
-                        app.picker
-                            .as_mut()
-                            .unwrap()
-                            .enter_edit_input(index, input);
+                        let session = app.picker.as_mut().unwrap();
+                        session.kind = id.kind.as_picker_kind();
+                        session.enter_edit_input(id.source_index, input);
                     }
-                    PickerKind::Exclude => {
+                    UnifiedKind::Exclude => {
                         let input = crate::input::InputBox {
-                            chips: vec![app.groups.excludes[index].chip.clone()],
+                            chips: vec![app.groups.excludes[id.source_index].chip.clone()],
                             exclude_mode: true,
                             ..crate::input::InputBox::default()
                         };
-                        app.picker
-                            .as_mut()
-                            .unwrap()
-                            .enter_edit_input(index, input);
+                        let session = app.picker.as_mut().unwrap();
+                        session.kind = id.kind.as_picker_kind();
+                        session.enter_edit_input(id.source_index, input);
                     }
-                    PickerKind::Bookmark => {
-                        let label = app.bookmarks.items[index].label.clone();
-                        app.picker.as_mut().unwrap().enter_edit(index, label);
+                    UnifiedKind::Bookmark => {
+                        let label = app.bookmarks.items[id.source_index].label.clone();
+                        let session = app.picker.as_mut().unwrap();
+                        session.kind = id.kind.as_picker_kind();
+                        session.enter_edit(id.source_index, label);
                     }
-                    PickerKind::ActionList | PickerKind::MsgChip { .. } => {}
                 }
             }
             KeyCode::Char('d') if ctrl => {
-                if let Some(index) = picker_selected_source_index(app) {
-                    app.picker.as_mut().unwrap().request_delete_one(index);
-                }
-            }
-            KeyCode::Char('u') if ctrl => {
-                let count = labels.len();
-                if count > 0 {
-                    app.picker.as_mut().unwrap().request_delete_all(count);
+                let session = app.picker.as_ref().unwrap();
+                let items: Vec<crate::picker::UnifiedId> = if session.checked.is_empty() {
+                    unified_selected_id(app).into_iter().collect()
+                } else {
+                    session.checked.iter().copied().collect()
+                };
+                if !items.is_empty() {
+                    app.picker.as_mut().unwrap().request_delete_many(items);
                 }
             }
             KeyCode::Enter => {
-                let Some(index) = picker_selected_source_index(app) else {
+                let session = app.picker.as_ref().unwrap();
+                if !session.checked.is_empty() {
+                    let items: Vec<_> = session.checked.iter().copied().collect();
+                    for id in items {
+                        app.toggle_unified_enabled(id.kind, id.source_index);
+                    }
+                    return;
+                }
+                let Some(id) = unified_selected_id(app) else {
                     return;
                 };
-                match kind {
-                    PickerKind::ActionList => {
-                        let next = match index {
-                            0 => PickerKind::Filter,
-                            1 => PickerKind::Search,
-                            2 => PickerKind::Bookmark,
-                            3 => PickerKind::Exclude,
-                            _ => return,
-                        };
-                        app.open_picker(next);
-                    }
-                    PickerKind::Search => {
-                        app.active_search = Some(index);
-                        app.jump_first_match_of(index);
-                        app.close_picker();
-                    }
-                    PickerKind::Filter => {
-                        app.group_cursor = index;
-                        app.focus = app::Focus::ChipStrip;
-                        app.close_picker();
-                    }
-                    PickerKind::Exclude => {
-                        app.exclude_cursor = index;
-                        app.focus = app::Focus::ExcludeStrip;
-                        app.close_picker();
-                    }
-                    PickerKind::Bookmark => {
-                        use crate::bookmark::JumpResult;
-                        let row_id = app.bookmarks.items[index].row_id;
-                        app.close_picker();
-                        match app.jump_to_bookmark(row_id) {
-                            JumpResult::Ok => app.focus = app::Focus::LogList,
-                            JumpResult::Evicted => app.set_flash("已失效"),
-                            JumpResult::Filtered => app.set_flash("已过滤"),
-                        }
-                    }
-                    PickerKind::MsgChip { .. } => {}
-                }
+                app.toggle_unified_enabled(id.kind, id.source_index);
             }
             KeyCode::Char(c) if !ctrl => {
                 let session = app.picker.as_mut().unwrap();
@@ -1206,21 +1244,36 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
     }
 
     match kind {
-        PickerKind::Search => match key.code {
-            KeyCode::Enter => submit_search_picker(app),
+        PickerKind::Highlight => match key.code {
+            KeyCode::Enter => submit_highlight_picker(app),
             KeyCode::Up => {
                 let selected = app.picker.as_ref().unwrap().selected.saturating_sub(1);
                 app.picker.as_mut().unwrap().selected = selected;
             }
             KeyCode::Down => {
                 let session = app.picker.as_ref().unwrap();
-                let mut search_box = crate::search_model::SearchBox {
+                let mut highlight_box = crate::highlight_model::HighlightBox {
                     draft: session.draft.clone(),
                     editing: true,
                     selected: session.selected,
                 };
-                search_box.move_selection(&app.search_groups.groups, 1);
-                app.picker.as_mut().unwrap().selected = search_box.selected;
+                highlight_box.move_selection(&app.highlight_groups.groups, 1);
+                app.picker.as_mut().unwrap().selected = highlight_box.selected;
+            }
+            KeyCode::Tab => {
+                let (draft, selected) = {
+                    let session = app.picker.as_ref().unwrap();
+                    (session.draft.clone(), session.selected)
+                };
+                if !draft.is_empty() {
+                    let cands = app.vocab.all_candidates(&draft);
+                    if let Some(replacement) = cands.into_iter().nth(selected) {
+                        let new_draft = replace_last_token(&draft, &replacement);
+                        let session = app.picker.as_mut().unwrap();
+                        session.draft = new_draft;
+                        session.selected = 0;
+                    }
+                }
             }
             KeyCode::Backspace => {
                 let session = app.picker.as_mut().unwrap();
@@ -1236,13 +1289,99 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
         },
         PickerKind::Filter | PickerKind::Exclude => match key.code {
             KeyCode::Enter => submit_filter_picker(app),
+            KeyCode::Tab => {
+                let has_field = app
+                    .picker
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .as_ref()
+                    .map(|i| i.draft_field.is_some())
+                    .unwrap_or(false);
+
+                if has_field {
+                    let selected = app.picker.as_ref().unwrap().selected;
+                    let labels = {
+                        let session = app.picker.as_ref().unwrap();
+                        let input = session.input.as_ref().unwrap();
+                        use crate::input::ChipField;
+                        match input.draft_field.unwrap() {
+                            ChipField::Tag => app.vocab.tag_candidates(&input.draft),
+                            ChipField::Pkg => app.vocab.pkg_candidates(&input.draft),
+                            ChipField::Msg => app.vocab.msg_candidates(&input.draft),
+                            ChipField::Level => {
+                                let ql = input.draft.to_lowercase();
+                                LEVEL_CANDIDATES
+                                    .iter()
+                                    .filter(|&&s| ql.is_empty() || s.to_lowercase().contains(&ql))
+                                    .map(|&s| s.to_string())
+                                    .collect()
+                            }
+                            ChipField::Pid | ChipField::Tid => vec![],
+                        }
+                    };
+                    if let Some(value) = labels.into_iter().nth(selected) {
+                        if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
+                            input.draft = value;
+                        }
+                        app.picker.as_mut().unwrap().selected = 0;
+                    }
+                } else {
+                    let confirmed = app
+                        .picker
+                        .as_mut()
+                        .unwrap()
+                        .input
+                        .as_mut()
+                        .map(|i| i.confirm_field_candidate())
+                        .unwrap_or(false);
+                    if confirmed {
+                        app.picker.as_mut().unwrap().selected = 0;
+                    }
+                }
+            }
             KeyCode::Up => {
-                if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
+                let has_field = app
+                    .picker
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .as_ref()
+                    .map(|i| i.draft_field.is_some())
+                    .unwrap_or(false);
+                if has_field {
+                    let sel = app.picker.as_ref().unwrap().selected;
+                    app.picker.as_mut().unwrap().selected = sel.saturating_sub(1);
+                } else if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
                     input.move_field_selection(-1);
                 }
             }
             KeyCode::Down => {
-                if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
+                let has_field = app
+                    .picker
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .as_ref()
+                    .map(|i| i.draft_field.is_some())
+                    .unwrap_or(false);
+                if has_field {
+                    let labels_len = {
+                        let session = app.picker.as_ref().unwrap();
+                        let input = session.input.as_ref().unwrap();
+                        use crate::input::ChipField;
+                        match input.draft_field.unwrap() {
+                            ChipField::Tag => app.vocab.tag_candidates(&input.draft).len(),
+                            ChipField::Pkg => app.vocab.pkg_candidates(&input.draft).len(),
+                            ChipField::Msg => app.vocab.msg_candidates(&input.draft).len(),
+                            ChipField::Level => LEVEL_CANDIDATES.len(),
+                            ChipField::Pid | ChipField::Tid => 0,
+                        }
+                    };
+                    let sel = app.picker.as_ref().unwrap().selected;
+                    app.picker.as_mut().unwrap().selected =
+                        (sel + 1).min(labels_len.saturating_sub(1));
+                } else if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
                     input.move_field_selection(1);
                 }
             }
@@ -1301,7 +1440,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             }
             _ => {}
         },
-        PickerKind::ActionList => {}
+        PickerKind::Unified => {}
     }
 }
 
@@ -1333,7 +1472,7 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
 }
 
 /// Return keyboard focus to the log list without changing cursor / offset /
-/// following. Used when leaving ChipStrip/SearchStrip/Input/SearchBox.
+/// following. Used when leaving ChipStrip/HighlightStrip/Input/HighlightBox.
 fn focus_loglist(app: &mut App) {
     app.focus = app::Focus::LogList;
 }
@@ -1373,21 +1512,21 @@ fn handle_mouse_event(app: &mut App, mouse: event::MouseEvent) {
 }
 
 /// Independent of `handle_normal_key`/`handle_insert_key`/`handle_ctrl_c`:
-/// dispatched before any of them while `app.search_box.editing`. Ctrl+C
+/// dispatched before any of them while `app.highlight_box.editing`. Ctrl+C
 /// here cancels the draft (like Esc), not quit. Invalid regex on Enter is
 /// silently ignored so a typo can't end the session or drop existing groups.
 /// Enter/Tab with history candidates mirrors Input field-popup confirm.
-fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
+fn handle_highlight_box_key(app: &mut App, key: event::KeyEvent) {
     let is_ctrl_c =
         key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Up => app.search_box.move_selection(&app.search_groups.groups, -1),
-        KeyCode::Down => app.search_box.move_selection(&app.search_groups.groups, 1),
+        KeyCode::Up => app.highlight_box.move_selection(&app.highlight_groups.groups, -1),
+        KeyCode::Down => app.highlight_box.move_selection(&app.highlight_groups.groups, 1),
         KeyCode::Enter | KeyCode::Tab => {
-            match app.search_box.confirm_or_submit(&app.search_groups.groups) {
+            match app.highlight_box.confirm_or_submit(&app.highlight_groups.groups) {
                 Ok(Some(group)) => {
-                    let idx = app.push_or_find_search_group(group);
-                    app.search_box.clear();
+                    let idx = app.push_or_find_highlight_group(group);
+                    app.highlight_box.clear();
                     let _ = app.jump_first_match_of(idx);
                     app.focus = app::Focus::LogList;
                 }
@@ -1396,21 +1535,21 @@ fn handle_search_box_key(app: &mut App, key: event::KeyEvent) {
                 }
                 Err(()) => {
                     // bad regex: exit editing, keep prior search groups
-                    app.search_box.clear();
+                    app.highlight_box.clear();
                     focus_loglist(app);
                 }
             }
         }
         KeyCode::Esc => {
-            app.search_box.clear();
+            app.highlight_box.clear();
             focus_loglist(app);
         }
         _ if is_ctrl_c => {
-            app.search_box.clear();
+            app.highlight_box.clear();
             focus_loglist(app);
         }
-        KeyCode::Backspace => app.search_box.backspace(),
-        KeyCode::Char(c) => app.search_box.push_char(c),
+        KeyCode::Backspace => app.highlight_box.backspace(),
+        KeyCode::Char(c) => app.highlight_box.push_char(c),
         _ => {}
     }
 }
@@ -1421,7 +1560,7 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
         (kind, app.focus),
         (StripKind::Filter, app::Focus::ChipStrip)
             | (StripKind::Exclude, app::Focus::ExcludeStrip)
-            | (StripKind::Search, app::Focus::SearchStrip)
+            | (StripKind::Highlight, app::Focus::HighlightStrip)
     ) {
         return false;
     }
@@ -1452,16 +1591,11 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
 }
 
 fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
-    use crate::picker::PickerKind;
-
     if app.pending_leader {
         app.pending_leader = false;
         match code {
-            KeyCode::Char('/') => app.open_picker(PickerKind::ActionList),
-            KeyCode::Char('f') => app.open_picker(PickerKind::Filter),
-            KeyCode::Char('s') => app.open_picker(PickerKind::Search),
-            KeyCode::Char('m') => app.open_picker(PickerKind::Bookmark),
-            KeyCode::Char('x') => app.open_picker(PickerKind::Exclude),
+            // Leader+Leader → unified Manage search panel
+            KeyCode::Char(' ') => app.open_unified_picker(),
             KeyCode::Esc => {}
             _ => app.set_flash("未知 Leader"),
         }
@@ -1674,7 +1808,8 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         }
     }
 
-    // Bookmark operator pending (`m` + a/m/d). Esc clears pending only.
+    // Bookmark operator pending (`m`/`M` + a/d/m/M). Esc clears pending only.
+    // `mm` → Manage, `MM` → New; mixed case on the second key follows that key.
     if app.pending_m {
         app.pending_m = false;
         if app.focus == Focus::LogList {
@@ -1682,6 +1817,9 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                 KeyCode::Esc => app.cancel_bookmark_op(),
                 KeyCode::Char('a') => app.bookmark_add_current(),
                 KeyCode::Char('d') => app.bookmark_remove_current(),
+                KeyCode::Char('m') => {
+                    app.open_picker_new(crate::picker::PickerKind::Bookmark);
+                }
                 _ => app.set_flash("未知"),
             }
         }
@@ -1695,7 +1833,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
     if handle_strip_d_chord(app, StripKind::Exclude, code) {
         return;
     }
-    if handle_strip_d_chord(app, StripKind::Search, code) {
+    if handle_strip_d_chord(app, StripKind::Highlight, code) {
         return;
     }
     if code != KeyCode::Char('d') {
@@ -1704,25 +1842,13 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
 
     match (app.focus, code) {
         (_, KeyCode::Char('q')) => app.should_quit = true,
-        (_, KeyCode::Tab) => {
-            app.cycle_focus_forward();
-            if app.focus == Focus::Input {
-                app.focus = Focus::LogList;
-                app.open_picker(crate::picker::PickerKind::Filter);
-            }
-        }
-        (_, KeyCode::BackTab) => {
-            app.cycle_focus_backward();
-            if app.focus == Focus::Input {
-                app.focus = Focus::LogList;
-                app.open_picker(crate::picker::PickerKind::Filter);
-            }
-        }
+        (_, KeyCode::Tab) => app.cycle_visible_focus_forward(),
+        (_, KeyCode::BackTab) => app.cycle_visible_focus_backward(),
         (_, KeyCode::Char('1')) => app.focus = Focus::ChipStrip,
         (_, KeyCode::Char('2')) => app.focus = Focus::ExcludeStrip,
-        (_, KeyCode::Char('3')) => app.focus = Focus::SearchStrip,
+        (_, KeyCode::Char('3')) => app.focus = Focus::HighlightStrip,
         (_, KeyCode::Char('4')) => app.focus = Focus::LogList,
-        (_, KeyCode::Char('5')) => app.open_picker(crate::picker::PickerKind::Filter),
+        (_, KeyCode::Char('5')) => app.open_unified_picker(),
         (_, KeyCode::Esc) => {
             // H4: Esc closes detail only — does not resume_following.
             if app.detail_open() {
@@ -1761,7 +1887,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (Focus::LogList, KeyCode::Char('f')) => {
             app.begin_lock_from_cursor();
         }
-        (Focus::LogList, KeyCode::Char('m')) => {
+        (Focus::LogList, KeyCode::Char('m') | KeyCode::Char('M')) => {
             app.begin_bookmark_op();
         }
         (Focus::LogList, KeyCode::Char('y')) => {
@@ -1798,14 +1924,17 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (Focus::ChipStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Filter, 1),
         (Focus::ExcludeStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Exclude, -1),
         (Focus::ExcludeStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Exclude, 1),
-        (Focus::SearchStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Search, -1),
-        (Focus::SearchStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Search, 1),
-        (_, KeyCode::Char(':')) => {
-            app.open_picker(crate::picker::PickerKind::Filter);
-            app.picker
-                .as_mut()
-                .expect("filter picker just opened")
-                .enter_new();
+        (Focus::HighlightStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Highlight, -1),
+        (Focus::HighlightStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Highlight, 1),
+        // Unified Manage: Space Space · New: `;` Filter · `/` Highlight · `` ` `` Exclude · `mm` Bookmark
+        (_, KeyCode::Char(';')) => {
+            app.open_picker_new(crate::picker::PickerKind::Filter);
+        }
+        (_, KeyCode::Char('/')) => {
+            app.open_picker_new(crate::picker::PickerKind::Highlight);
+        }
+        (_, KeyCode::Char('`')) => {
+            app.open_picker_new(crate::picker::PickerKind::Exclude);
         }
         _ => {}
     }
@@ -1905,48 +2034,199 @@ mod dispatch_tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     #[test]
-    fn space_f_opens_filter_picker() {
+    fn space_f_no_longer_opens_filter_picker() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
         assert!(app.pending_leader);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
         assert!(!app.pending_leader);
-        assert!(matches!(
-            app.picker.as_ref().map(|p| p.kind),
-            Some(crate::picker::PickerKind::Filter)
-        ));
-    }
-
-    #[test]
-    fn slash_alone_no_longer_opens_search_box() {
-        let mut app = App::new(100);
-        let mut input = input::InputBox::default();
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
-        assert!(!app.search_box.editing);
         assert!(app.picker.is_none());
     }
 
     #[test]
+    fn slash_opens_highlight_new() {
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
+        assert!(!app.highlight_box.editing);
+        let picker = app.picker.as_ref().expect("highlight picker");
+        assert_eq!(picker.kind, PickerKind::Highlight);
+        assert_eq!(picker.mode, PickerMode::New);
+    }
+
+    #[test]
+    fn space_space_opens_unified_manage() {
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        assert!(app.pending_leader);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        assert!(!app.pending_leader);
+        let picker = app.picker.as_ref().expect("unified picker");
+        assert_eq!(picker.kind, PickerKind::Unified);
+        assert_eq!(picker.mode, PickerMode::Manage);
+    }
+
+    #[test]
+    fn bare_keys_open_unified_or_new() {
+        use crate::filter_model::Group;
+        use crate::highlight_model::HighlightGroup;
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.groups.groups.push(Group {
+            label: "g".into(),
+            chips: Vec::new(),
+            expr: None,
+            time: None,
+            enabled: true,
+        });
+        app.highlight_groups
+            .groups
+            .push(HighlightGroup::from_pattern("err").unwrap());
+        assert!(app
+            .groups
+            .push_exclude(crate::input::Chip {
+                field: crate::input::ChipField::Tag,
+                value: "noise".into(),
+            })
+            .unwrap());
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(';'));
+        let filter_new = app.picker.as_ref().expect("; opens filter New");
+        assert_eq!(filter_new.kind, PickerKind::Filter);
+        assert_eq!(filter_new.mode, PickerMode::New);
+        app.close_picker();
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
+        let hl = app.picker.as_ref().unwrap();
+        assert_eq!(hl.kind, PickerKind::Highlight);
+        assert_eq!(hl.mode, PickerMode::New);
+        app.close_picker();
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('`'));
+        let exclude = app.picker.as_ref().expect("` opens exclude New");
+        assert_eq!(exclude.kind, PickerKind::Exclude);
+        assert_eq!(exclude.mode, PickerMode::New);
+        app.close_picker();
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        assert!(app.pending_m);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        assert!(!app.pending_m);
+        let bookmark = app.picker.as_ref().expect("mm opens bookmark New");
+        assert_eq!(bookmark.kind, PickerKind::Bookmark);
+        assert_eq!(bookmark.mode, PickerMode::New);
+    }
+
+    #[test]
+    fn manage_no_match_stays_in_manage() {
+        use crate::highlight_model::HighlightGroup;
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        app.highlight_groups
+            .groups
+            .push(HighlightGroup::from_pattern("error").unwrap());
+        app.open_unified_picker();
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::Manage);
+        assert_eq!(app.picker.as_ref().unwrap().kind, PickerKind::Unified);
+
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+        );
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.mode, PickerMode::Manage);
+        assert_eq!(picker.query, "z");
+        assert!(picker.draft.is_empty());
+    }
+
+    #[test]
+    fn manual_new_clears_draft_stays_in_new() {
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(';'));
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
+
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.mode, PickerMode::New);
+        assert_eq!(picker.kind, PickerKind::Filter);
+        assert!(picker
+            .input
+            .as_ref()
+            .is_some_and(|box_| box_.is_empty()));
+    }
+
+    #[test]
+    fn open_picker_new_forces_new_mode() {
+        use crate::picker::{PickerKind, PickerMode};
+
+        for kind in [
+            PickerKind::Filter,
+            PickerKind::Highlight,
+            PickerKind::Exclude,
+            PickerKind::Bookmark,
+        ] {
+            let mut app = App::new(100);
+            app.following = false;
+            app.open_picker_new(kind);
+            assert_eq!(
+                app.picker.as_ref().unwrap().mode,
+                PickerMode::New,
+                "{kind:?} must open New"
+            );
+            handle_picker_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(app.picker.is_none(), "{kind:?} Esc from New closes");
+            assert!(!app.following);
+        }
+    }
+
+    #[test]
+    fn unified_picker_opens_in_manage_even_when_empty() {
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        app.open_unified_picker();
+        assert_eq!(app.picker.as_ref().unwrap().kind, PickerKind::Unified);
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::Manage);
+    }
+
+    #[test]
     fn picker_esc_closes_without_resuming_following() {
+        use crate::picker::PickerKind;
+
         let mut app = App::new(100);
         app.following = false;
-        app.open_picker(crate::picker::PickerKind::Search);
+        app.open_picker_new(PickerKind::Highlight);
         handle_picker_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.picker.is_none());
         assert!(!app.following);
     }
 
     #[test]
-    fn search_picker_new_submit_returns_to_manage_with_item_selected() {
+    fn highlight_picker_new_submit_closes_picker() {
         use crate::picker::{PickerKind, PickerMode};
 
         let mut app = App::new(100);
-        app.open_picker(PickerKind::Search);
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
-        );
+        app.open_picker_new(PickerKind::Highlight);
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
         for c in "error".chars() {
             handle_picker_key(
                 &mut app,
@@ -1958,21 +2238,29 @@ mod dispatch_tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
 
-        assert_eq!(app.search_groups.groups.len(), 1);
-        assert_eq!(app.search_groups.groups[0].pattern, "error");
-        let picker = app.picker.as_ref().expect("picker stays open");
-        assert_eq!(picker.mode, PickerMode::Manage);
-        assert_eq!(picker.selected, 0);
+        assert_eq!(app.highlight_groups.groups.len(), 1);
+        assert_eq!(app.highlight_groups.groups[0].pattern, "error");
+        assert!(app.picker.is_none());
+        assert_eq!(app.active_highlight, Some(0));
+        assert_eq!(app.focus, app::Focus::LogList);
     }
 
     #[test]
-    fn search_picker_delete_requires_confirm_and_can_cancel() {
-        use crate::picker::PickerKind;
-        use crate::search_model::SearchGroup;
+    fn picker_esc_from_unified_closes() {
+        let mut app = App::new(100);
+        app.open_unified_picker();
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.picker.is_none());
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn unified_delete_requires_confirm_and_can_cancel() {
+        use crate::highlight_model::HighlightGroup;
 
         let mut app = App::new(100);
-        app.push_or_find_search_group(SearchGroup::from_pattern("error").unwrap());
-        app.open_picker(PickerKind::Search);
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("error").unwrap());
+        app.open_unified_picker();
 
         handle_picker_key(
             &mut app,
@@ -1992,7 +2280,7 @@ mod dispatch_tests {
             &mut app,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
-        assert_eq!(app.search_groups.groups.len(), 1);
+        assert_eq!(app.highlight_groups.groups.len(), 1);
         assert!(app.picker.as_ref().unwrap().confirm.is_none());
 
         handle_picker_key(
@@ -2003,14 +2291,13 @@ mod dispatch_tests {
             &mut app,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
-        assert!(app.search_groups.groups.is_empty());
+        assert!(app.highlight_groups.groups.is_empty());
         assert!(app.picker.is_some());
     }
 
     #[test]
-    fn filter_picker_manage_enter_focuses_selected_strip_group() {
+    fn unified_enter_toggles_enabled_and_stays_open() {
         use crate::filter_model::Group;
-        use crate::picker::PickerKind;
 
         let mut app = App::new(100);
         app.groups.groups.push(Group {
@@ -2027,7 +2314,7 @@ mod dispatch_tests {
             time: None,
             enabled: true,
         });
-        app.open_picker(PickerKind::Filter);
+        app.open_unified_picker();
         handle_picker_key(
             &mut app,
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
@@ -2037,22 +2324,54 @@ mod dispatch_tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
 
-        assert!(app.picker.is_none());
-        assert_eq!(app.focus, app::Focus::ChipStrip);
-        assert_eq!(app.group_cursor, 1);
+        assert!(app.picker.is_some());
+        assert!(app.groups.groups[0].enabled);
+        assert!(!app.groups.groups[1].enabled);
+    }
+
+    #[test]
+    fn unified_tab_multiselect_enter_batch_toggles_enabled() {
+        use crate::filter_model::Group;
+        use crate::highlight_model::HighlightGroup;
+
+        let mut app = App::new(100);
+        app.groups.groups.push(Group {
+            label: "f1".into(),
+            chips: Vec::new(),
+            expr: None,
+            time: None,
+            enabled: true,
+        });
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("h1").unwrap());
+        app.open_unified_picker();
+
+        // Tab marks first item and moves to second
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().checked.len(), 1);
+        assert_eq!(app.picker.as_ref().unwrap().selected, 1);
+        // Tab marks second
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().checked.len(), 2);
+
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(app.picker.as_ref().unwrap().confirm.is_none());
+        assert!(!app.groups.groups[0].enabled);
+        assert!(!app.highlight_groups.groups[0].enabled);
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.highlight_groups.groups.len(), 1);
     }
 
     #[test]
     fn exclude_picker_rejects_second_chip_draft() {
         use crate::input::{Chip, ChipField};
-        use crate::picker::PickerKind;
+        use crate::picker::{PickerKind, PickerMode};
 
         let mut app = App::new(100);
-        app.open_picker(PickerKind::Exclude);
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
-        );
+        app.open_picker_new(PickerKind::Exclude);
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
         app.picker
             .as_mut()
             .unwrap()
@@ -2076,15 +2395,15 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn filtered_search_edit_submit_clears_query_and_selects_source_index() {
-        use crate::picker::{PickerKind, PickerMode};
-        use crate::search_model::SearchGroup;
+    fn filtered_highlight_edit_submit_closes_and_updates_pattern() {
+        use crate::picker::PickerMode;
+        use crate::highlight_model::HighlightGroup;
 
         let mut app = App::new(100);
         for pattern in ["alpha", "error", "warn"] {
-            app.push_or_find_search_group(SearchGroup::from_pattern(pattern).unwrap());
+            app.push_or_find_highlight_group(HighlightGroup::from_pattern(pattern).unwrap());
         }
-        app.open_picker(PickerKind::Search);
+        app.open_unified_picker();
         for c in "warn".chars() {
             handle_picker_key(
                 &mut app,
@@ -2108,11 +2427,9 @@ mod dispatch_tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
 
-        let picker = app.picker.as_ref().unwrap();
-        assert_eq!(picker.mode, PickerMode::Manage);
-        assert!(picker.query.is_empty());
-        assert_eq!(picker.selected, 2);
-        assert_eq!(picker_selected_source_index(&app), Some(2));
+        assert!(app.picker.is_none());
+        assert_eq!(app.highlight_groups.groups[2].pattern, "warni");
+        assert_eq!(app.active_highlight, Some(2));
     }
 
     #[test]
@@ -2205,23 +2522,23 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_search_box_tab_confirms_selected_candidate() {
+    fn test_highlight_box_tab_confirms_selected_candidate() {
         let mut app = App::new(100);
-        app.search_groups
+        app.highlight_groups
             .groups
-            .push(search_model::SearchGroup::from_pattern("error").unwrap());
-        app.search_groups
+            .push(highlight_model::HighlightGroup::from_pattern("error").unwrap());
+        app.highlight_groups
             .groups
-            .push(search_model::SearchGroup::from_pattern("errno").unwrap());
-        app.search_box.begin_editing();
+            .push(highlight_model::HighlightGroup::from_pattern("errno").unwrap());
+        app.highlight_box.begin_editing();
         for c in "er".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(!app.search_box.editing);
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!app.highlight_box.editing);
         assert_eq!(
-            app.search_groups.groups.len(),
+            app.highlight_groups.groups.len(),
             2,
             "must reuse existing, not add"
         );
@@ -2229,32 +2546,107 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_search_box_enter_creates_when_no_candidate_match() {
+    fn test_highlight_box_enter_creates_when_no_candidate_match() {
         let mut app = App::new(100);
-        app.search_groups
+        app.highlight_groups
             .groups
-            .push(search_model::SearchGroup::from_pattern("error").unwrap());
-        app.search_box.begin_editing();
+            .push(highlight_model::HighlightGroup::from_pattern("error").unwrap());
+        app.highlight_box.begin_editing();
         for c in "unique".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.search_groups.groups.len(), 2);
-        assert_eq!(app.search_groups.groups[1].pattern, "unique");
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.highlight_groups.groups.len(), 2);
+        assert_eq!(app.highlight_groups.groups[1].pattern, "unique");
     }
 
     #[test]
-    fn test_colon_opens_filter_picker_in_new_mode() {
+    fn test_semicolon_opens_filter_picker_in_new() {
         use crate::picker::{PickerKind, PickerMode};
 
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
-        super::handle_normal_key(&mut app, &mut input, KeyCode::Char(':'));
-        let picker = app.picker.as_ref().expect(": must open picker");
+        super::handle_normal_key(&mut app, &mut input, KeyCode::Char(';'));
+        let picker = app.picker.as_ref().expect("; must open filter New");
         assert_eq!(picker.kind, PickerKind::Filter);
         assert_eq!(picker.mode, PickerMode::New);
         assert_eq!(app.mode, app::Mode::Normal);
         assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn test_backtick_opens_exclude_picker() {
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        super::handle_normal_key(&mut app, &mut input, KeyCode::Char('`'));
+        let picker = app.picker.as_ref().expect("` must open exclude picker");
+        assert_eq!(picker.kind, PickerKind::Exclude);
+        // Empty excludes → New (same rule as Filter/Highlight/Bookmark).
+        assert_eq!(picker.mode, PickerMode::New);
+        assert_eq!(app.mode, app::Mode::Normal);
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn filter_picker_enter_confirms_field_candidate_without_pill() {
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        app.open_picker_new(PickerKind::Filter);
+        for c in "tag".chars() {
+            handle_picker_key(
+                &mut app,
+                event::KeyEvent::new(KeyCode::Char(c), event::KeyModifiers::NONE),
+            );
+        }
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
+        );
+        let input = app
+            .picker
+            .as_ref()
+            .and_then(|session| session.input.as_ref())
+            .expect("filter new keeps InputBox");
+        assert_eq!(input.draft_field, Some(input::ChipField::Tag));
+        assert!(input.draft.is_empty());
+        assert!(input.chips.is_empty(), "field confirm must not commit a pill");
+        assert!(matches!(
+            app.picker.as_ref().map(|session| &session.mode),
+            Some(PickerMode::New)
+        ));
+        let data = picker_render_data(&app).unwrap();
+        assert_eq!(data.draft_field, Some(input::ChipField::Tag));
+        assert!(data.text.is_empty());
+    }
+
+    #[test]
+    fn filter_picker_tab_confirms_field_candidate() {
+        use crate::picker::PickerKind;
+
+        let mut app = App::new(100);
+        app.open_picker_new(PickerKind::Filter);
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('t'), event::KeyModifiers::NONE),
+        );
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Down, event::KeyModifiers::NONE),
+        ); // tid
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Tab, event::KeyModifiers::NONE),
+        );
+        let input = app
+            .picker
+            .as_ref()
+            .and_then(|session| session.input.as_ref())
+            .unwrap();
+        assert_eq!(input.draft_field, Some(input::ChipField::Tid));
+        assert!(input.draft.is_empty());
     }
 
     #[test]
@@ -2269,14 +2661,14 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_number_keys_switch_focus_and_5_opens_filter_picker() {
+    fn test_number_keys_switch_focus_and_5_opens_unified_picker() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('5'));
         assert!(matches!(
             app.picker.as_ref().map(|picker| picker.kind),
-            Some(crate::picker::PickerKind::Filter)
+            Some(crate::picker::PickerKind::Unified)
         ));
         app.close_picker();
 
@@ -2287,7 +2679,7 @@ mod dispatch_tests {
         assert_eq!(app.focus, app::Focus::ExcludeStrip);
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('3'));
-        assert_eq!(app.focus, app::Focus::SearchStrip);
+        assert_eq!(app.focus, app::Focus::HighlightStrip);
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('4'));
         assert_eq!(app.focus, app::Focus::LogList);
@@ -2545,25 +2937,62 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_tab_in_insert_cycles_focus_and_normal_tab_opens_filter_picker() {
+    fn test_tab_in_insert_cycles_focus_and_normal_tab_cycles_visible_only() {
+        use crate::filter_model::Group;
+        use crate::highlight_model::HighlightGroup;
+        use crate::input::{Chip, ChipField};
+
+        // Insert Tab still cycles through every region (Input is a valid
+        // editing target there); draft is preserved.
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         focus_input_insert(&mut app);
-        input.push_char('x'); // draft preserved across Tab
+        input.push_char('x');
         handle_insert_key(&mut app, &mut input, KeyCode::Tab).unwrap();
         assert_eq!(app.focus, app::Focus::ChipStrip);
         assert_eq!(app.mode, app::Mode::Normal);
         assert_eq!(input.draft, "x");
-        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // ChipStrip → ExcludeStrip
+
+        // Normal Tab with all strips empty: only LogList is visible, so Tab
+        // stays on LogList and never opens the unified picker.
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab);
+        assert_eq!(app.focus, app::Focus::LogList);
+        assert!(app.picker.is_none());
+
+        // Populate all three strips so they become visible.
+        app.groups.groups.push(Group {
+            label: "g".into(),
+            chips: Vec::new(),
+            expr: None,
+            time: None,
+            enabled: true,
+        });
+        assert!(app
+            .groups
+            .push_exclude(Chip {
+                field: ChipField::Tag,
+                value: "noise".into(),
+            })
+            .unwrap());
+        app.highlight_groups
+            .groups
+            .push(HighlightGroup::from_pattern("err").unwrap());
+
+        // From LogList, BackTab lands on HighlightStrip (last visible region).
+        handle_normal_key(&mut app, &mut input, KeyCode::BackTab);
+        assert_eq!(app.focus, app::Focus::HighlightStrip);
+        // Forward cycle wraps to the head then advances:
+        // Highlight → LogList → ChipStrip → ExcludeStrip → Highlight.
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab);
+        assert_eq!(app.focus, app::Focus::LogList);
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab);
+        assert_eq!(app.focus, app::Focus::ChipStrip);
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab);
         assert_eq!(app.focus, app::Focus::ExcludeStrip);
-        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → SearchStrip
-        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → LogList
-        handle_normal_key(&mut app, &mut input, KeyCode::Tab); // → Filter picker
-        assert!(matches!(
-            app.picker.as_ref().map(|picker| picker.kind),
-            Some(crate::picker::PickerKind::Filter)
-        ));
-        assert_eq!(app.mode, app::Mode::Normal);
+        handle_normal_key(&mut app, &mut input, KeyCode::Tab);
+        assert_eq!(app.focus, app::Focus::HighlightStrip);
+        // Never opens the unified picker via Tab.
+        assert!(app.picker.is_none());
     }
 
     #[test]
@@ -2669,20 +3098,20 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_search_box_enter_adds_group_ignore_case() {
+    fn test_highlight_box_enter_adds_group_ignore_case() {
         let mut app = App::new(100);
-        app.search_box.editing = true;
+        app.highlight_box.editing = true;
         for c in "ERROR".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(!app.search_box.editing);
-        assert_eq!(app.search_groups.groups.len(), 1);
-        assert!(app.search_groups.any_match("", "an error occurred"));
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.highlight_box.editing);
+        assert_eq!(app.highlight_groups.groups.len(), 1);
+        assert!(app.highlight_groups.any_match("", "an error occurred"));
     }
 
     #[test]
-    fn test_search_box_enter_jumps_to_first_match() {
+    fn test_highlight_box_enter_jumps_to_first_match() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap())
@@ -2698,31 +3127,31 @@ mod dispatch_tests {
         app.following = true;
         app.cursor = 2;
 
-        app.search_box.editing = true;
+        app.highlight_box.editing = true;
         for c in "findme".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.cursor, 1);
         assert!(!app.following);
         assert_eq!(app.focus, app::Focus::LogList);
     }
 
     #[test]
-    fn test_search_box_space_is_literal_single_enter_submits() {
+    fn test_highlight_box_space_is_literal_single_enter_submits() {
         let mut app = App::new(100);
-        app.search_box.editing = true;
+        app.highlight_box.editing = true;
         for c in "foo bar".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.search_groups.groups.len(), 1);
-        assert_eq!(app.search_groups.groups[0].pattern, "foo bar");
-        assert_eq!(app.search_groups.active_patterns().len(), 1);
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.highlight_groups.groups.len(), 1);
+        assert_eq!(app.highlight_groups.groups[0].pattern, "foo bar");
+        assert_eq!(app.highlight_groups.active_patterns().len(), 1);
     }
 
     #[test]
-    fn test_search_box_duplicate_jumps_without_adding() {
+    fn test_highlight_box_duplicate_jumps_without_adding() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap())
@@ -2736,22 +3165,22 @@ mod dispatch_tests {
         app.following = false;
         app.cursor = 0;
 
-        app.search_box.editing = true;
+        app.highlight_box.editing = true;
         for c in "findme".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.search_groups.groups.len(), 1);
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.highlight_groups.groups.len(), 1);
         assert_eq!(app.cursor, 1);
 
         app.cursor = 0;
-        app.search_box.editing = true;
+        app.highlight_box.editing = true;
         for c in "FINDME".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            app.search_groups.groups.len(),
+            app.highlight_groups.groups.len(),
             1,
             "duplicate must not add another group"
         );
@@ -2780,49 +3209,49 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_search_box_ctrl_c_cancels_without_adding() {
+    fn test_highlight_box_ctrl_c_cancels_without_adding() {
         let mut app = App::new(100);
-        app.search_box.editing = true;
-        app.search_box.push_char('x');
-        handle_search_box_key(
+        app.highlight_box.editing = true;
+        app.highlight_box.push_char('x');
+        handle_highlight_box_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
-        assert!(!app.search_box.editing);
-        assert!(app.search_groups.groups.is_empty());
+        assert!(!app.highlight_box.editing);
+        assert!(app.highlight_groups.groups.is_empty());
     }
 
     #[test]
-    fn test_search_box_literal_metacharacters_do_not_drop_prior_groups() {
+    fn test_highlight_box_literal_metacharacters_do_not_drop_prior_groups() {
         // Patterns are literal (regex-escaped); metacharacters are valid input.
         let mut app = App::new(100);
-        app.search_groups
+        app.highlight_groups
             .groups
-            .push(search_model::SearchGroup::from_pattern("existing").unwrap());
-        app.search_box.editing = true;
+            .push(highlight_model::HighlightGroup::from_pattern("existing").unwrap());
+        app.highlight_box.editing = true;
         for c in "(unclosed".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(!app.search_box.editing);
-        assert_eq!(app.search_groups.groups.len(), 2);
-        assert!(app.search_groups.any_match("", "existing"));
-        assert!(app.search_groups.any_match("", "see (unclosed here"));
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.highlight_box.editing);
+        assert_eq!(app.highlight_groups.groups.len(), 2);
+        assert!(app.highlight_groups.any_match("", "existing"));
+        assert!(app.highlight_groups.any_match("", "see (unclosed here"));
     }
 
     #[test]
-    fn test_search_box_esc_and_enter_return_focus_to_loglist() {
+    fn test_highlight_box_esc_and_enter_return_focus_to_loglist() {
         let mut app = App::new(100);
         app.focus = app::Focus::Input;
-        app.search_box.editing = true;
-        app.search_box.push_char('x');
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.highlight_box.editing = true;
+        app.highlight_box.push_char('x');
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.focus, app::Focus::LogList);
 
         app.focus = app::Focus::ChipStrip;
-        app.search_box.editing = true;
-        app.search_box.push_char('y');
-        handle_search_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.highlight_box.editing = true;
+        app.highlight_box.push_char('y');
+        handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.focus, app::Focus::LogList);
     }
 
@@ -2988,7 +3417,7 @@ mod dispatch_tests {
         );
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_search_group(search_model::SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_highlight_group(highlight_model::HighlightGroup::from_pattern("hit").unwrap());
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 1);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
@@ -3047,7 +3476,7 @@ mod dispatch_tests {
         );
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_search_group(search_model::SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_highlight_group(highlight_model::HighlightGroup::from_pattern("hit").unwrap());
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 2, "n follows search, not severe");
         handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
@@ -3098,9 +3527,8 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('l'));
         assert_eq!(app.visible.len(), 3, "level>=W keeps W/E/F");
         let levels: Vec<_> = app
-            .visible
-            .iter()
-            .map(|&i| app.rows[i].level.as_char())
+            .visible_rows()
+            .map(|r| r.level.as_char())
             .collect();
         assert_eq!(levels, vec!['W', 'E', 'F']);
     }
@@ -3293,7 +3721,7 @@ mod dispatch_tests {
 
         app.cursor = 0; // still on a pid=111 row after rebuild+follow
                         // switch to tid lock on current row (tid=1 on first visible)
-        let tid = app.rows[app.visible[app.cursor]].tid.clone();
+        let tid = app.current_row().unwrap().tid.clone();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
         assert!(app.lock_pid.is_none(), "tid lock clears pid lock");
@@ -3447,7 +3875,7 @@ mod dispatch_tests {
         handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // submit excludes
         assert_eq!(app.groups.excludes.len(), 1);
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.rows[app.visible[0]].tag, "Keep");
+        assert_eq!(app.view_source()[app.visible[0]].tag, "Keep");
     }
 
     #[test]
@@ -3642,12 +4070,16 @@ mod dispatch_tests {
         assert_eq!(app.bookmarks.len(), 1);
         assert_eq!(app.status_msg.as_deref(), Some("已存在"));
         app.cursor = 1;
-        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         assert!(matches!(
             app.picker.as_ref().map(|picker| picker.kind),
             Some(crate::picker::PickerKind::Bookmark)
         ));
+        assert_eq!(
+            app.picker.as_ref().map(|picker| &picker.mode),
+            Some(&crate::picker::PickerMode::New)
+        );
         handle_picker_key(
             &mut app,
             event::KeyEvent::new(KeyCode::Esc, event::KeyModifiers::NONE),
@@ -3674,24 +4106,23 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_leader_bookmark_opens_empty_picker() {
-        let mut app = App::new(100);
-        let mut input = input::InputBox::default();
-        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
-        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-        assert!(matches!(
-            app.picker.as_ref().map(|picker| picker.kind),
-            Some(crate::picker::PickerKind::Bookmark)
-        ));
-    }
-
-    #[test]
-    fn bookmark_picker_manage_enter_jumps_newest_first() {
+    fn test_leader_space_opens_unified_picker() {
         use crate::picker::PickerKind;
 
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        assert_eq!(
+            app.picker.as_ref().map(|picker| picker.kind),
+            Some(PickerKind::Unified)
+        );
+    }
+
+    #[test]
+    fn unified_enter_toggles_bookmark_enabled() {
+        let mut app = App::new(100);
         drain_lines(
             &mut app,
             &[
@@ -3703,17 +4134,16 @@ mod dispatch_tests {
         app.bookmark_add_current();
         app.cursor = 1;
         app.bookmark_add_current();
-        app.cursor = 0;
-        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-        assert_eq!(app.picker.as_ref().unwrap().kind, PickerKind::Bookmark);
+        app.open_unified_picker();
+        // Newest bookmark is first among bookmark rows; with only bookmarks, selected=0.
         handle_picker_key(
             &mut app,
             event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
         );
-        assert!(app.picker.is_none());
-        assert_eq!(app.cursor, 1, "newest bookmark is selected first");
-        assert!(!app.following);
+        assert!(app.picker.is_some());
+        // Newest-first display: storage index 1 is first in unified list.
+        assert!(!app.bookmarks.items[1].enabled);
+        assert!(app.bookmarks.items[0].enabled);
     }
 
     #[test]
@@ -3730,7 +4160,8 @@ mod dispatch_tests {
         );
         app.cursor = 0;
         app.bookmark_add_current();
-        app.open_picker(PickerKind::Bookmark);
+        app.open_unified_picker();
+        // Query "Bookmark" so only bookmark rows remain (Filter/Highlight/Exclude absent).
         handle_picker_key(
             &mut app,
             event::KeyEvent::new(KeyCode::Char('e'), event::KeyModifiers::CONTROL),
@@ -3745,20 +4176,156 @@ mod dispatch_tests {
             event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
         );
         assert_eq!(app.bookmarks.items[0].label, "renamed");
+        assert!(app.picker.is_none(), "Edit submit closes picker");
+        assert_eq!(app.focus, app::Focus::LogList);
 
         app.cursor = 1;
-        handle_picker_key(
-            &mut app,
-            event::KeyEvent::new(KeyCode::Char('a'), event::KeyModifiers::CONTROL),
-        );
+        app.open_picker_new(PickerKind::Bookmark);
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
         handle_picker_key(
             &mut app,
             event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
         );
         assert_eq!(app.bookmarks.len(), 2);
-        assert!(matches!(
-            app.picker.as_ref().map(|picker| &picker.mode),
-            Some(PickerMode::Manage)
-        ));
+        assert!(app.picker.is_none(), "New submit closes picker");
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn filter_picker_new_submit_returns_focus_to_loglist() {
+        use crate::input::{Chip, ChipField};
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        app.focus = app::Focus::ChipStrip;
+        app.open_picker_new(PickerKind::Filter);
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
+        let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
+        input.chips.push(Chip {
+            field: ChipField::Tag,
+            value: "Foo".into(),
+        });
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert_eq!(app.groups.groups.len(), 1);
+        assert!(app.picker.is_none());
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn exclude_picker_new_submit_returns_focus_to_loglist() {
+        use crate::input::{Chip, ChipField};
+        use crate::picker::{PickerKind, PickerMode};
+
+        let mut app = App::new(100);
+        app.focus = app::Focus::ExcludeStrip;
+        app.open_picker_new(PickerKind::Exclude);
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
+        let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
+        input.chips.push(Chip {
+            field: ChipField::Tag,
+            value: "noise".into(),
+        });
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert_eq!(app.groups.excludes.len(), 1);
+        assert!(app.picker.is_none());
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn picker_render_data_filter_shows_tag_vocab_after_field_pick() {
+        use std::sync::mpsc;
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(
+            crate::model::EntryRow::from_line("01-01 00:00:00.000  1 1 I TargetTag: msg")
+                .unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+
+        app.open_picker_new(crate::picker::PickerKind::Filter);
+        {
+            let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
+            input.set_field(crate::input::ChipField::Tag);
+        }
+
+        let data = picker_render_data(&app).unwrap();
+        assert!(
+            data.labels.iter().any(|l| l == "TargetTag"),
+            "Tag vocab should appear in labels after field pick, got: {:?}",
+            data.labels
+        );
+    }
+
+    #[test]
+    fn picker_render_data_filter_level_static_candidates() {
+        let mut app = App::new(100);
+        app.open_picker_new(crate::picker::PickerKind::Filter);
+        {
+            let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
+            input.set_field(crate::input::ChipField::Level);
+        }
+        let data = picker_render_data(&app).unwrap();
+        assert!(data.labels.contains(&"W".to_string()));
+        assert!(data.labels.contains(&"E".to_string()));
+    }
+
+    #[test]
+    fn replace_last_token_middle() {
+        assert_eq!(replace_last_token("MyApp tim", "timeout"), "MyApp timeout");
+    }
+
+    #[test]
+    fn replace_last_token_no_space() {
+        assert_eq!(replace_last_token("timeout", "error"), "error");
+    }
+
+    #[test]
+    fn picker_tab_fills_tag_vocab_candidate() {
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(100);
+        let row = crate::model::EntryRow::from_line(
+            "01-01 00:00:00.000  1 1 I TabTestTag: msg",
+        )
+        .unwrap();
+        tx.send(row).unwrap();
+        drop(tx);
+        app.drain(&rx);
+
+        app.open_picker_new(crate::picker::PickerKind::Filter);
+        {
+            let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
+            input.set_field(crate::input::ChipField::Tag);
+            input.push_char('T');
+        }
+
+        handle_picker_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+
+        let draft = app
+            .picker
+            .as_ref()
+            .unwrap()
+            .input
+            .as_ref()
+            .unwrap()
+            .draft
+            .clone();
+        assert_eq!(draft, "TabTestTag", "Tab should fill vocab candidate into draft");
     }
 }

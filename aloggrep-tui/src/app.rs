@@ -8,7 +8,13 @@ use aloggrep::parser::Level;
 use crate::bookmark::{bookmark_label, AddError, Bookmark, BookmarkList, JumpResult};
 use crate::filter_model::{ExcludeEntry, Group, GroupList};
 use crate::model::EntryRow;
-use crate::search_model::{SearchBox, SearchGroup, SearchGroupList};
+use crate::highlight_model::{HighlightBox, HighlightGroup, HighlightGroupList};
+use crate::vocab::Vocab;
+
+/// Hard cap on the matched-rows buffer (OOM safety). When a filter is active,
+/// matching rows are retained in `App::matched` independently of `rows`'
+/// rolling eviction; only this cap reclaims them.
+const MATCHED_HARD_CAP: usize = 1_000_000;
 
 fn crash_detector() -> &'static CrashDetector {
     static DETECTOR: OnceLock<CrashDetector> = OnceLock::new();
@@ -38,7 +44,7 @@ pub fn is_severe_row(row: &EntryRow) -> bool {
 pub enum Focus {
     ChipStrip,
     ExcludeStrip,
-    SearchStrip,
+    HighlightStrip,
     LogList,
     Input,
 }
@@ -54,7 +60,7 @@ pub enum Mode {
 pub enum StripKind {
     Filter,
     Exclude,
-    Search,
+    Highlight,
 }
 
 /// Second-key target for the `y` operator (`yy`/`yt`/`ym`/…).
@@ -130,13 +136,21 @@ pub enum DetailView {
 
 pub struct App {
     pub rows: VecDeque<EntryRow>,
+    /// Matched-rows buffer: when a filter is active, rows passing the filter
+    /// are retained here independently of `rows`' rolling eviction, so a tight
+    /// filter isn't washed out by non-matching churn. Capped by `matched_cap`.
+    pub matched: VecDeque<EntryRow>,
+    /// Hard cap on `matched` (OOM safety). Matched rows are never evicted by
+    /// `rows` overflow — only by reaching this cap. Defaults to
+    /// [`MATCHED_HARD_CAP`]; tests override.
+    pub matched_cap: usize,
     pub visible: Vec<usize>,
     pub groups: GroupList,
-    pub search_groups: SearchGroupList,
-    pub search_box: SearchBox,
+    pub highlight_groups: HighlightGroupList,
+    pub highlight_box: HighlightBox,
     /// Globally active search group for `n`/`N`, match stats, and underline.
-    /// Independent of [`Self::search_cursor`] (SearchStrip keyboard focus).
-    pub active_search: Option<usize>,
+    /// Independent of [`Self::highlight_cursor`] (HighlightStrip keyboard focus).
+    pub active_highlight: Option<usize>,
     pub cursor: usize,
     pub max_lines: usize,
     pub should_quit: bool,
@@ -144,7 +158,7 @@ pub struct App {
     pub mode: Mode,
     pub group_cursor: usize,
     pub exclude_cursor: usize,
-    pub search_cursor: usize,
+    pub highlight_cursor: usize,
     /// Armed by first `d` on a chip strip; second `d` deletes, `i` toggles disable.
     pub pending_d: bool,
     pub pending_yank: bool,
@@ -158,7 +172,7 @@ pub struct App {
     pub pending_m: bool,
     /// Armed by leader key (`Space`); second key opens fzf-style picker (Task 5).
     pub pending_leader: bool,
-    /// Open fzf-style picker session (Filter/Search/Bookmark/Exclude/ActionList).
+    /// Open fzf-style picker session (Unified Manage / Filter / Highlight / Bookmark / Exclude).
     pub picker: Option<crate::picker::PickerSession>,
     /// Session bookmarks (M2).
     pub bookmarks: BookmarkList,
@@ -184,17 +198,21 @@ pub struct App {
     pub export_source: crate::export::ExportSource,
     /// App settings loaded from config.toml (picker layout, etc.).
     pub config: crate::config::AppConfig,
+    /// Vocabulary accumulated from ingested rows (tag/pkg/msg tokens).
+    pub vocab: Vocab,
 }
 
 impl App {
     pub fn new(max_lines: usize) -> Self {
         Self {
             rows: VecDeque::new(),
+            matched: VecDeque::new(),
+            matched_cap: MATCHED_HARD_CAP,
             visible: Vec::new(),
             groups: GroupList::default(),
-            search_groups: SearchGroupList::default(),
-            search_box: SearchBox::default(),
-            active_search: None,
+            highlight_groups: HighlightGroupList::default(),
+            highlight_box: HighlightBox::default(),
+            active_highlight: None,
             cursor: 0,
             max_lines,
             should_quit: false,
@@ -202,7 +220,7 @@ impl App {
             mode: Mode::Normal,
             group_cursor: 0,
             exclude_cursor: 0,
-            search_cursor: 0,
+            highlight_cursor: 0,
             pending_d: false,
             pending_yank: false,
             pending_chip: false,
@@ -224,11 +242,29 @@ impl App {
             detail: DetailView::Closed,
             export_source: crate::export::ExportSource::default(),
             config: crate::config::AppConfig::default_config(),
+            vocab: Vocab::default(),
         }
     }
 
-    /// Open the requested fzf-style picker and clear all operator-pending state.
+    /// Open the unified Manage picker (aggregated Filter/Highlight/Exclude/Bookmark).
+    pub fn open_unified_picker(&mut self) {
+        self.open_picker(crate::picker::PickerKind::Unified);
+    }
+
+    /// Open the requested fzf-style picker in Manage mode. Clears operator-pending.
+    /// Does not auto-switch to New (use [`Self::open_picker_new`]).
     pub fn open_picker(&mut self, kind: crate::picker::PickerKind) {
+        self.open_picker_with(kind, false);
+    }
+
+    /// Open the picker forced into New mode (`:` `/` `` ` `` `mm`).
+    pub fn open_picker_new(&mut self, kind: crate::picker::PickerKind) {
+        self.open_picker_with(kind, true);
+    }
+
+    fn open_picker_with(&mut self, kind: crate::picker::PickerKind, prefer_new: bool) {
+        use crate::picker::PickerSession;
+
         self.pending_d = false;
         self.pending_yank = false;
         self.pending_chip = false;
@@ -236,13 +272,19 @@ impl App {
         self.pending_lock = false;
         self.pending_m = false;
         self.pending_leader = false;
-        self.picker = Some(crate::picker::PickerSession::open(kind));
+        let mut session = PickerSession::open(kind);
+        if prefer_new {
+            session.enter_new();
+        }
+        self.picker = Some(session);
     }
 
-    /// Close the fzf-style picker without changing live-follow state.
+    /// Close the fzf-style picker and return focus to LogList.
+    /// Does not change live-follow state.
     pub fn close_picker(&mut self) {
         self.picker = None;
         self.pending_leader = false;
+        self.focus = Focus::LogList;
     }
 
     /// H10: one-line `aloggrep` command for the current filter state.
@@ -295,6 +337,34 @@ impl App {
         true
     }
 
+    /// Whether any include/exclude/lock filter is currently active. When false,
+    /// `visible` indexes `rows` directly (every row shown); when true, `visible`
+    /// indexes `matched` (only filter-passing rows, retained across `rows` churn).
+    pub fn filter_active(&self) -> bool {
+        self.groups.has_any_enabled()
+            || self.groups.excludes.iter().any(|e| e.enabled)
+            || self.lock_pid.is_some()
+            || self.lock_tid.is_some()
+    }
+
+    /// The buffer `visible` currently indexes: `matched` when a filter is
+    /// active, `rows` otherwise. All read paths (render, cursor, yank, search)
+    /// go through here so they stay correct across `rows` overflow.
+    pub fn view_source(&self) -> &VecDeque<EntryRow> {
+        if self.filter_active() {
+            &self.matched
+        } else {
+            &self.rows
+        }
+    }
+
+    /// Whether `row_id` is still present in either buffer (bookmark liveness).
+    /// A row retained in `matched` after being evicted from `rows` is alive.
+    fn row_alive(&self, row_id: u64) -> bool {
+        self.matched.iter().any(|r| r.row_id == row_id)
+            || self.rows.iter().any(|r| r.row_id == row_id)
+    }
+
     /// Drain everything currently available on the channel without blocking.
     /// Each new row is checked against the current filter in O(1) and, if
     /// visible, appended — no full rescan (see design doc "增量过滤").
@@ -305,55 +375,87 @@ impl App {
     }
 
     fn push_row(&mut self, mut row: EntryRow) {
+        let msg_tokens = crate::input::tokenize_msg_for_vocab(&row.msg);
+        self.vocab.feed(&row.tag, &row.pkg, &msg_tokens);
         row.row_id = self.next_row_id;
         self.next_row_id = self.next_row_id.wrapping_add(1);
+        let active = self.filter_active();
+        let matches = active && self.row_passes_filters(&row);
+
+        // `rows` rolling buffer. When a filter is active, `visible` tracks
+        // `matched`, so a `rows` eviction must NOT shift `visible`.
         if self.rows.len() >= self.max_lines {
             self.rows.pop_front();
-            // `visible` stays sorted ascending, so only index 0 can ever need removing.
-            let evicted_was_visible = self.visible.first() == Some(&0);
-            if evicted_was_visible {
-                self.visible.remove(0);
-                // `list_offset` is an index into `visible`; dropping the front
-                // item must shift the viewport with the content, otherwise the
-                // list appears to scroll up even when no new visible rows arrive
-                // (common under a tight filter while the ring buffer fills).
-                if self.list_offset > 0 {
-                    self.list_offset -= 1;
-                }
-            }
-            for i in self.visible.iter_mut() {
-                *i -= 1;
-            }
-            if evicted_was_visible && self.cursor > 0 {
-                self.cursor -= 1;
-            }
-            // `visual_anchor` shares `cursor`'s coordinate space (index into
-            // `visible`). Evicting the oldest visible row shifts that space.
-            if evicted_was_visible {
-                match self.visual_anchor {
-                    Some(0) => self.visual_anchor = None,
-                    Some(a) => self.visual_anchor = Some(a - 1),
-                    None => {}
-                }
+            if !active {
+                self.shift_visible_after_front_evict(self.visible.first() == Some(&0));
             }
         }
-        let matches = self.row_passes_filters(&row);
-        self.rows.push_back(row);
+
         if matches {
-            self.visible.push(self.rows.len() - 1);
+            // Retain in `matched` (clone into `rows`; original goes to `matched`).
+            if self.matched.len() >= self.matched_cap {
+                self.matched.pop_front();
+                self.shift_visible_after_front_evict(self.visible.first() == Some(&0));
+            }
+            self.rows.push_back(row.clone());
+            self.matched.push_back(row);
+            self.visible.push(self.matched.len() - 1);
+        } else {
+            self.rows.push_back(row);
+            if !active {
+                self.visible.push(self.rows.len() - 1);
+            }
         }
         self.follow_tick();
     }
 
+    /// Update `visible`/`cursor`/`list_offset`/`visual_anchor` after the front
+    /// row of the active source buffer was evicted. `evicted_was_visible`
+    /// indicates that row was `visible[0]` (its source index was 0).
+    fn shift_visible_after_front_evict(&mut self, evicted_was_visible: bool) {
+        if evicted_was_visible {
+            self.visible.remove(0);
+            // `list_offset` is an index into `visible`; dropping the front item
+            // must shift the viewport with the content, otherwise the list
+            // appears to scroll up even when no new visible rows arrive.
+            if self.list_offset > 0 {
+                self.list_offset -= 1;
+            }
+        }
+        for i in self.visible.iter_mut() {
+            *i -= 1;
+        }
+        if evicted_was_visible && self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        // `visual_anchor` shares `cursor`'s coordinate space (index into
+        // `visible`). Evicting the oldest visible row shifts that space.
+        if evicted_was_visible {
+            match self.visual_anchor {
+                Some(0) => self.visual_anchor = None,
+                Some(a) => self.visual_anchor = Some(a - 1),
+                None => {}
+            }
+        }
+    }
+
     /// Full rescan, used when the filter groups or session lock change.
+    /// Rebuilds `matched` from the current `rows`: rows already evicted from
+    /// `rows` (even if previously retained in `matched`) cannot be recovered.
     pub fn rebuild_visible(&mut self) {
-        self.visible = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| self.row_passes_filters(row))
-            .map(|(i, _)| i)
-            .collect();
+        let active = self.filter_active();
+        if active {
+            self.matched.clear();
+            for row in &self.rows {
+                if self.row_passes_filters(row) {
+                    self.matched.push_back(row.clone());
+                }
+            }
+            self.visible = (0..self.matched.len()).collect();
+        } else {
+            self.matched.clear();
+            self.visible = (0..self.rows.len()).collect();
+        }
         if self.following {
             self.jump_bottom();
         } else if self.cursor >= self.visible.len() {
@@ -400,14 +502,15 @@ impl App {
     }
 
     pub fn visible_rows(&self) -> impl Iterator<Item = &EntryRow> {
-        self.visible.iter().map(move |&i| &self.rows[i])
+        let source = self.view_source();
+        self.visible.iter().map(move |&i| &source[i])
     }
 
     pub fn cycle_focus_forward(&mut self) {
         self.focus = match self.focus {
             Focus::ChipStrip => Focus::ExcludeStrip,
-            Focus::ExcludeStrip => Focus::SearchStrip,
-            Focus::SearchStrip => Focus::LogList,
+            Focus::ExcludeStrip => Focus::HighlightStrip,
+            Focus::HighlightStrip => Focus::LogList,
             Focus::LogList => Focus::Input,
             Focus::Input => Focus::ChipStrip,
         };
@@ -417,17 +520,57 @@ impl App {
         self.focus = match self.focus {
             Focus::ChipStrip => Focus::Input,
             Focus::ExcludeStrip => Focus::ChipStrip,
-            Focus::SearchStrip => Focus::ExcludeStrip,
-            Focus::LogList => Focus::SearchStrip,
+            Focus::HighlightStrip => Focus::ExcludeStrip,
+            Focus::LogList => Focus::HighlightStrip,
             Focus::Input => Focus::LogList,
         };
+    }
+
+    /// Cycle focus forward among *visible* regions only (Normal mode Tab).
+    ///
+    /// Visible = non-empty Filter/Exclude/Highlight strips + LogList. Empty
+    /// (collapsed) strips are skipped. Never returns `Focus::Input`, so the
+    /// unified picker is never opened via Tab.
+    pub fn cycle_visible_focus_forward(&mut self) {
+        self.focus = self.next_visible_focus(true);
+    }
+
+    /// Backward counterpart of [`cycle_visible_focus_forward`].
+    pub fn cycle_visible_focus_backward(&mut self) {
+        self.focus = self.next_visible_focus(false);
+    }
+
+    fn visible_regions(&self) -> Vec<Focus> {
+        let mut v = Vec::with_capacity(4);
+        if self.strip_len(StripKind::Filter) > 0 {
+            v.push(Focus::ChipStrip);
+        }
+        if self.strip_len(StripKind::Exclude) > 0 {
+            v.push(Focus::ExcludeStrip);
+        }
+        if self.strip_len(StripKind::Highlight) > 0 {
+            v.push(Focus::HighlightStrip);
+        }
+        v.push(Focus::LogList);
+        v
+    }
+
+    fn next_visible_focus(&self, forward: bool) -> Focus {
+        let regions = self.visible_regions();
+        // LogList is always present, so `regions` is never empty.
+        let cur = regions
+            .iter()
+            .position(|&f| f == self.focus)
+            .unwrap_or_else(|| regions.iter().position(|&f| f == Focus::LogList).unwrap());
+        let step = if forward { 1 } else { regions.len() - 1 };
+        regions[(cur + step) % regions.len()]
     }
 
     fn strip_len(&self, kind: StripKind) -> usize {
         match kind {
             StripKind::Filter => self.groups.groups.len(),
             StripKind::Exclude => self.groups.excludes.len(),
-            StripKind::Search => self.search_groups.groups.len(),
+            StripKind::Highlight => self.highlight_groups.groups.len(),
         }
     }
 
@@ -435,7 +578,7 @@ impl App {
         match kind {
             StripKind::Filter => &mut self.group_cursor,
             StripKind::Exclude => &mut self.exclude_cursor,
-            StripKind::Search => &mut self.search_cursor,
+            StripKind::Highlight => &mut self.highlight_cursor,
         }
     }
 
@@ -463,43 +606,43 @@ impl App {
         let deleted = match kind {
             StripKind::Filter => self.delete_filter_group_at(cursor),
             StripKind::Exclude => self.delete_exclude_group_at(cursor),
-            StripKind::Search => self.delete_search_group_at(cursor),
+            StripKind::Highlight => self.delete_highlight_group_at(cursor),
         };
         debug_assert!(deleted);
         let empty = match kind {
             StripKind::Filter => self.groups.groups.is_empty(),
             StripKind::Exclude => self.groups.excludes.is_empty(),
-            StripKind::Search => self.search_groups.groups.is_empty(),
+            StripKind::Highlight => self.highlight_groups.groups.is_empty(),
         };
         if empty {
             self.focus = Focus::LogList;
         }
     }
 
-    /// After removing search group at `removed`, keep `active_search` valid.
+    /// After removing search group at `removed`, keep `active_highlight` valid.
     /// Deleting the active group (or emptying the list) falls back to the
     /// newest remaining group; deleting a group left of active shifts the index.
-    fn fix_active_search_after_delete(&mut self, removed: usize) {
-        let len = self.search_groups.groups.len();
+    fn fix_active_highlight_after_delete(&mut self, removed: usize) {
+        let len = self.highlight_groups.groups.len();
         if len == 0 {
-            self.active_search = None;
+            self.active_highlight = None;
             return;
         }
-        match self.active_search {
+        match self.active_highlight {
             Some(active) if active == removed => {
-                self.active_search = Some(len - 1);
+                self.active_highlight = Some(len - 1);
             }
             Some(active) if active > removed => {
-                self.active_search = Some(active - 1);
+                self.active_highlight = Some(active - 1);
             }
             _ => {}
         }
     }
 
     /// Enabled search group currently marked as global active, if any.
-    pub fn active_search_group(&self) -> Option<&SearchGroup> {
-        let idx = self.active_search?;
-        let g = self.search_groups.groups.get(idx)?;
+    pub fn active_highlight_group(&self) -> Option<&HighlightGroup> {
+        let idx = self.active_highlight?;
+        let g = self.highlight_groups.groups.get(idx)?;
         if g.enabled {
             Some(g)
         } else {
@@ -530,15 +673,16 @@ impl App {
                 e.enabled = !e.enabled;
                 self.rebuild_visible();
             }
-            StripKind::Search => {
-                let g = &mut self.search_groups.groups[cursor];
+            StripKind::Highlight => {
+                let g = &mut self.highlight_groups.groups[cursor];
                 g.enabled = !g.enabled;
             }
         }
     }
 
     pub fn current_row(&self) -> Option<&EntryRow> {
-        self.visible.get(self.cursor).map(|&i| &self.rows[i])
+        let &i = self.visible.get(self.cursor)?;
+        Some(&self.view_source()[i])
     }
 
     /// Flash a short status-bar toast that auto-hides after 3 seconds.
@@ -591,6 +735,7 @@ impl App {
         let bm = Bookmark {
             row_id: row.row_id,
             label: bookmark_label(&row.tag, &row.msg),
+            enabled: true,
         };
         match self.bookmarks.try_add(bm) {
             Ok(()) => self.set_flash("已收藏"),
@@ -615,9 +760,28 @@ impl App {
     }
 
     /// Jump to a bookmarked row_id; sets `following=false` on success.
+    /// Disabled bookmarks (`enabled == false`) are treated as filtered-out.
+    /// A row retained in `matched` (evicted from `rows`) is still jumpable.
     pub fn jump_to_bookmark(&mut self, row_id: u64) -> JumpResult {
-        let Some(row_idx) = self.rows.iter().position(|r| r.row_id == row_id) else {
-            return JumpResult::Evicted;
+        if self
+            .bookmarks
+            .items
+            .iter()
+            .find(|b| b.row_id == row_id)
+            .is_some_and(|b| !b.enabled)
+        {
+            return JumpResult::Filtered;
+        }
+        // `view_source()` is the active buffer `visible` indexes; by
+        // construction every entry there is in `visible` (front-eviction
+        // shifts both in tandem), so a hit here is always jumpable.
+        let row_idx = self.view_source().iter().position(|r| r.row_id == row_id);
+        let Some(row_idx) = row_idx else {
+            return if self.row_alive(row_id) {
+                JumpResult::Filtered
+            } else {
+                JumpResult::Evicted
+            };
         };
         let Some(vis) = self.visible.iter().position(|&i| i == row_idx) else {
             return JumpResult::Filtered;
@@ -627,9 +791,9 @@ impl App {
         JumpResult::Ok
     }
 
-    /// Whether `row_id` is still present in the ring buffer.
+    /// Whether `row_id` is still present in either ring buffer.
     pub fn bookmark_alive(&self, row_id: u64) -> bool {
-        self.rows.iter().any(|r| r.row_id == row_id)
+        self.row_alive(row_id)
     }
 
     /// Inclusive `[lo, hi]` range over `visible` indices while in visual-line
@@ -950,9 +1114,10 @@ impl App {
         if self.visible.is_empty() || lo > hi || hi >= self.visible.len() {
             return None;
         }
+        let source = self.view_source();
         let mut parts = Vec::with_capacity(hi - lo + 1);
         for vi in lo..=hi {
-            let row = &self.rows[self.visible[vi]];
+            let row = &source[self.visible[vi]];
             parts.push(Self::field_text(row, field));
         }
         Some(parts.join("\n"))
@@ -974,7 +1139,7 @@ impl App {
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
             let row_idx = self.visible[idx];
-            if is_severe_row(&self.rows[row_idx]) {
+            if is_severe_row(&self.view_source()[row_idx]) {
                 self.following = false;
                 self.cursor = idx;
                 return true;
@@ -986,11 +1151,11 @@ impl App {
     /// Jump to the next (`dir > 0`) or previous (`dir < 0`) visible row whose
     /// tag or msg matches the globally active search group. Wraps like vim `wrapscan`.
     pub fn find_match(&mut self, dir: i8) -> bool {
-        let Some(active_idx) = self.active_search else {
+        let Some(active_idx) = self.active_highlight else {
             return false;
         };
         if !self
-            .search_groups
+            .highlight_groups
             .groups
             .get(active_idx)
             .is_some_and(|g| g.enabled)
@@ -1006,8 +1171,8 @@ impl App {
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
             let row_idx = self.visible[idx];
-            let row = &self.rows[row_idx];
-            let hit = self.search_groups.groups[active_idx].matches_row(&row.tag, &row.msg);
+            let row = &self.view_source()[row_idx];
+            let hit = self.highlight_groups.groups[active_idx].matches_row(&row.tag, &row.msg);
             if hit {
                 self.following = false;
                 self.cursor = idx;
@@ -1020,7 +1185,7 @@ impl App {
     /// Jump to the first visible row matching search group `group_idx`.
     /// Used after committing a search (or re-submitting a duplicate).
     pub fn jump_first_match_of(&mut self, group_idx: usize) -> bool {
-        let Some(group) = self.search_groups.groups.get(group_idx) else {
+        let Some(group) = self.highlight_groups.groups.get(group_idx) else {
             return false;
         };
         if !group.enabled {
@@ -1028,7 +1193,7 @@ impl App {
         }
         for idx in 0..self.visible.len() {
             let row_idx = self.visible[idx];
-            let row = &self.rows[row_idx];
+            let row = &self.view_source()[row_idx];
             if group.matches_row(&row.tag, &row.msg) {
                 self.following = false;
                 self.cursor = idx;
@@ -1040,7 +1205,7 @@ impl App {
 
     /// Jump to the first visible row matching the newest search group.
     pub fn jump_first_match(&mut self) -> bool {
-        let Some(group_idx) = self.search_groups.groups.len().checked_sub(1) else {
+        let Some(group_idx) = self.highlight_groups.groups.len().checked_sub(1) else {
             return false;
         };
         self.jump_first_match_of(group_idx)
@@ -1134,14 +1299,14 @@ impl App {
     }
 
     pub fn update_search_group(&mut self, index: usize, pattern: &str) -> bool {
-        if index >= self.search_groups.groups.len() {
+        if index >= self.highlight_groups.groups.len() {
             return false;
         }
-        let Some(mut group) = SearchGroup::from_pattern(pattern) else {
+        let Some(mut group) = HighlightGroup::from_pattern(pattern) else {
             return false;
         };
         if self
-            .search_groups
+            .highlight_groups
             .groups
             .iter()
             .enumerate()
@@ -1149,26 +1314,26 @@ impl App {
         {
             return false;
         }
-        group.enabled = self.search_groups.groups[index].enabled;
-        self.search_groups.groups[index] = group;
+        group.enabled = self.highlight_groups.groups[index].enabled;
+        self.highlight_groups.groups[index] = group;
         true
     }
 
-    pub fn clear_search_groups(&mut self) {
-        self.search_groups.groups.clear();
-        self.active_search = None;
-        self.search_cursor = 0;
+    pub fn clear_highlight_groups(&mut self) {
+        self.highlight_groups.groups.clear();
+        self.active_highlight = None;
+        self.highlight_cursor = 0;
     }
 
-    pub fn delete_search_group_at(&mut self, index: usize) -> bool {
-        if index >= self.search_groups.groups.len() {
+    pub fn delete_highlight_group_at(&mut self, index: usize) -> bool {
+        if index >= self.highlight_groups.groups.len() {
             return false;
         }
-        self.search_groups.groups.remove(index);
-        if self.search_cursor >= self.search_groups.groups.len() {
-            self.search_cursor = self.search_groups.groups.len().saturating_sub(1);
+        self.highlight_groups.groups.remove(index);
+        if self.highlight_cursor >= self.highlight_groups.groups.len() {
+            self.highlight_cursor = self.highlight_groups.groups.len().saturating_sub(1);
         }
-        self.fix_active_search_after_delete(index);
+        self.fix_active_highlight_after_delete(index);
         true
     }
 
@@ -1184,17 +1349,65 @@ impl App {
         self.bookmarks.delete_at(index)
     }
 
+    /// Toggle `enabled` on a unified Manage item. Returns whether state changed.
+    pub fn toggle_unified_enabled(&mut self, kind: crate::picker::UnifiedKind, index: usize) -> bool {
+        use crate::picker::UnifiedKind;
+        match kind {
+            UnifiedKind::Filter => {
+                let Some(g) = self.groups.groups.get_mut(index) else {
+                    return false;
+                };
+                g.enabled = !g.enabled;
+                self.rebuild_visible();
+                true
+            }
+            UnifiedKind::Highlight => {
+                let Some(g) = self.highlight_groups.groups.get_mut(index) else {
+                    return false;
+                };
+                g.enabled = !g.enabled;
+                true
+            }
+            UnifiedKind::Exclude => {
+                let Some(e) = self.groups.excludes.get_mut(index) else {
+                    return false;
+                };
+                e.enabled = !e.enabled;
+                self.rebuild_visible();
+                true
+            }
+            UnifiedKind::Bookmark => {
+                let Some(b) = self.bookmarks.items.get_mut(index) else {
+                    return false;
+                };
+                b.enabled = !b.enabled;
+                true
+            }
+        }
+    }
+
+    /// Delete a unified Manage item by kind + source index.
+    pub fn delete_unified_at(&mut self, kind: crate::picker::UnifiedKind, index: usize) -> bool {
+        use crate::picker::UnifiedKind;
+        match kind {
+            UnifiedKind::Filter => self.delete_filter_group_at(index),
+            UnifiedKind::Highlight => self.delete_highlight_group_at(index),
+            UnifiedKind::Exclude => self.delete_exclude_group_at(index),
+            UnifiedKind::Bookmark => self.delete_bookmark_at(index),
+        }
+    }
+
     /// Push a search group, or return the index of an existing equivalent.
     /// Always marks the returned index as the globally active search.
     /// Caller always jumps to that group's first match.
-    pub fn push_or_find_search_group(&mut self, group: crate::search_model::SearchGroup) -> usize {
-        let idx = if let Some(idx) = self.search_groups.find_equivalent(&group.pattern) {
+    pub fn push_or_find_highlight_group(&mut self, group: crate::highlight_model::HighlightGroup) -> usize {
+        let idx = if let Some(idx) = self.highlight_groups.find_equivalent(&group.pattern) {
             idx
         } else {
-            self.search_groups.groups.push(group);
-            self.search_groups.groups.len() - 1
+            self.highlight_groups.groups.push(group);
+            self.highlight_groups.groups.len() - 1
         };
-        self.active_search = Some(idx);
+        self.active_highlight = Some(idx);
         idx
     }
 
@@ -1202,14 +1415,15 @@ impl App {
     /// `None` when there is no active enabled group; otherwise
     /// `(current_1based_or_none, total_hits)`. `current` is `None` when the
     /// cursor is not on a matching row.
-    pub fn search_match_stats(&self) -> Option<(Option<usize>, usize)> {
-        let Some(group) = self.active_search_group() else {
+    pub fn highlight_match_stats(&self) -> Option<(Option<usize>, usize)> {
+        let Some(group) = self.active_highlight_group() else {
             return None;
         };
         let mut total = 0usize;
         let mut current = None;
+        let source = self.view_source();
         for (idx, &row_idx) in self.visible.iter().enumerate() {
-            let row = &self.rows[row_idx];
+            let row = &source[row_idx];
             if group.matches_row(&row.tag, &row.msg) {
                 total += 1;
                 if idx == self.cursor {
@@ -1276,7 +1490,11 @@ mod tests {
 
     #[test]
     fn test_evicting_visible_front_decrements_list_offset() {
-        let mut app = App::new(3);
+        // With the matched buffer, a filter-matching row is NOT evicted by
+        // `rows` overflow — only by reaching `matched_cap`. Simulate that:
+        // two matching rows fill `matched`; a third match evicts the oldest.
+        let mut app = App::new(100);
+        app.matched_cap = 2;
         app.groups = GroupList {
             groups: vec![filter_group(
                 "keep-A",
@@ -1285,11 +1503,8 @@ mod tests {
             excludes: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
-        // Two matching rows fill visible; then non-matching rows churn the ring
-        // until the oldest visible (A0) is evicted — list_offset must track.
-        tx.send(row("A")).unwrap(); // A0
-        tx.send(row("A")).unwrap(); // A1
-        tx.send(row("X")).unwrap(); // fills buffer: [A0,A1,X]
+        tx.send(row("A")).unwrap(); // matched=[A0], visible=[0]
+        tx.send(row("A")).unwrap(); // matched=[A0,A1], visible=[0,1]
         drop(tx);
         app.drain(&rx);
         assert_eq!(app.visible.len(), 2);
@@ -1298,11 +1513,11 @@ mod tests {
         app.cursor = 1;
 
         let (tx2, rx2) = mpsc::channel();
-        tx2.send(row("Y")).unwrap(); // evict A0 → rows [A1,X,Y], visible drops front
+        tx2.send(row("A")).unwrap(); // matched at cap → evict A0 → visible front drops
         drop(tx2);
         app.drain(&rx2);
 
-        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.visible.len(), 2);
         assert_eq!(
             app.list_offset, 0,
             "viewport must shift with front eviction"
@@ -1350,27 +1565,84 @@ mod tests {
             excludes: Vec::new(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(row("N1")).unwrap(); // filtered out, not in `visible`
+        tx.send(row("N1")).unwrap(); // filtered out, not in `matched`/`visible`
         tx.send(row("X1")).unwrap();
         tx.send(row("X2")).unwrap();
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.visible, vec![1, 2]);
+        assert_eq!(app.visible, vec![0, 1]);
         app.cursor = 1; // pointing at X2
         app.following = false;
-        let selected_tag_before = app.rows[app.visible[app.cursor]].tag.clone();
+        let selected_tag_before = app.current_row().unwrap().tag.clone();
 
         let (tx2, rx2) = std::sync::mpsc::channel();
-        tx2.send(row("X3")).unwrap(); // triggers eviction of N1
+        tx2.send(row("X3")).unwrap(); // triggers `rows` eviction of N1 (non-matching)
         drop(tx2);
         app.drain(&rx2);
 
-        let selected_tag_after = app.rows[app.visible[app.cursor]].tag.clone();
+        let selected_tag_after = app.current_row().unwrap().tag.clone();
         assert_eq!(
             selected_tag_before, selected_tag_after,
             "cursor should still point at the same logical row"
         );
         assert_eq!(selected_tag_after, "X2");
+    }
+
+    #[test]
+    fn test_matched_rows_survive_rows_overflow() {
+        // The core fix: with a filter active, matching rows are retained in
+        // `matched` even after `rows` rolls over. Non-matching churn must not
+        // wash out previously matched rows.
+        let mut app = App::new(2);
+        app.groups = GroupList {
+            groups: vec![filter_group(
+                "keep-A",
+                Some(Expr::parse("tag~A", false).unwrap()),
+            )],
+            excludes: Vec::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap(); // A0: matched=[A0], rows=[A0]
+        tx.send(row("X")).unwrap(); // rows=[A0,X], matched=[A0]
+        tx.send(row("Y")).unwrap(); // rows rolls: [X,Y], A0 evicted from rows
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.rows.len(), 2);
+        assert_eq!(app.rows[0].tag, "X");
+        assert_eq!(app.rows[1].tag, "Y");
+        assert_eq!(app.matched.len(), 1);
+        assert_eq!(app.matched[0].tag, "A");
+        assert_eq!(app.visible, vec![0]);
+        assert_eq!(app.current_row().unwrap().tag, "A");
+    }
+
+    #[test]
+    fn test_rebuild_visible_after_filter_change_loses_matched_evicted_from_rows() {
+        // Rebuild re-scans current `rows`; rows already evicted from `rows`
+        // (even if previously retained in `matched`) are unrecoverable.
+        let mut app = App::new(2);
+        // Start with NO filter: everything goes to `rows`, `matched` stays empty.
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        tx.send(row("A")).unwrap(); // rows rolls: [B,A]
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.rows[0].tag, "B");
+        assert_eq!(app.rows[1].tag, "A");
+        // Now activate a filter matching `A`; rebuild scans only current rows
+        // ([B,A]) — the first `A` (already evicted from `rows`) is gone.
+        app.groups = GroupList {
+            groups: vec![filter_group(
+                "keep-A",
+                Some(Expr::parse("tag~A", false).unwrap()),
+            )],
+            excludes: Vec::new(),
+        };
+        app.rebuild_visible();
+        assert_eq!(app.matched.len(), 1);
+        assert_eq!(app.matched[0].tag, "A");
+        assert_eq!(app.visible, vec![0]);
     }
 }
 
@@ -1401,7 +1673,7 @@ mod focus_tests {
         app.cycle_focus_forward();
         assert_eq!(app.focus, Focus::ExcludeStrip);
         app.cycle_focus_forward();
-        assert_eq!(app.focus, Focus::SearchStrip);
+        assert_eq!(app.focus, Focus::HighlightStrip);
         app.cycle_focus_forward();
         assert_eq!(app.focus, Focus::LogList);
     }
@@ -1577,9 +1849,9 @@ mod follow_tests {
 }
 
 #[cfg(test)]
-mod search_tests {
+mod highlight_tests {
     use super::*;
-    use crate::search_model::SearchGroup;
+    use crate::highlight_model::HighlightGroup;
     use std::sync::mpsc;
 
     fn row_with_msg(tag: &str, msg: &str) -> EntryRow {
@@ -1598,7 +1870,7 @@ mod search_tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
 
         assert!(app.find_match(1));
         assert_eq!(app.cursor, 1);
@@ -1621,7 +1893,7 @@ mod search_tests {
     }
 
     #[test]
-    fn test_jump_first_match_and_search_match_stats() {
+    fn test_jump_first_match_and_highlight_match_stats() {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row_with_msg("T", "aaa")).unwrap();
@@ -1632,22 +1904,22 @@ mod search_tests {
         app.drain(&rx);
         app.following = true;
         app.cursor = 3;
-        assert!(app.search_match_stats().is_none());
+        assert!(app.highlight_match_stats().is_none());
 
-        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
         app.cursor = 0; // non-hit row
-        assert_eq!(app.search_match_stats(), Some((None, 2)));
+        assert_eq!(app.highlight_match_stats(), Some((None, 2)));
 
         assert!(app.jump_first_match());
         assert_eq!(app.cursor, 1);
         assert!(!app.following);
-        assert_eq!(app.search_match_stats(), Some((Some(1), 2)));
+        assert_eq!(app.highlight_match_stats(), Some((Some(1), 2)));
 
         app.cursor = 3;
-        assert_eq!(app.search_match_stats(), Some((Some(2), 2)));
+        assert_eq!(app.highlight_match_stats(), Some((Some(2), 2)));
 
         app.cursor = 2;
-        assert_eq!(app.search_match_stats(), Some((None, 2)));
+        assert_eq!(app.highlight_match_stats(), Some((None, 2)));
     }
 
     #[test]
@@ -1658,10 +1930,10 @@ mod search_tests {
         drop(tx);
         app.drain(&rx);
         app.cursor = 0;
-        app.push_or_find_search_group(SearchGroup::from_pattern("zzz").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("zzz").unwrap());
         assert!(!app.jump_first_match());
         assert_eq!(app.cursor, 0);
-        assert_eq!(app.search_match_stats(), Some((None, 0)));
+        assert_eq!(app.highlight_match_stats(), Some((None, 0)));
     }
 
     #[test]
@@ -1676,9 +1948,9 @@ mod search_tests {
         app.following = false;
         app.cursor = 0;
 
-        app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
-        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
-        assert_eq!(app.active_search, Some(1));
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("foo").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
+        assert_eq!(app.active_highlight, Some(1));
 
         assert!(app.jump_first_match());
         // Must land on newest group ("bar"), not the earlier "foo" at index 0.
@@ -1695,8 +1967,8 @@ mod search_tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_search_group(SearchGroup::from_pattern("ERROR").unwrap());
-        assert!(app.search_groups.any_match("", "an error occurred"));
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("ERROR").unwrap());
+        assert!(app.highlight_groups.any_match("", "an error occurred"));
     }
 
     #[test]
@@ -1710,8 +1982,8 @@ mod search_tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_search_group(SearchGroup::from_pattern("MyTag").unwrap());
-        assert_eq!(app.search_match_stats(), Some((None, 1)));
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("MyTag").unwrap());
+        assert_eq!(app.highlight_match_stats(), Some((None, 1)));
         assert!(app.jump_first_match());
         assert_eq!(app.cursor, 1);
         assert_eq!(app.rows[app.visible[app.cursor]].tag, "MyTag");
@@ -1726,28 +1998,28 @@ mod search_tests {
         tx.send(row_with_msg("T", "hit")).unwrap();
         drop(tx);
         app.drain(&rx);
-        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
-        app.search_groups.groups[0].enabled = false;
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
+        app.highlight_groups.groups[0].enabled = false;
         assert!(!app.find_match(1));
-        assert!(app.search_match_stats().is_none());
+        assert!(app.highlight_match_stats().is_none());
     }
 
     #[test]
-    fn test_push_or_find_search_group_dedups() {
+    fn test_push_or_find_highlight_group_dedups() {
         let mut app = App::new(100);
-        let idx0 = app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
+        let idx0 = app.push_or_find_highlight_group(HighlightGroup::from_pattern("foo").unwrap());
         assert_eq!(idx0, 0);
-        assert_eq!(app.active_search, Some(0));
-        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
-        assert_eq!(app.active_search, Some(1));
-        let idx1 = app.push_or_find_search_group(SearchGroup::from_pattern("FOO").unwrap());
+        assert_eq!(app.active_highlight, Some(0));
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
+        assert_eq!(app.active_highlight, Some(1));
+        let idx1 = app.push_or_find_highlight_group(HighlightGroup::from_pattern("FOO").unwrap());
         assert_eq!(idx1, 0);
-        assert_eq!(app.active_search, Some(0));
-        assert_eq!(app.search_groups.groups.len(), 2);
+        assert_eq!(app.active_highlight, Some(0));
+        assert_eq!(app.highlight_groups.groups.len(), 2);
     }
 
     #[test]
-    fn test_find_match_only_uses_active_search_group() {
+    fn test_find_match_only_uses_active_highlight_group() {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row_with_msg("T", "foo early")).unwrap();
@@ -1757,8 +2029,8 @@ mod search_tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
-        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("foo").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
         // active is "bar" — n must not land on "foo"
         assert!(app.find_match(1));
         assert_eq!(app.rows[app.visible[app.cursor]].msg, "bar mid");
@@ -1767,21 +2039,21 @@ mod search_tests {
     }
 
     #[test]
-    fn test_delete_active_search_falls_back_to_newest() {
+    fn test_delete_active_highlight_falls_back_to_newest() {
         let mut app = App::new(100);
-        app.push_or_find_search_group(SearchGroup::from_pattern("a").unwrap());
-        app.push_or_find_search_group(SearchGroup::from_pattern("b").unwrap());
-        app.push_or_find_search_group(SearchGroup::from_pattern("c").unwrap());
-        assert_eq!(app.active_search, Some(2));
-        app.search_cursor = 2;
-        app.focus = Focus::SearchStrip;
-        app.delete_focused_strip_group(StripKind::Search);
-        assert_eq!(app.search_groups.groups.len(), 2);
-        assert_eq!(app.active_search, Some(1)); // newest remaining ("b")
-        app.search_cursor = 0;
-        app.delete_focused_strip_group(StripKind::Search); // remove "a", active was 1 -> shifts to 0
-        assert_eq!(app.active_search, Some(0));
-        assert_eq!(app.search_groups.groups[0].pattern, "b");
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("a").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("b").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("c").unwrap());
+        assert_eq!(app.active_highlight, Some(2));
+        app.highlight_cursor = 2;
+        app.focus = Focus::HighlightStrip;
+        app.delete_focused_strip_group(StripKind::Highlight);
+        assert_eq!(app.highlight_groups.groups.len(), 2);
+        assert_eq!(app.active_highlight, Some(1)); // newest remaining ("b")
+        app.highlight_cursor = 0;
+        app.delete_focused_strip_group(StripKind::Highlight); // remove "a", active was 1 -> shifts to 0
+        assert_eq!(app.active_highlight, Some(0));
+        assert_eq!(app.highlight_groups.groups[0].pattern, "b");
     }
 }
 
@@ -1910,24 +2182,24 @@ mod flash_tests {
     }
 
     #[test]
-    fn update_and_clear_search_groups() {
+    fn update_and_clear_highlight_groups() {
         let mut app = App::new(100);
-        let g = SearchGroup::from_pattern("foo").unwrap();
-        app.push_or_find_search_group(g);
+        let g = HighlightGroup::from_pattern("foo").unwrap();
+        app.push_or_find_highlight_group(g);
         assert!(app.update_search_group(0, "bar"));
-        assert!(app.search_groups.groups[0].same_pattern_as("bar"));
-        app.clear_search_groups();
-        assert!(app.search_groups.groups.is_empty());
-        assert!(app.active_search.is_none());
+        assert!(app.highlight_groups.groups[0].same_pattern_as("bar"));
+        app.clear_highlight_groups();
+        assert!(app.highlight_groups.groups.is_empty());
+        assert!(app.active_highlight.is_none());
     }
 
     #[test]
     fn update_search_group_dedups_other_indices() {
         let mut app = App::new(100);
-        app.push_or_find_search_group(SearchGroup::from_pattern("foo").unwrap());
-        app.push_or_find_search_group(SearchGroup::from_pattern("bar").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("foo").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
         assert!(!app.update_search_group(0, "BAR"));
-        assert!(app.search_groups.groups[0].same_pattern_as("foo"));
+        assert!(app.highlight_groups.groups[0].same_pattern_as("foo"));
     }
 
     #[test]
@@ -1954,6 +2226,7 @@ mod flash_tests {
             .try_add(Bookmark {
                 row_id: 1,
                 label: "test".into(),
+                enabled: true,
             })
             .unwrap();
         app.clear_bookmarks();
@@ -1967,6 +2240,7 @@ mod flash_tests {
             .try_add(Bookmark {
                 row_id: 42,
                 label: "old".into(),
+                enabled: true,
             })
             .unwrap();
         assert!(app.update_bookmark_label(42, "new".into()));
@@ -1975,15 +2249,33 @@ mod flash_tests {
     }
 
     #[test]
-    fn delete_search_group_at_fixes_active_search() {
+    fn toggle_unified_enabled_bookmark() {
+        use crate::picker::UnifiedKind;
+
         let mut app = App::new(100);
-        app.push_or_find_search_group(SearchGroup::from_pattern("a").unwrap());
-        app.push_or_find_search_group(SearchGroup::from_pattern("b").unwrap());
-        assert_eq!(app.active_search, Some(1));
-        assert!(app.delete_search_group_at(1));
-        assert_eq!(app.active_search, Some(0));
-        assert!(app.delete_search_group_at(0));
-        assert!(app.active_search.is_none());
+        app.bookmarks
+            .try_add(Bookmark {
+                row_id: 1,
+                label: "b".into(),
+                enabled: true,
+            })
+            .unwrap();
+        assert!(app.toggle_unified_enabled(UnifiedKind::Bookmark, 0));
+        assert!(!app.bookmarks.items[0].enabled);
+        assert!(app.toggle_unified_enabled(UnifiedKind::Bookmark, 0));
+        assert!(app.bookmarks.items[0].enabled);
+    }
+
+    #[test]
+    fn delete_highlight_group_at_fixes_active_highlight() {
+        let mut app = App::new(100);
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("a").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("b").unwrap());
+        assert_eq!(app.active_highlight, Some(1));
+        assert!(app.delete_highlight_group_at(1));
+        assert_eq!(app.active_highlight, Some(0));
+        assert!(app.delete_highlight_group_at(0));
+        assert!(app.active_highlight.is_none());
     }
 }
 
@@ -2080,7 +2372,7 @@ mod severe_tests {
         assert!(app.find_severe(1));
         // Only one severe in visible; wrap lands on same Keep E (index 0), not Drop.
         assert_eq!(app.cursor, 0);
-        assert_eq!(app.rows[app.visible[app.cursor]].tag, "Keep");
+        assert_eq!(app.current_row().unwrap().tag, "Keep");
     }
 
     #[test]
@@ -2098,5 +2390,22 @@ mod severe_tests {
         assert!(is_severe_row(&app.rows[app.visible[1]]));
         assert!(app.find_severe(1));
         assert_eq!(app.cursor, 1);
+    }
+}
+
+#[cfg(test)]
+mod vocab_tests {
+    use super::*;
+
+    #[test]
+    fn push_row_feeds_vocab() {
+        let mut app = App::new(100);
+        let row = crate::model::EntryRow::from_line(
+            "01-01 00:00:00.000  1234  1234 I VocabTag: hello world test123",
+        );
+        app.push_row(row.unwrap());
+        let cands = app.vocab.tag_candidates("Vocab");
+        assert!(!cands.is_empty(), "VocabTag should appear in tag candidates");
+        assert_eq!(cands[0], "VocabTag");
     }
 }

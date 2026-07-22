@@ -234,6 +234,41 @@ fn push_msg_token(
     }
 }
 
+/// Like `tokenize_msg_tokens` but with a higher per-message cap for vocab building.
+pub fn tokenize_msg_for_vocab(msg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut start: Option<usize> = None;
+    for (i, ch) in msg.char_indices() {
+        if ch.is_ascii_alphanumeric() {
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if let Some(s) = start.take() {
+            let token = &msg[s..i];
+            if token.len() >= 2 {
+                let key = token.to_ascii_lowercase();
+                if seen.insert(key) {
+                    out.push(token.to_string());
+                }
+            }
+            if out.len() >= 50 {
+                return out;
+            }
+        }
+    }
+    if let Some(s) = start {
+        let token = &msg[s..];
+        if token.len() >= 2 {
+            let key = token.to_ascii_lowercase();
+            if seen.insert(key) {
+                out.push(token.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// H7/H9 candidates consumed by the unified fzf picker.
 pub fn msg_token_candidates(msg: &str) -> Vec<String> {
     tokenize_msg_tokens(msg)
@@ -535,5 +570,14 @@ mod msg_tokenize_tests {
     #[test]
     fn msg_candidates_empty_without_tokens() {
         assert!(msg_token_candidates("a!").is_empty());
+    }
+
+    #[test]
+    fn tokenize_for_vocab_no_8_cap() {
+        let msg = "aa bb cc dd ee ff gg hh ii jj kk";
+        let result = tokenize_msg_for_vocab(msg);
+        assert!(result.len() > 8, "expected >8 tokens, got {}", result.len());
+        assert!(result.contains(&"aa".to_string()));
+        assert!(result.contains(&"kk".to_string()));
     }
 }
