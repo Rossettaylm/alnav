@@ -1420,13 +1420,19 @@ pub fn render_picker(
     empty_msg: &str,
     preview_lines: &[crate::preview::PreviewLine],
     left_ratio: f32,
+    show_preview: bool,
     frame: &mut Frame,
     frame_area: Rect,
 ) {
     let picker_area = picker_frame_rect(frame_area);
     frame.render_widget(Clear, picker_area);
 
-    let (left, right) = split_picker_lr(picker_area, left_ratio);
+    let (left, right) = if show_preview {
+        let (l, r) = split_picker_lr(picker_area, left_ratio);
+        (l, Some(r))
+    } else {
+        (picker_area, None)
+    };
     let left_inner = render_modal_shell(title, frame, left);
     let (candidates_area, search_area) = picker_left_stack(left_inner);
 
@@ -1452,7 +1458,9 @@ pub fn render_picker(
         frame,
         search_area,
     );
-    render_preview("Preview", preview_lines, "无预览", frame, right);
+    if let Some(right) = right {
+        render_preview("Preview", preview_lines, "无预览", frame, right);
+    }
 }
 
 /// Destructive picker action confirmation, overlaid at the picker center.
@@ -2382,6 +2390,7 @@ mod tests {
                     "无项目",
                     &[],
                     0.4,
+                    true,
                     frame,
                     frame.area(),
                 )
@@ -2415,6 +2424,7 @@ mod tests {
                     "无项目",
                     &[],
                     0.4,
+                    true,
                     frame,
                     frame.area(),
                 )
@@ -2457,6 +2467,7 @@ mod tests {
                     "无项目",
                     &[],
                     0.4,
+                    true,
                     frame,
                     frame.area(),
                 );

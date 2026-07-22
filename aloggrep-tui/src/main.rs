@@ -473,6 +473,7 @@ fn run<B: ratatui::backend::Backend>(
                         &data.empty_msg,
                         &data.preview,
                         app.config.picker_left_ratio,
+                        data.show_preview,
                         frame,
                         frame_area,
                     );
@@ -631,6 +632,8 @@ struct PickerRenderData {
     selected: usize,
     empty_msg: String,
     preview: Vec<preview::PreviewLine>,
+    /// Whether the right preview pane should be rendered (layout-level toggle).
+    show_preview: bool,
 }
 
 fn picker_render_data(app: &App) -> Option<PickerRenderData> {
@@ -664,6 +667,8 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
         },
     };
     let match_query = text.clone();
+    let show_preview = app.config.picker_preview_enabled
+        && !matches!(session.kind, PickerKind::Unified);
     let mut selected = session.selected;
     let mut chips = Vec::new();
     let mut exclude_chips = false;
@@ -696,32 +701,36 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                 .map(|&index| session.checked.contains(&all[index].id))
                 .collect();
 
-            if let Some(&src) = visible.get(session.selected) {
-                let item = &all[src];
-                match item.id.kind {
-                    UnifiedKind::Highlight => {
-                        preview_lines = preview::preview_highlight_pattern_lines(
-                            app,
-                            &app.highlight_groups.groups[item.id.source_index].pattern,
-                        )
-                        .unwrap_or_default();
+            if show_preview {
+                if let Some(&src) = visible.get(session.selected) {
+                    let item = &all[src];
+                    match item.id.kind {
+                        UnifiedKind::Highlight => {
+                            preview_lines = preview::preview_highlight_pattern_lines(
+                                app,
+                                &app.highlight_groups.groups[item.id.source_index].pattern,
+                            )
+                            .unwrap_or_default();
+                        }
+                        UnifiedKind::Filter => {
+                            let input = input::InputBox {
+                                chips: app.groups.groups[item.id.source_index].chips.clone(),
+                                ..input::InputBox::default()
+                            };
+                            preview_lines = preview::preview_filter_lines(app, &input);
+                        }
+                        UnifiedKind::Exclude => {
+                            let input = input::InputBox {
+                                chips: vec![
+                                    app.groups.excludes[item.id.source_index].chip.clone()
+                                ],
+                                exclude_mode: true,
+                                ..input::InputBox::default()
+                            };
+                            preview_lines = preview::preview_filter_lines(app, &input);
+                        }
+                        UnifiedKind::Bookmark => {}
                     }
-                    UnifiedKind::Filter => {
-                        let input = input::InputBox {
-                            chips: app.groups.groups[item.id.source_index].chips.clone(),
-                            ..input::InputBox::default()
-                        };
-                        preview_lines = preview::preview_filter_lines(app, &input);
-                    }
-                    UnifiedKind::Exclude => {
-                        let input = input::InputBox {
-                            chips: vec![app.groups.excludes[item.id.source_index].chip.clone()],
-                            exclude_mode: true,
-                            ..input::InputBox::default()
-                        };
-                        preview_lines = preview::preview_filter_lines(app, &input);
-                    }
-                    UnifiedKind::Bookmark => {}
                 }
             }
         }
@@ -785,7 +794,9 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                             ];
                         }
                     }
-                    preview_lines = preview::preview_filter_lines(app, input);
+                    if input.draft_field.is_some() && !input.draft.is_empty() {
+                        preview_lines = preview::preview_filter_lines(app, input);
+                    }
                 }
                 empty_msg = "Enter 收 pill / 提交".to_string();
             }
@@ -824,6 +835,7 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
         selected,
         empty_msg,
         preview: preview_lines,
+        show_preview,
     })
 }
 
@@ -987,7 +999,7 @@ fn submit_filter_picker(app: &mut App) {
         let Some(input) = app.picker.as_mut().and_then(|session| session.input.as_mut()) else {
             return;
         };
-        if input.confirm_field_candidate() {
+        if input.confirm_field_candidate_on_enter() {
             return;
         }
         if input.has_pending_draft() {
@@ -2027,7 +2039,7 @@ fn handle_insert_key(
             };
         }
         KeyCode::Enter => {
-            if input.confirm_field_candidate() {
+            if input.confirm_field_candidate_on_enter() {
                 // picked field; draft cleared
             } else if input.has_pending_draft() {
                 input.commit_draft_as_chip();
@@ -4318,6 +4330,55 @@ mod dispatch_tests {
         let data = picker_render_data(&app).unwrap();
         assert!(data.labels.contains(&"W".to_string()));
         assert!(data.labels.contains(&"E".to_string()));
+    }
+
+    #[test]
+    fn picker_render_data_unified_never_shows_preview() {
+        use crate::picker::PickerKind;
+        let mut app = App::new(100);
+        app.open_picker(PickerKind::Unified);
+        let data = picker_render_data(&app).unwrap();
+        assert!(!data.show_preview, "Unified picker must never render preview");
+        assert!(data.preview.is_empty());
+    }
+
+    #[test]
+    fn picker_render_data_filter_new_empty_draft_has_empty_preview() {
+        use crate::picker::PickerKind;
+        let mut app = App::new(100);
+        app.open_picker_new(PickerKind::Filter);
+        let data = picker_render_data(&app).unwrap();
+        // draft_field == None, draft empty: field keyword candidates shown, preview empty
+        assert!(data.draft_field.is_none());
+        assert!(data.preview.is_empty());
+        assert!(data.show_preview, "Filter picker still shows preview pane");
+        // field keywords should appear immediately without typing
+        assert!(data.labels.iter().any(|l| l == "tag"));
+    }
+
+    #[test]
+    fn picker_render_data_filter_new_field_set_empty_draft_has_empty_preview() {
+        use crate::input::ChipField;
+        use crate::picker::PickerKind;
+        use std::sync::mpsc;
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(
+            crate::model::EntryRow::from_line("01-01 00:00:00.000  1 1 I TargetTag: msg")
+                .unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.open_picker_new(PickerKind::Filter);
+        {
+            let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
+            input.set_field(ChipField::Tag);
+        }
+        // field set but draft still empty: no preview content yet
+        let data = picker_render_data(&app).unwrap();
+        assert!(data.draft_field == Some(ChipField::Tag));
+        assert!(data.preview.is_empty(), "empty draft value must not preview");
     }
 
     #[test]

@@ -1,2 +1,7 @@
 # 搜索面板左栏宽度占比（右栏 = 1 - 该值）。默认 0.4（4:6）
 picker_left_ratio = 0.4
+
+# 是否显示搜索面板右侧 Preview 栏。默认 true。
+# 设为 false 时所有 Picker 面板均全宽展示，不渲染右侧预览列。
+# 注意：聚合面板（Space Space）无论此项设置如何，始终全宽（无 Preview）。
+picker_preview_enabled = true

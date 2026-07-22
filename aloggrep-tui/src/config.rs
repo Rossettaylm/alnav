@@ -50,12 +50,15 @@ impl ThemeLoadStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
     pub picker_left_ratio: f32,
+    /// When false, all picker panels render full-width (no right preview pane).
+    pub picker_preview_enabled: bool,
 }
 
 impl AppConfig {
     pub fn default_config() -> Self {
         Self {
             picker_left_ratio: 0.4,
+            picker_preview_enabled: true,
         }
     }
 
@@ -88,6 +91,7 @@ impl ConfigLoadStatus {
 #[derive(Debug, Deserialize)]
 struct ConfigToml {
     picker_left_ratio: Option<f32>,
+    picker_preview_enabled: Option<bool>,
 }
 
 /// Load `$config_dir/config.toml` and return config + load status.
@@ -102,6 +106,9 @@ pub fn load_config(config_dir: &Path) -> (AppConfig, ConfigLoadStatus) {
                 let mut cfg = AppConfig::default_config();
                 if let Some(r) = t.picker_left_ratio {
                     cfg.picker_left_ratio = AppConfig::clamp_ratio(r);
+                }
+                if let Some(v) = t.picker_preview_enabled {
+                    cfg.picker_preview_enabled = v;
                 }
                 (cfg, ConfigLoadStatus::Loaded(path))
             }
@@ -244,5 +251,25 @@ mod tests {
         assert!((cfg.picker_left_ratio - 0.4).abs() < f32::EPSILON);
         assert!(matches!(st, ConfigLoadStatus::Fallback { .. }));
         assert!(st.status_hint().unwrap().contains("CONFIG 回退"));
+    }
+
+    #[test]
+    fn load_config_picks_up_preview_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "picker_preview_enabled = false\n",
+        )
+        .unwrap();
+        let (cfg, st) = load_config(dir.path());
+        assert!(!cfg.picker_preview_enabled);
+        assert!(matches!(st, ConfigLoadStatus::Loaded(_)));
+    }
+
+    #[test]
+    fn load_config_defaults_preview_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, _) = load_config(dir.path());
+        assert!(cfg.picker_preview_enabled);
     }
 }

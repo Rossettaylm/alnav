@@ -111,7 +111,7 @@ impl InputBox {
     /// Fields whose keyword has `draft` as an ignore-case prefix.
     /// Empty when the panel is not visible.
     pub fn field_candidates(&self) -> Vec<ChipField> {
-        if !self.field_popup_visible() {
+        if self.draft_field.is_some() {
             return Vec::new();
         }
         let q = self.draft.to_ascii_lowercase();
@@ -144,6 +144,18 @@ impl InputBox {
         self.field_selected = 0;
         self.draft_field = Some(field);
         true
+    }
+
+    /// Enter-only variant of [`Self::confirm_field_candidate`]: requires a
+    /// non-empty draft (legacy `field_popup_visible` contract). Enter is
+    /// overloaded with pill-commit/group-submit, so it must not hijack a
+    /// bare Enter on an empty draft as "pick the first field" — that
+    /// selection is reserved for Tab (or typing a prefix, then Enter).
+    pub fn confirm_field_candidate_on_enter(&mut self) -> bool {
+        if self.draft.is_empty() {
+            return false;
+        }
+        self.confirm_field_candidate()
     }
 
     /// Compile already-committed chips into a `Group` via `Expr::from_filters`
@@ -339,7 +351,7 @@ mod field_popup_tests {
     fn test_field_popup_hidden_when_draft_empty() {
         let input = InputBox::default();
         assert!(!input.field_popup_visible());
-        assert!(input.field_candidates().is_empty());
+        assert_eq!(input.field_candidates().len(), CHIP_FIELDS.len());
     }
 
     #[test]
