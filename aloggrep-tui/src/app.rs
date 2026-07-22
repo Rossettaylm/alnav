@@ -200,6 +200,18 @@ pub struct App {
     pub config: crate::config::AppConfig,
     /// Vocabulary accumulated from ingested rows (tag/pkg/msg tokens).
     pub vocab: Vocab,
+    /// Dirty flag for the highlight match stats cache (P1 perf optimisation).
+    /// Set true on any change to visible / active highlight / highlight patterns.
+    /// Cleared when `highlight_match_stats()` recomputes.
+    pub match_stats_stale: bool,
+    /// Cursor value used when `cached_match_stats` was last computed.
+    /// Detects direct `cursor` field assignments that bypass `mark_match_stats_stale`.
+    match_stats_cursor: usize,
+    /// Cached result of `highlight_match_stats`. Valid when stale=false and cursor unchanged.
+    pub cached_match_stats: Option<(Option<usize>, usize)>,
+    /// Set to true the first time `drain` finds the ingest channel disconnected
+    /// (file fully read or --hdc session ended). Used by P4 draw throttle.
+    pub ingest_done: bool,
 }
 
 impl App {
@@ -243,6 +255,10 @@ impl App {
             export_source: crate::export::ExportSource::default(),
             config: crate::config::AppConfig::default_config(),
             vocab: Vocab::default(),
+            match_stats_stale: true,
+            match_stats_cursor: usize::MAX, // sentinel: force first computation
+            cached_match_stats: None,
+            ingest_done: false,
         }
     }
 
@@ -368,9 +384,19 @@ impl App {
     /// Drain everything currently available on the channel without blocking.
     /// Each new row is checked against the current filter in O(1) and, if
     /// visible, appended — no full rescan (see design doc "增量过滤").
+    /// Drain all pending rows from the ingest channel without blocking.
+    /// Sets `self.ingest_done = true` when the sender has been dropped (P4).
     pub fn drain(&mut self, rx: &Receiver<EntryRow>) {
-        while let Ok(row) = rx.try_recv() {
-            self.push_row(row);
+        use std::sync::mpsc::TryRecvError;
+        loop {
+            match rx.try_recv() {
+                Ok(row) => self.push_row(row),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.ingest_done = true;
+                    break;
+                }
+            }
         }
     }
 
@@ -379,6 +405,8 @@ impl App {
         self.vocab.feed(&row.tag, &row.pkg, &msg_tokens);
         row.row_id = self.next_row_id;
         self.next_row_id = self.next_row_id.wrapping_add(1);
+        // P2: compute severe once at ingest so minimap/find_severe never re-run CrashDetector.
+        row.severe = is_severe_row(&row);
         let active = self.filter_active();
         let matches = active && self.row_passes_filters(&row);
 
@@ -407,6 +435,8 @@ impl App {
             }
         }
         self.follow_tick();
+        // P1: any visible change (row added / evicted) invalidates cached stats.
+        self.match_stats_stale = true;
     }
 
     /// Update `visible`/`cursor`/`list_offset`/`visual_anchor` after the front
@@ -461,6 +491,7 @@ impl App {
         } else if self.cursor >= self.visible.len() {
             self.cursor = self.visible.len().saturating_sub(1);
         }
+        self.match_stats_stale = true;
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -469,14 +500,17 @@ impl App {
         }
         let new = self.cursor as isize + delta;
         self.cursor = new.clamp(0, self.visible.len() as isize - 1) as usize;
+        self.match_stats_stale = true;
     }
 
     pub fn jump_top(&mut self) {
         self.cursor = 0;
+        self.match_stats_stale = true;
     }
 
     pub fn jump_bottom(&mut self) {
         self.cursor = self.visible.len().saturating_sub(1);
+        self.match_stats_stale = true;
     }
 
     /// Call after any new rows are appended in `drain`/`push_row`'s path: if
@@ -626,14 +660,17 @@ impl App {
         let len = self.highlight_groups.groups.len();
         if len == 0 {
             self.active_highlight = None;
+            self.match_stats_stale = true;
             return;
         }
         match self.active_highlight {
             Some(active) if active == removed => {
                 self.active_highlight = Some(len - 1);
+                self.match_stats_stale = true;
             }
             Some(active) if active > removed => {
                 self.active_highlight = Some(active - 1);
+                self.match_stats_stale = true;
             }
             _ => {}
         }
@@ -676,6 +713,7 @@ impl App {
             StripKind::Highlight => {
                 let g = &mut self.highlight_groups.groups[cursor];
                 g.enabled = !g.enabled;
+                self.match_stats_stale = true;
             }
         }
     }
@@ -788,6 +826,7 @@ impl App {
         };
         self.following = false;
         self.cursor = vis;
+        self.match_stats_stale = true;
         JumpResult::Ok
     }
 
@@ -1139,9 +1178,10 @@ impl App {
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
             let row_idx = self.visible[idx];
-            if is_severe_row(&self.view_source()[row_idx]) {
+            if self.view_source()[row_idx].severe {
                 self.following = false;
                 self.cursor = idx;
+                self.match_stats_stale = true;
                 return true;
             }
         }
@@ -1176,6 +1216,7 @@ impl App {
             if hit {
                 self.following = false;
                 self.cursor = idx;
+                self.match_stats_stale = true;
                 return true;
             }
         }
@@ -1197,6 +1238,7 @@ impl App {
             if group.matches_row(&row.tag, &row.msg) {
                 self.following = false;
                 self.cursor = idx;
+                self.match_stats_stale = true;
                 return true;
             }
         }
@@ -1316,6 +1358,7 @@ impl App {
         }
         group.enabled = self.highlight_groups.groups[index].enabled;
         self.highlight_groups.groups[index] = group;
+        self.match_stats_stale = true;
         true
     }
 
@@ -1323,6 +1366,7 @@ impl App {
         self.highlight_groups.groups.clear();
         self.active_highlight = None;
         self.highlight_cursor = 0;
+        self.match_stats_stale = true;
     }
 
     pub fn delete_highlight_group_at(&mut self, index: usize) -> bool {
@@ -1408,14 +1452,34 @@ impl App {
             self.highlight_groups.groups.len() - 1
         };
         self.active_highlight = Some(idx);
+        self.match_stats_stale = true;
         idx
     }
 
-    /// Search hit position among visible rows for the globally active group:
-    /// `None` when there is no active enabled group; otherwise
-    /// `(current_1based_or_none, total_hits)`. `current` is `None` when the
-    /// cursor is not on a matching row.
-    pub fn highlight_match_stats(&self) -> Option<(Option<usize>, usize)> {
+    /// Search hit position among visible rows for the globally active group.
+    /// Recomputes lazily when the stale flag is set OR the cursor moved since
+    /// the last computation (handles direct `cursor` field writes in tests).
+    pub fn highlight_match_stats(&mut self) -> Option<(Option<usize>, usize)> {
+        if self.match_stats_stale || self.cursor != self.match_stats_cursor {
+            self.match_stats_stale = false;
+            self.match_stats_cursor = self.cursor;
+            self.cached_match_stats = self.compute_match_stats_inner();
+        }
+        self.cached_match_stats
+    }
+
+    /// Eagerly recompute and cache highlight match stats if the stale flag is set.
+    /// Called once per draw cycle in `run()` so that the O(n) scan is always done
+    /// BEFORE any render work, keeping the render phase O(viewport).
+    pub fn recompute_match_stats_if_stale(&mut self) {
+        if self.match_stats_stale || self.cursor != self.match_stats_cursor {
+            self.match_stats_stale = false;
+            self.match_stats_cursor = self.cursor;
+            self.cached_match_stats = self.compute_match_stats_inner();
+        }
+    }
+
+    fn compute_match_stats_inner(&self) -> Option<(Option<usize>, usize)> {
         let Some(group) = self.active_highlight_group() else {
             return None;
         };

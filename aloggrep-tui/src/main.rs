@@ -406,12 +406,35 @@ fn run<B: ratatui::backend::Backend>(
     rx: &std::sync::mpsc::Receiver<model::EntryRow>,
 ) -> Result<(), String> {
     use app::Mode;
+    use std::time::Instant;
+
+    // P4: minimum draw interval during active ingest to avoid thrashing the
+    // renderer while the background thread floods the channel.
+    // After ingest completes (ingest_done=true) or after any user event,
+    // we always draw immediately.
+    const MIN_INGEST_DRAW_MS: u64 = 50;
+    let mut last_draw = Instant::now();
+    let mut force_draw = true; // first frame always draws
 
     while !app.should_quit {
         app.drain(rx);
         app.tick_flash();
+        // P1: recompute highlight match stats once per frame (O(n) scan).
+        // All mutation paths set match_stats_stale=true; here is the single
+        // amortised recompute point so render_status_bar just reads a cached value.
+        app.recompute_match_stats_if_stale();
 
-        terminal
+        // P4: throttle draws during active file ingest to ~20 FPS.
+        // User events (force_draw=true) and post-ingest mode always draw immediately.
+        let elapsed_ms = last_draw.elapsed().as_millis() as u64;
+        let should_draw =
+            force_draw || app.ingest_done || elapsed_ms >= MIN_INGEST_DRAW_MS;
+
+        if should_draw {
+            force_draw = false;
+            last_draw = Instant::now();
+
+            terminal
             .draw(|frame| {
                 let frame_area = frame.area();
                 let outer_w = frame_area.width;
@@ -519,10 +542,20 @@ fn run<B: ratatui::backend::Backend>(
                 }
             })
             .map_err(|e| e.to_string())?;
+        } // end if should_draw
 
-        if !event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
+        // Poll for user events. When we skipped the draw (ingest active, drew
+        // recently) use a short timeout so we return quickly for the next draw.
+        let poll_ms = if should_draw {
+            100u64 // normal: wait up to 100ms for the next event
+        } else {
+            MIN_INGEST_DRAW_MS.saturating_sub(last_draw.elapsed().as_millis() as u64).max(1)
+        };
+        if !event::poll(Duration::from_millis(poll_ms)).map_err(|e| e.to_string())? {
             continue;
         }
+        // Got an event: always force a draw on the next iteration.
+        force_draw = true;
         let read_event = event::read().map_err(|e| e.to_string())?;
         let key = match read_event {
             Event::Key(key) => key,
@@ -1251,14 +1284,22 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                 app.picker.as_mut().unwrap().selected = selected;
             }
             KeyCode::Down => {
-                let session = app.picker.as_ref().unwrap();
-                let mut highlight_box = crate::highlight_model::HighlightBox {
-                    draft: session.draft.clone(),
-                    editing: true,
-                    selected: session.selected,
+                let (draft, sel) = {
+                    let s = app.picker.as_ref().unwrap();
+                    (s.draft.clone(), s.selected)
                 };
-                highlight_box.move_selection(&app.highlight_groups.groups, 1);
-                app.picker.as_mut().unwrap().selected = highlight_box.selected;
+                if !draft.is_empty() {
+                    let n = app.vocab.all_candidates(&draft).len();
+                    app.picker.as_mut().unwrap().selected = (sel + 1).min(n.saturating_sub(1));
+                } else {
+                    let mut highlight_box = crate::highlight_model::HighlightBox {
+                        draft,
+                        editing: true,
+                        selected: sel,
+                    };
+                    highlight_box.move_selection(&app.highlight_groups.groups, 1);
+                    app.picker.as_mut().unwrap().selected = highlight_box.selected;
+                }
             }
             KeyCode::Tab => {
                 let (draft, selected) = {

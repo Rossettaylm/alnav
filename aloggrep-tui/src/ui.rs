@@ -7,9 +7,9 @@ use regex::Regex;
 
 use crate::app::{App, Focus, Mode};
 use crate::filter_model::Group;
-use crate::input::InputBox;
+use crate::input::{ChipField, InputBox};
 use crate::model::EntryRow;
-use crate::search_model::{SearchBox, SearchGroup};
+use crate::highlight_model::{HighlightBox, HighlightGroup};
 use crate::theme;
 
 /// Horizontal gap (columns) between chip groups on the same wrap row.
@@ -163,13 +163,82 @@ pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
     inner
 }
 
-/// Candidate list skin shared by field popup and Search history completion.
+/// Find ignore-case substring match as byte range in `haystack`, or `None`.
+pub fn find_ignore_case_range(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    if needle.is_empty() {
+        return None;
+    }
+    let hay: Vec<(usize, char)> = haystack.char_indices().collect();
+    let needle_lower = needle.to_lowercase();
+    let needle_len = needle.chars().count();
+    if needle_len == 0 || hay.len() < needle_len {
+        return None;
+    }
+    for start in 0..=hay.len() - needle_len {
+        let window: String = hay[start..start + needle_len]
+            .iter()
+            .map(|(_, c)| *c)
+            .collect::<String>()
+            .to_lowercase();
+        if window == needle_lower {
+            let byte_start = hay[start].0;
+            let byte_end = hay
+                .get(start + needle_len)
+                .map(|(i, _)| *i)
+                .unwrap_or(haystack.len());
+            return Some((byte_start, byte_end));
+        }
+    }
+    None
+}
+
+/// Build label spans with optional substring match coloring.
+/// `checked` changes the selection-marker (prefix) color for Tab multi-select.
+fn candidate_label_spans(
+    label: &str,
+    query: &str,
+    selected: bool,
+    checked: bool,
+    base: Style,
+) -> Vec<Span<'static>> {
+    let match_style = theme::candidate_match_style(selected);
+    let prefix = if selected || checked {
+        theme::candidate_prefix()
+    } else {
+        " ".repeat(theme::candidate_prefix().chars().count().max(1))
+    };
+    let prefix_style = if checked {
+        theme::candidate_checked_prefix_style().bg(base.bg.unwrap_or(Color::Reset))
+    } else {
+        base
+    };
+    let mut spans = vec![Span::styled(prefix, prefix_style)];
+    if let Some((s, e)) = find_ignore_case_range(label, query) {
+        if s > 0 {
+            spans.push(Span::styled(label[..s].to_string(), base));
+        }
+        spans.push(Span::styled(label[s..e].to_string(), match_style));
+        if e < label.len() {
+            spans.push(Span::styled(label[e..].to_string(), base));
+        }
+    } else {
+        spans.push(Span::styled(label.to_string(), base));
+    }
+    spans.push(Span::styled(" ", base));
+    spans
+}
+
+/// Candidate list skin shared by field popup and Highlight history completion.
+/// Selection / match colors and selected-row prefix come from [`theme`].
+/// `checked` (same length as `labels`, or empty) marks Tab multi-select rows.
 pub fn render_candidate_list(
     title: &str,
     labels: &[String],
     styles: &[Style],
+    checked: &[bool],
     selected: usize,
     empty_msg: &str,
+    query: &str,
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -187,17 +256,38 @@ pub fn render_candidate_list(
         );
         return;
     }
+    let sel = selected.min(labels.len() - 1);
     let items: Vec<ListItem> = labels
         .iter()
-        .zip(styles.iter())
-        .map(|(label, style)| ListItem::new(Span::styled(format!(" {label} "), *style)))
+        .enumerate()
+        .map(|(i, label)| {
+            let is_sel = i == sel;
+            let is_checked = checked.get(i).copied().unwrap_or(false);
+            let mut base = if is_sel {
+                theme::candidate_selected_style()
+            } else {
+                theme::candidate_unselected_style()
+            };
+            // Kind/field-colored candidates keep their fg when not selected.
+            if !is_sel {
+                if let Some(style) = styles.get(i) {
+                    if let Some(fg) = style.fg {
+                        base = base.fg(fg);
+                    }
+                }
+            }
+            ListItem::new(Line::from(candidate_label_spans(
+                label, query, is_sel, is_checked, base,
+            )))
+            .style(base)
+        })
         .collect();
     let list = List::new(items)
         .block(block)
-        .highlight_style(theme::candidate_selection_style())
-        .highlight_symbol("\u{203a} ");
+        .highlight_style(Style::default())
+        .highlight_symbol("");
     let mut state = ListState::default();
-    state.select(Some(selected.min(labels.len() - 1)));
+    state.select(Some(sel));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -303,32 +393,44 @@ type PaintPattern<'a> = (&'a Regex, usize, bool);
 /// Collect all pattern matches; later patterns overwrite overlapping ranges
 /// (same order as `paint_patterns`).
 fn collect_matches(msg: &str, patterns: &[PaintPattern<'_>]) -> Vec<ColoredMatch> {
-    // Per-byte: (color_idx, is_active)
-    let mut marked: Vec<Option<(usize, bool)>> = vec![None; msg.len()];
+    if patterns.is_empty() || msg.is_empty() {
+        return Vec::new();
+    }
+    // Build a compact sorted list of non-overlapping match intervals.
+    // Each successive pattern's matches overwrite earlier patterns on overlap
+    // ("later pattern wins") — same semantics as the original per-byte approach
+    // but without allocating vec![None; msg.len()] for every call.
+    let mut result: Vec<ColoredMatch> = Vec::new();
+
     for &(re, color_idx, is_active) in patterns {
         for m in re.find_iter(msg) {
-            for i in m.start()..m.end() {
-                marked[i] = Some((color_idx, is_active));
+            let ns = m.start();
+            let ne = m.end();
+            if ns >= ne {
+                continue;
             }
+            // Clip or remove existing intervals that overlap [ns, ne).
+            let mut tmp = Vec::with_capacity(result.len() + 2);
+            for (es, ee, ec, ea) in result.drain(..) {
+                if ee <= ns || es >= ne {
+                    tmp.push((es, ee, ec, ea)); // no overlap: keep as-is
+                } else {
+                    if es < ns {
+                        tmp.push((es, ns, ec, ea)); // left remnant before new interval
+                    }
+                    if ee > ne {
+                        tmp.push((ne, ee, ec, ea)); // right remnant after new interval
+                    }
+                    // the middle [max(es,ns), min(ee,ne)] is overwritten — drop
+                }
+            }
+            tmp.push((ns, ne, color_idx, is_active));
+            tmp.sort_unstable_by_key(|&(s, _, _, _)| s);
+            result = tmp;
         }
     }
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < marked.len() {
-        if let Some((color, active)) = marked[i] {
-            let start = i;
-            i += 1;
-            while i < marked.len() && marked[i] == Some((color, active)) {
-                i += 1;
-            }
-            // Only emit on char boundaries — marked is per-byte; regex matches
-            // are already on char boundaries for UTF-8.
-            out.push((start, i, color, active));
-        } else {
-            i += 1;
-        }
-    }
-    out
+
+    result
 }
 
 /// Splits `text[range.0..range.1]` into plain/highlighted spans.
@@ -455,7 +557,7 @@ fn render_entry_lines(
 pub enum MinimapMark {
     Track = 0,
     Viewport = 1,
-    Search = 2,
+    Highlight = 2,
     Severe = 3,
 }
 
@@ -501,12 +603,12 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
         } else {
             s * (n - 1) / (samples - 1)
         };
-        let row = &app.rows[app.visible[i]];
+        let row = &app.view_source()[app.visible[i]];
         let r = minimap_row_for_index(i, n, h);
-        if app.search_groups.any_match(&row.tag, &row.msg) && cells[r] < MinimapMark::Search {
-            cells[r] = MinimapMark::Search;
+        if app.highlight_groups.any_match(&row.tag, &row.msg) && cells[r] < MinimapMark::Highlight {
+            cells[r] = MinimapMark::Highlight;
         }
-        if crate::app::is_severe_row(row) {
+        if row.severe {
             cells[r] = MinimapMark::Severe;
         }
     }
@@ -537,9 +639,9 @@ fn render_minimap(app: &App, frame: &mut Frame, rail: Rect) {
                 cell.set_char('│');
                 cell.set_style(theme::minimap_viewport_style());
             }
-            MinimapMark::Search => {
+            MinimapMark::Highlight => {
                 cell.set_char('•');
-                cell.set_style(theme::minimap_search_style());
+                cell.set_style(theme::minimap_highlight_style());
             }
             MinimapMark::Severe => {
                 cell.set_char('•');
@@ -566,34 +668,12 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let content_w = inner.width.saturating_sub(rail_w).max(1);
     let inner_width = content_w as usize;
     let selection = app.selection_range();
-    let patterns = app.search_groups.paint_patterns(app.active_search);
+    let patterns = app.highlight_groups.paint_patterns(app.active_highlight);
 
     let lineno_width = app.visible.len().max(1).to_string().len();
-    let items: Vec<ListItem> = app
-        .visible_rows()
-        .enumerate()
-        .map(|(i, row)| {
-            let mut item = ListItem::new(render_entry_lines(
-                row,
-                &patterns,
-                inner_width,
-                i + 1,
-                lineno_width,
-            ));
-            if let Some((lo, hi)) = selection {
-                if i >= lo && i <= hi {
-                    item = item.style(theme::log_visual_style());
-                }
-            } else if active && i == app.cursor {
-                // Apply selection via ListItem so Span highlight bg is not
-                // overwritten by List::highlight_style's Style::patch.
-                item = item.style(theme::log_selection_style());
-            }
-            item
-        })
-        .collect();
-    // Paint border first; list fills the content columns only (no block).
-    frame.render_widget(block, area);
+
+    // Compute list_area before building items for the virtual-scroll window size.
+    // block.inner() is a pure rect computation — it does not render anything.
     let content_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -602,24 +682,91 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     };
     // M2: bookmark strip embedded at top of Log (collapsed when empty).
     let bm_n = app.bookmarks.display_recent().len() as u16;
-    let (bm_area, list_area) = if bm_n > 0 && content_area.height > bm_n {
+    let (bm_area_opt, list_area) = if bm_n > 0 && content_area.height > bm_n {
         let [top, rest] =
             Layout::vertical([Constraint::Length(bm_n), Constraint::Fill(1)]).areas(content_area);
         (Some(top), rest)
     } else {
         (None, content_area)
     };
-    if let Some(area) = bm_area {
+
+    // ── Virtual scroll ─────────────────────────────────────────────────────────
+    // Build ListItems only for a window around the current scroll position.
+    // 3× the viewport height provides a safe margin for multi-line entries.
+    let n = app.visible.len();
+    let viewport_h = (list_area.height as usize).max(1);
+    let window_size = (viewport_h * 3).max(20);
+
+    // Align window so the cursor is always inside it:
+    //  • cursor above list_offset  → slide window up to cursor (smooth k scrolling)
+    //  • cursor past window bottom → anchor at cursor − viewport_h (G / follow append)
+    //  • otherwise                 → keep window at list_offset
+    let window_start = if n == 0 {
+        0
+    } else if app.cursor < app.list_offset {
+        app.cursor
+    } else if app.cursor >= app.list_offset.saturating_add(window_size) {
+        app.cursor.saturating_sub(viewport_h)
+    } else {
+        app.list_offset
+    };
+    let window_start = window_start.min(n.saturating_sub(1));
+    let window_end = (window_start + window_size).min(n);
+
+    // cursor position relative to the window (always in-bounds after alignment).
+    let rel_cursor = if n > 0 {
+        app.cursor.saturating_sub(window_start)
+    } else {
+        0
+    };
+
+    let source = app.view_source();
+    let items: Vec<ListItem> = if n == 0 {
+        Vec::new()
+    } else {
+        app.visible[window_start..window_end]
+            .iter()
+            .enumerate()
+            .map(|(i, &row_idx)| {
+                let abs_i = window_start + i;
+                let row = &source[row_idx];
+                let mut item = ListItem::new(render_entry_lines(
+                    row,
+                    &patterns,
+                    inner_width,
+                    abs_i + 1,
+                    lineno_width,
+                ));
+                if let Some((lo, hi)) = selection {
+                    if abs_i >= lo && abs_i <= hi {
+                        item = item.style(theme::log_visual_style());
+                    }
+                } else if active && abs_i == app.cursor {
+                    item = item.style(theme::log_selection_style());
+                }
+                item
+            })
+            .collect()
+    };
+
+    // Paint border first; list fills the content columns only (no block).
+    frame.render_widget(block, area);
+    if let Some(area) = bm_area_opt {
         render_bookmark_strip(app, frame, area);
     }
-    // No List::highlight_style — selection is painted on the item above.
+
+    // rel_offset is always 0: window_start == list_offset in the stable case,
+    // so the relative offset within the window is 0. ratatui computes the final
+    // scroll position (state.offset()) to keep rel_cursor visible, and we store
+    // the absolute result back into app.list_offset below.
     let list = List::new(items);
-    let mut state = ListState::default().with_offset(app.list_offset);
-    if !app.visible.is_empty() {
-        state.select(Some(app.cursor));
+    let mut state = ListState::default().with_offset(0);
+    if n > 0 {
+        state.select(Some(rel_cursor));
     }
     frame.render_stateful_widget(list, list_area, &mut state);
-    app.list_offset = state.offset();
+    // Restore absolute offset: window_start + what ratatui settled on.
+    app.list_offset = window_start + state.offset();
 
     if rail_w > 0 && inner.height > 0 {
         let rail = Rect {
@@ -648,12 +795,13 @@ pub fn render_bookmark_strip(app: &App, frame: &mut Frame, area: Rect) {
         .take(area.height as usize)
         .map(|bm| {
             let alive = app.bookmark_alive(bm.row_id);
-            let style = if alive {
-                theme::bookmark_label_style()
+            let (mark, style) = if !bm.enabled {
+                ("☆", theme::bookmark_disabled_style())
+            } else if alive {
+                ("★", theme::bookmark_label_style())
             } else {
-                theme::bookmark_stale_style()
+                ("☆", theme::bookmark_stale_style())
             };
-            let mark = if alive { "★" } else { "☆" };
             let text = fit_label(&bm.label, text_cols);
             Line::from(Span::styled(format!(" {mark} {text}"), style))
         })
@@ -697,15 +845,15 @@ fn filter_group_spans(g: &Group, selected: bool) -> Vec<Span<'static>> {
     spans
 }
 
-fn search_group_spans(
-    g: &SearchGroup,
+fn highlight_group_spans(
+    g: &HighlightGroup,
     color_idx: usize,
     selected: bool,
     active_global: bool,
 ) -> Vec<Span<'static>> {
     let mut spans = vec![group_dot_span(g.enabled, selected)];
     spans.push(Span::raw(" ".repeat(DOT_PILL_GAP as usize)));
-    let (text, body) = theme::search_pill_style(&g.pattern, color_idx, !g.enabled, active_global);
+    let (text, body) = theme::highlight_pill_style(&g.pattern, color_idx, !g.enabled, active_global);
     spans.push(Span::styled(text, body));
     spans
 }
@@ -813,11 +961,11 @@ fn filter_strip_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
     flow_wrap_groups(groups, inner_width)
 }
 
-fn search_strip_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
-    let active = app.focus == Focus::SearchStrip;
+fn highlight_strip_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
+    let active = app.focus == Focus::HighlightStrip;
     let mut color_idx = 0usize;
     let groups: Vec<Vec<Span<'static>>> = app
-        .search_groups
+        .highlight_groups
         .groups
         .iter()
         .enumerate()
@@ -829,11 +977,11 @@ fn search_strip_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
             } else {
                 0
             };
-            search_group_spans(
+            highlight_group_spans(
                 g,
                 idx,
-                i == app.search_cursor && active,
-                Some(i) == app.active_search,
+                i == app.highlight_cursor && active,
+                Some(i) == app.active_highlight,
             )
         })
         .collect();
@@ -876,12 +1024,12 @@ pub fn exclude_strip_height(app: &App, outer_width: u16) -> u16 {
 }
 
 /// Same rules as [`filter_strip_height`] for the Search strip.
-pub fn search_strip_height(app: &App, outer_width: u16) -> u16 {
-    if app.search_groups.groups.is_empty() {
+pub fn highlight_strip_height(app: &App, outer_width: u16) -> u16 {
+    if app.highlight_groups.groups.is_empty() {
         return 0;
     }
     let inner = outer_width.saturating_sub(2);
-    let rows = search_strip_lines(app, inner).len().max(1) as u16;
+    let rows = highlight_strip_lines(app, inner).len().max(1) as u16;
     rows.saturating_add(2)
 }
 
@@ -907,15 +1055,15 @@ pub fn render_exclude_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(exclude_strip_lines(app, inner.width)), inner);
 }
 
-pub fn render_search_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
+pub fn render_highlight_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
-    let active = app.focus == Focus::SearchStrip;
-    let block = rounded_block(theme::numbered_title(3, "Search", active), active);
+    let active = app.focus == Focus::HighlightStrip;
+    let block = rounded_block(theme::numbered_title(3, "Highlight", active), active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(search_strip_lines(app, inner.width)), inner);
+    frame.render_widget(Paragraph::new(highlight_strip_lines(app, inner.width)), inner);
 }
 
 fn committed_chip_spans(
@@ -988,16 +1136,10 @@ pub fn render_input_box(
     );
 }
 
-/// Centered Search modal: draft row only (history candidates float below).
-pub fn render_search_modal(search: &SearchBox, frame: &mut Frame, area: Rect) {
-    let inner = render_modal_shell("Search", frame, area);
+/// Centered Highlight modal: draft row only (history candidates float below).
+pub fn render_highlight_modal(search: &HighlightBox, frame: &mut Frame, area: Rect) {
+    let inner = render_modal_shell("Highlight", frame, area);
     let spans = vec![
-        Span::styled(
-            "/",
-            Style::reset()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
         Span::styled(search.draft.clone(), Style::reset()),
         theme::caret_bar(),
     ];
@@ -1227,23 +1369,30 @@ pub fn render_preview(
     frame.render_widget(List::new(items), inner);
 }
 
-/// fzf left-pane committed pills plus search prompt: `prefix` + draft + caret.
+/// fzf left-pane committed pills plus search prompt:
+/// mode icon (`>` / `＋` / `✎`) + optional `field:` + draft + caret.
 pub fn render_picker_search_line(
-    prefix: char,
+    mode: &crate::picker::PickerMode,
     text: &str,
     chips: &[crate::input::Chip],
     exclude_chips: bool,
+    draft_field: Option<ChipField>,
     frame: &mut Frame,
     area: Rect,
 ) {
     if area.height == 0 {
         return;
     }
-    let prompt = Line::from(vec![
-        Span::styled(prefix.to_string(), theme::muted()),
-        Span::styled(text.to_string(), Style::reset()),
-        theme::caret_bar(),
-    ]);
+    let mut prompt_spans = vec![theme::picker_mode_prefix(mode)];
+    if let Some(field) = draft_field {
+        prompt_spans.push(Span::styled(
+            format!("{}:", field.keyword()),
+            Style::reset().fg(theme::field_color(field)),
+        ));
+    }
+    prompt_spans.push(Span::styled(text.to_string(), Style::reset()));
+    prompt_spans.push(theme::caret_bar());
+    let prompt = Line::from(prompt_spans);
     let lines = if chips.is_empty() {
         vec![prompt]
     } else {
@@ -1258,12 +1407,15 @@ pub fn render_picker_search_line(
 /// fzf-style picker shell: left candidates + bottom search, right Preview.
 pub fn render_picker(
     title: &str,
-    prefix: char,
+    mode: &crate::picker::PickerMode,
     search_text: &str,
+    match_query: &str,
     chips: &[crate::input::Chip],
     exclude_chips: bool,
+    draft_field: Option<ChipField>,
     labels: &[String],
     styles: &[Style],
+    checked: &[bool],
     selected: usize,
     empty_msg: &str,
     preview_lines: &[crate::preview::PreviewLine],
@@ -1283,17 +1435,20 @@ pub fn render_picker(
             "list",
             labels,
             styles,
+            checked,
             selected,
             empty_msg,
+            match_query,
             frame,
             candidates_area,
         );
     }
     render_picker_search_line(
-        prefix,
+        mode,
         search_text,
         chips,
         exclude_chips,
+        draft_field,
         frame,
         search_area,
     );
@@ -1303,8 +1458,13 @@ pub fn render_picker(
 /// Destructive picker action confirmation, overlaid at the picker center.
 fn confirm_dialog_question(confirm: &crate::picker::ConfirmKind) -> String {
     match confirm {
-        crate::picker::ConfirmKind::DeleteOne { .. } => "删除选中？".to_string(),
-        crate::picker::ConfirmKind::DeleteAll { count } => format!("删除全部 {count} 项？"),
+        crate::picker::ConfirmKind::DeleteMany { items } => {
+            if items.len() == 1 {
+                "删除选中？".to_string()
+            } else {
+                format!("删除选中 {} 项？", items.len())
+            }
+        }
     }
 }
 
@@ -1332,9 +1492,9 @@ pub fn render_confirm_dialog(
 }
 
 /// Search history-chip candidates — same shell as Input field popup.
-pub fn render_search_popup(
-    search: &SearchBox,
-    groups: &[SearchGroup],
+pub fn render_highlight_popup(
+    search: &HighlightBox,
+    groups: &[HighlightGroup],
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -1374,8 +1534,10 @@ pub fn render_search_popup(
         "历史",
         &labels,
         &styles,
+        &[],
         selected,
         "无匹配历史",
+        &search.draft,
         frame,
         area,
     );
@@ -1400,24 +1562,26 @@ pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
         "字段",
         &labels,
         &styles,
+        &[],
         selected,
         "无匹配字段",
+        &input.draft,
         frame,
         area,
     );
 }
 
-pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
+pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     let mut spans = vec![Span::styled(
         format!("{}/{}", app.cursor + 1, app.visible.len()),
         Style::default().add_modifier(Modifier::DIM),
     )];
-    if let Some((current, total)) = app.search_match_stats() {
+    if let Some((current, total)) = app.highlight_match_stats() {
         let k = current.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             format!("[{k}/{total}]"),
-            theme::search_match_status_style(),
+            theme::highlight_match_status_style(),
         ));
     }
     if app.following {
@@ -1475,7 +1639,7 @@ pub fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search_model::SearchGroup;
+    use crate::highlight_model::HighlightGroup;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -1604,9 +1768,9 @@ mod tests {
         .unwrap();
         drop(tx);
         app.drain(&rx);
-        app.search_groups
+        app.highlight_groups
             .groups
-            .push(SearchGroup::from_pattern("error").unwrap());
+            .push(HighlightGroup::from_pattern("error").unwrap());
         app.focus = Focus::LogList;
         app.cursor = 0;
 
@@ -1859,15 +2023,15 @@ mod tests {
     }
 
     #[test]
-    fn test_chip_pill_and_search_pill_styles() {
+    fn test_chip_pill_and_highlight_pill_styles() {
         let (text, body) = theme::chip_pill_style(crate::input::ChipField::Tag, "MyTag", false);
         assert!(text.contains("MyTag"));
         assert_eq!(body.bg, Some(theme::accent()));
         let (_, disabled) = theme::chip_pill_style(crate::input::ChipField::Msg, "x", true);
         assert_eq!(disabled, theme::disabled_chip_style());
-        let (_, search) = theme::search_pill_style("error", 0, false, false);
+        let (_, search) = theme::highlight_pill_style("error", 0, false, false);
         assert_eq!(search, theme::highlight_style(0));
-        let (_, active) = theme::search_pill_style("error", 0, false, true);
+        let (_, active) = theme::highlight_pill_style("error", 0, false, true);
         assert_eq!(active, theme::highlight_style_active(0));
         assert!(active.add_modifier.contains(Modifier::UNDERLINED));
     }
@@ -2006,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_status_bar_shows_search_match_stats() {
+    fn test_render_status_bar_shows_highlight_match_stats() {
         let mut app = App::new(100);
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : aaa").unwrap())
@@ -2023,12 +2187,12 @@ mod tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_search_group(SearchGroup::from_pattern("hit").unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
 
         let backend = TestBackend::new(40, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_status_bar(&app, frame, frame.area()))
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
@@ -2038,7 +2202,7 @@ mod tests {
 
         app.cursor = 1;
         terminal
-            .draw(|frame| render_status_bar(&app, frame, frame.area()))
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
@@ -2056,7 +2220,7 @@ mod tests {
         let backend = TestBackend::new(80, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_status_bar(&app, frame, frame.area()))
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
@@ -2075,7 +2239,7 @@ mod tests {
         let backend = TestBackend::new(20, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_status_bar(&app, frame, frame.area()))
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
@@ -2114,15 +2278,15 @@ mod tests {
         }
         drop(tx);
         app.drain(&rx);
-        app.search_groups
+        app.highlight_groups
             .groups
-            .push(SearchGroup::from_pattern("findme").unwrap());
+            .push(HighlightGroup::from_pattern("findme").unwrap());
         app.list_offset = 0;
 
         let marks = build_minimap_marks(&app, 4);
         assert_eq!(marks.len(), 4);
         assert!(marks.iter().any(|m| *m == MinimapMark::Severe));
-        assert!(marks.iter().any(|m| *m == MinimapMark::Search));
+        assert!(marks.iter().any(|m| *m == MinimapMark::Highlight));
         assert!(marks.iter().any(|m| *m == MinimapMark::Viewport));
         // Index 1 (E) maps near row 1 of 4.
         assert_eq!(marks[minimap_row_for_index(1, 4, 4)], MinimapMark::Severe);
@@ -2205,10 +2369,13 @@ mod tests {
             .draw(|frame| {
                 render_picker(
                     "Filter · Edit",
-                    ':',
+                    &crate::picker::PickerMode::Edit { index: 0 },
+                    "",
                     "",
                     &chips,
                     false,
+                    None,
+                    &[],
                     &[],
                     &[],
                     0,
@@ -2226,19 +2393,66 @@ mod tests {
     }
 
     #[test]
-    fn confirm_dialog_renders_delete_one_copy_over_picker() {
+    fn picker_search_area_shows_confirmed_draft_field() {
+        use crate::input::ChipField;
+
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 render_picker(
-                    "Search · Manage",
-                    '/',
+                    "Filter · New",
+                    &crate::picker::PickerMode::New,
+                    "",
                     "",
                     &[],
                     false,
+                    Some(ChipField::Tag),
+                    &[],
+                    &[],
+                    &[],
+                    0,
+                    "无项目",
+                    &[],
+                    0.4,
+                    frame,
+                    frame.area(),
+                )
+            })
+            .unwrap();
+
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            content.contains("tag:"),
+            "confirmed field must appear as tag: prefix, got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_renders_delete_one_copy_over_picker() {
+        use crate::picker::{ConfirmKind, UnifiedId, UnifiedKind};
+
+        let confirm = ConfirmKind::DeleteMany {
+            items: vec![UnifiedId {
+                kind: UnifiedKind::Highlight,
+                source_index: 0,
+            }],
+        };
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_picker(
+                    "Manage",
+                    &crate::picker::PickerMode::Manage,
+                    "",
+                    "",
+                    &[],
+                    false,
+                    None,
                     &["error".into()],
                     &[theme::muted()],
+                    &[],
                     0,
                     "无项目",
                     &[],
@@ -2246,42 +2460,38 @@ mod tests {
                     frame,
                     frame.area(),
                 );
-                render_confirm_dialog(
-                    &crate::picker::ConfirmKind::DeleteOne { index: 0 },
-                    frame,
-                    frame.area(),
-                );
+                render_confirm_dialog(&confirm, frame, frame.area());
             })
             .unwrap();
 
         let content = cell_text(terminal.backend().buffer());
-        assert_eq!(
-            confirm_dialog_question(&crate::picker::ConfirmKind::DeleteOne { index: 0 }),
-            "删除选中？"
-        );
+        assert_eq!(confirm_dialog_question(&confirm), "删除选中？");
         assert!(content.contains("y/Enter"));
         assert!(content.contains("n/Esc"));
     }
 
     #[test]
-    fn confirm_dialog_renders_delete_all_count() {
+    fn confirm_dialog_renders_delete_many_count() {
+        use crate::picker::{ConfirmKind, UnifiedId, UnifiedKind};
+
+        let confirm = ConfirmKind::DeleteMany {
+            items: (0..12)
+                .map(|i| UnifiedId {
+                    kind: UnifiedKind::Filter,
+                    source_index: i,
+                })
+                .collect(),
+        };
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_confirm_dialog(
-                    &crate::picker::ConfirmKind::DeleteAll { count: 12 },
-                    frame,
-                    frame.area(),
-                );
+                render_confirm_dialog(&confirm, frame, frame.area());
             })
             .unwrap();
 
         let content = cell_text(terminal.backend().buffer());
-        assert_eq!(
-            confirm_dialog_question(&crate::picker::ConfirmKind::DeleteAll { count: 12 }),
-            "删除全部 12 项？"
-        );
+        assert_eq!(confirm_dialog_question(&confirm), "删除选中 12 项？");
         assert!(content.contains("12"));
     }
 }

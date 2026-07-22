@@ -12,6 +12,10 @@ pub struct EntryRow {
     pub tag: String,
     pub pkg: String,
     pub msg: String,
+    /// Pre-computed at ingest time by [`crate::app::App::push_row`].
+    /// True when level is E/F or the message matches a crash signature.
+    /// Avoids calling CrashDetector on every minimap/find-severe scan.
+    pub severe: bool,
 }
 
 impl EntryRow {
@@ -32,6 +36,7 @@ impl EntryRow {
             tag: entry.tag.to_string(),
             pkg: entry.pkg.to_string(),
             msg: entry.msg.to_string(),
+            severe: false, // set by App::push_row via is_severe_row()
         })
     }
 
