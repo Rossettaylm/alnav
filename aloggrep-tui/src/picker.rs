@@ -1,10 +1,56 @@
+use std::collections::HashSet;
+
 use crate::input::InputBox;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnifiedKind {
+    Filter,
+    Highlight,
+    Exclude,
+    Bookmark,
+}
+
+impl UnifiedKind {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Filter => "Filter",
+            Self::Highlight => "Highlight",
+            Self::Exclude => "Exclude",
+            Self::Bookmark => "Bookmark",
+        }
+    }
+
+    pub fn as_picker_kind(self) -> PickerKind {
+        match self {
+            Self::Filter => PickerKind::Filter,
+            Self::Highlight => PickerKind::Highlight,
+            Self::Exclude => PickerKind::Exclude,
+            Self::Bookmark => PickerKind::Bookmark,
+        }
+    }
+}
+
+/// Stable identity of a row in the unified Manage list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnifiedId {
+    pub kind: UnifiedKind,
+    pub source_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedItem {
+    pub id: UnifiedId,
+    /// Full list label, e.g. `[Filter]: tag:Foo`.
+    pub label: String,
+    pub enabled: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
-    ActionList,
+    /// Aggregated Manage panel (Filter + Highlight + Exclude + Bookmark).
+    Unified,
     Filter,
-    Search,
+    Highlight,
     Bookmark,
     Exclude,
     MsgChip { exclude: bool },
@@ -19,8 +65,8 @@ pub enum PickerMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
-    DeleteOne { index: usize },
-    DeleteAll { count: usize },
+    /// Delete one or more unified items (single or Tab multi-select).
+    DeleteMany { items: Vec<UnifiedId> },
 }
 
 pub struct PickerSession {
@@ -36,6 +82,8 @@ pub struct PickerSession {
     pub input: Option<InputBox>,
     /// Picker-local candidates (currently msg-chip tokens).
     pub choices: Vec<String>,
+    /// Tab multi-select set (Unified Manage only); keyed by stable source id.
+    pub checked: HashSet<UnifiedId>,
 }
 
 impl PickerSession {
@@ -49,6 +97,7 @@ impl PickerSession {
             confirm: None,
             input: None,
             choices: Vec::new(),
+            checked: HashSet::new(),
         }
     }
 
@@ -65,14 +114,16 @@ impl PickerSession {
         self.draft.clear();
         self.selected = 0;
         self.confirm = None;
+        self.checked.clear();
         self.input = Self::fresh_input_for_kind(self.kind);
     }
 
     pub fn enter_edit(&mut self, index: usize, prefill: String) {
         self.mode = PickerMode::Edit { index };
-        self.draft = prefill.clone();
+        self.draft = prefill;
         self.selected = 0;
         self.confirm = None;
+        self.checked.clear();
         self.input = None;
     }
 
@@ -81,28 +132,15 @@ impl PickerSession {
         self.draft.clear();
         self.selected = 0;
         self.confirm = None;
+        self.checked.clear();
         self.input = Some(input);
     }
 
-    pub fn back_to_manage(&mut self) {
-        let selected = match self.mode {
-            PickerMode::Edit { index } => index,
-            PickerMode::Manage | PickerMode::New => 0,
-        };
-        self.mode = PickerMode::Manage;
-        self.query.clear();
-        self.draft.clear();
-        self.selected = selected;
-        self.confirm = None;
-        self.input = None;
-    }
-
-    pub fn request_delete_one(&mut self, index: usize) {
-        self.confirm = Some(ConfirmKind::DeleteOne { index });
-    }
-
-    pub fn request_delete_all(&mut self, count: usize) {
-        self.confirm = Some(ConfirmKind::DeleteAll { count });
+    pub fn request_delete_many(&mut self, items: Vec<UnifiedId>) {
+        if items.is_empty() {
+            return;
+        }
+        self.confirm = Some(ConfirmKind::DeleteMany { items });
     }
 
     pub fn cancel_confirm(&mut self) {
@@ -135,23 +173,21 @@ impl PickerSession {
     }
 }
 
-/// ActionList 静态标签，对应 [`PickerKind`].
-pub const ACTION_LIST_LABELS: [&str; 4] = ["Filter", "Search", "Bookmark", "Exclude"];
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn open_defaults_to_manage_with_slash_prefix() {
-        let p = PickerSession::open(PickerKind::Search);
+        let p = PickerSession::open(PickerKind::Unified);
         assert_eq!(p.mode, PickerMode::Manage);
         assert_eq!(p.prompt_prefix(), '/');
+        assert!(p.checked.is_empty());
     }
 
     #[test]
-    fn colon_and_ctrl_a_enter_new() {
-        let mut p = PickerSession::open(PickerKind::Search);
+    fn colon_enter_new() {
+        let mut p = PickerSession::open(PickerKind::Highlight);
         p.query = "x".into();
         p.enter_new();
         assert_eq!(p.mode, PickerMode::New);
@@ -162,16 +198,19 @@ mod tests {
 
     #[test]
     fn edit_prefills_draft() {
-        let mut p = PickerSession::open(PickerKind::Search);
+        let mut p = PickerSession::open(PickerKind::Highlight);
         p.enter_edit(1, "foo".into());
         assert_eq!(p.mode, PickerMode::Edit { index: 1 });
         assert_eq!(p.draft, "foo");
     }
 
     #[test]
-    fn confirm_delete_flow() {
-        let mut p = PickerSession::open(PickerKind::Search);
-        p.request_delete_one(0);
+    fn confirm_delete_many_flow() {
+        let mut p = PickerSession::open(PickerKind::Unified);
+        p.request_delete_many(vec![UnifiedId {
+            kind: UnifiedKind::Filter,
+            source_index: 0,
+        }]);
         assert!(p.confirm.is_some());
         p.cancel_confirm();
         assert!(p.confirm.is_none());
@@ -193,12 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn back_to_manage_clears_draft_and_input() {
-        let mut p = PickerSession::open(PickerKind::Filter);
-        p.enter_edit(0, "chip".into());
-        p.back_to_manage();
-        assert_eq!(p.mode, PickerMode::Manage);
-        assert!(p.draft.is_empty());
-        assert!(p.input.is_none());
+    fn unified_kind_tags() {
+        assert_eq!(UnifiedKind::Filter.tag(), "Filter");
+        assert_eq!(UnifiedKind::Bookmark.as_picker_kind(), PickerKind::Bookmark);
     }
 }

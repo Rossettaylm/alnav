@@ -10,6 +10,8 @@ pub struct Bookmark {
     pub row_id: u64,
     /// Full strip/picker label (tag + first msg line); display truncates by width.
     pub label: String,
+    /// When false: still shown in the top strip (dim + hollow star) but not jumpable.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Default)]
@@ -127,48 +129,30 @@ pub fn fit_label(label: &str, max_cols: usize) -> String {
 mod tests {
     use super::*;
 
+    fn bm(row_id: u64, label: &str) -> Bookmark {
+        Bookmark {
+            row_id,
+            label: label.into(),
+            enabled: true,
+        }
+    }
+
     #[test]
     fn try_add_dedup_and_cap() {
         let mut list = BookmarkList::default();
-        assert!(list
-            .try_add(Bookmark {
-                row_id: 1,
-                label: "a".into(),
-            })
-            .is_ok());
-        assert_eq!(
-            list.try_add(Bookmark {
-                row_id: 1,
-                label: "a".into(),
-            }),
-            Err(AddError::Duplicate)
-        );
+        assert!(list.try_add(bm(1, "a")).is_ok());
+        assert_eq!(list.try_add(bm(1, "a")), Err(AddError::Duplicate));
         for i in 2..=BOOKMARK_SOFT_CAP as u64 {
-            assert!(list
-                .try_add(Bookmark {
-                    row_id: i,
-                    label: format!("r{i}"),
-                })
-                .is_ok());
+            assert!(list.try_add(bm(i, &format!("r{i}"))).is_ok());
         }
-        assert_eq!(
-            list.try_add(Bookmark {
-                row_id: 9999,
-                label: "x".into(),
-            }),
-            Err(AddError::Full)
-        );
+        assert_eq!(list.try_add(bm(9999, "x")), Err(AddError::Full));
     }
 
     #[test]
     fn display_recent_newest_first() {
         let mut list = BookmarkList::default();
         for i in 1..=5u64 {
-            list.try_add(Bookmark {
-                row_id: i,
-                label: format!("{i}"),
-            })
-            .unwrap();
+            list.try_add(bm(i, &format!("{i}"))).unwrap();
         }
         let d: Vec<_> = list.display_recent().iter().map(|b| b.row_id).collect();
         assert_eq!(d, vec![5, 4, 3]);

@@ -8,19 +8,19 @@ use crate::app::{App, Focus};
 /// Minimum remaining character budget before we bother showing help.
 pub const MIN_HELP_WIDTH: usize = 8;
 
-const L1_LOGLIST: &str = "j/k:移 Esc:随 Space:面板 n/N:跳 e/E:错 m:书签 f:锁 c:滤 C:排 y:拷 p/P:详";
+const L1_LOGLIST: &str = "j/k:移 Esc:随 Space:管 ;滤 /亮 `排 mm签 n/N:跳 e/E:错 m:书签 f:锁 c:滤 C:排 y:拷 p/P:详";
 const L1_CHIP_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
 const L1_EXCLUDE_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
-const L1_SEARCH_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
+const L1_HIGHLIGHT_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
 const L1_INPUT: &str = "Space:草稿 Enter:收/交 !:排除 Esc:取消";
-const L1_SEARCH_MODAL: &str = "Space:草稿 Enter/Tab:确认 Esc:取消";
+const L1_HIGHLIGHT_MODAL: &str = "Space:草稿 Enter/Tab:确认 Esc:取消";
 const L1_PICKER: &str =
-    "输入:过滤 ↑/↓:选择 Enter:确认 :/Ctrl-A:新 Ctrl-E:改 Ctrl-D:删 Ctrl-U:清 Esc:关闭";
+    "输入:过滤 ↑/↓:选择 Tab:多选 Enter:启停 Ctrl-E:改 Ctrl-D:删 Esc:关闭";
 const L1_CONFIRM: &str = "y/Enter:确认 n/Esc:取消";
 const L1_DETAIL: &str = "p:关 P:切 c/C:滤 j/k:行 Esc:关";
 
-const L2_LEADER: &str = "/:列表 f:滤 s:搜 m:签 x:排除";
-const L2_BOOKMARK: &str = "a:新增 d:删除 Esc:取消";
+const L2_LEADER: &str = "Space:管理面板 Esc:取消";
+const L2_BOOKMARK: &str = "a:新增 d:删除 m:新建 Esc:取消";
 const L2_LOCK: &str = "p:pid t:tid u:清 Esc:取消";
 const L2_CHIP_FIELD: &str = "t:tag m:msg g:pkg p:pid T:tid l:级 Esc:取消";
 const L2_YANK: &str = "c:CLI t:tag m:msg g:pkg p:pid T:tid l:级 r:原 y:行 s:时 Esc:取消";
@@ -38,8 +38,8 @@ pub fn context_help(app: &App) -> &'static str {
     if app.picker.is_some() {
         return L1_PICKER;
     }
-    if app.search_box.editing {
-        return L1_SEARCH_MODAL;
+    if app.highlight_box.editing {
+        return L1_HIGHLIGHT_MODAL;
     }
     if app.detail_open() {
         return L1_DETAIL;
@@ -69,7 +69,7 @@ pub fn context_help(app: &App) -> &'static str {
         Focus::Input => L1_INPUT,
         Focus::ChipStrip => L1_CHIP_STRIP,
         Focus::ExcludeStrip => L1_EXCLUDE_STRIP,
-        Focus::SearchStrip => L1_SEARCH_STRIP,
+        Focus::HighlightStrip => L1_HIGHLIGHT_STRIP,
         Focus::LogList => L1_LOGLIST,
     }
 }
@@ -117,8 +117,8 @@ mod tests {
             L1_EXCLUDE_STRIP
         );
         assert_eq!(
-            context_help(&app_with_focus(Focus::SearchStrip)),
-            L1_SEARCH_STRIP
+            context_help(&app_with_focus(Focus::HighlightStrip)),
+            L1_HIGHLIGHT_STRIP
         );
         assert_eq!(context_help(&app_with_focus(Focus::Input)), L1_INPUT);
     }
@@ -126,8 +126,8 @@ mod tests {
     #[test]
     fn context_help_search_modal_overrides_focus() {
         let mut app = app_with_focus(Focus::LogList);
-        app.search_box.editing = true;
-        assert_eq!(context_help(&app), L1_SEARCH_MODAL);
+        app.highlight_box.editing = true;
+        assert_eq!(context_help(&app), L1_HIGHLIGHT_MODAL);
     }
 
     #[test]
@@ -139,12 +139,24 @@ mod tests {
 
     #[test]
     fn context_help_confirm_overrides_picker() {
+        use crate::picker::{UnifiedId, UnifiedKind};
+
         let mut app = app_with_focus(Focus::LogList);
-        app.open_picker(crate::picker::PickerKind::Search);
-        app.picker
-            .as_mut()
-            .unwrap()
-            .request_delete_all(3);
+        app.open_unified_picker();
+        app.picker.as_mut().unwrap().request_delete_many(vec![
+            UnifiedId {
+                kind: UnifiedKind::Highlight,
+                source_index: 0,
+            },
+            UnifiedId {
+                kind: UnifiedKind::Highlight,
+                source_index: 1,
+            },
+            UnifiedId {
+                kind: UnifiedKind::Highlight,
+                source_index: 2,
+            },
+        ]);
         assert_eq!(context_help(&app), L1_CONFIRM);
     }
 
@@ -204,8 +216,8 @@ mod tests {
     fn context_help_modal_beats_pending() {
         let mut app = app_with_focus(Focus::LogList);
         app.pending_m = true;
-        app.search_box.editing = true;
-        assert_eq!(context_help(&app), L1_SEARCH_MODAL);
+        app.highlight_box.editing = true;
+        assert_eq!(context_help(&app), L1_HIGHLIGHT_MODAL);
     }
 
     #[test]

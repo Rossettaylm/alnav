@@ -5,7 +5,7 @@ use crate::app::App;
 use crate::filter_model::{ExcludeEntry, Group, GroupList};
 use crate::input::{build_group_from_chips, Chip, ChipField, InputBox};
 use crate::model::EntryRow;
-use crate::search_model::SearchGroup;
+use crate::highlight_model::HighlightGroup;
 
 /// Max rows shown in the Preview window.
 pub const PREVIEW_LIMIT: usize = 10;
@@ -198,11 +198,14 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
         }
     };
 
-    let anchor = app
-        .visible
-        .get(app.cursor)
-        .copied()
-        .unwrap_or(app.rows.len().saturating_sub(1));
+    let anchor = if app.filter_active() {
+        app.rows.len().saturating_sub(1)
+    } else {
+        app.visible
+            .get(app.cursor)
+            .copied()
+            .unwrap_or(app.rows.len().saturating_sub(1))
+    };
 
     let indices = sample_near_anchor(
         &app.rows,
@@ -223,11 +226,11 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
 /// Search draft preview: matching rows with faint highlight ranges.
 /// Empty draft → empty vec (caller shows placeholder / folds).
 pub fn preview_search_lines(app: &App) -> Result<Vec<PreviewLine>, ()> {
-    preview_search_pattern_lines(app, &app.search_box.draft)
+    preview_highlight_pattern_lines(app, &app.highlight_box.draft)
 }
 
 /// Search preview for a caller-owned draft (for example the unified picker).
-pub fn preview_search_pattern_lines(
+pub fn preview_highlight_pattern_lines(
     app: &App,
     pattern: &str,
 ) -> Result<Vec<PreviewLine>, ()> {
@@ -235,12 +238,15 @@ pub fn preview_search_pattern_lines(
     if draft.is_empty() {
         return Ok(Vec::new());
     }
-    let group = SearchGroup::from_pattern(draft).ok_or(())?;
-    let anchor = app
-        .visible
-        .get(app.cursor)
-        .copied()
-        .unwrap_or(app.rows.len().saturating_sub(1));
+    let group = HighlightGroup::from_pattern(draft).ok_or(())?;
+    let anchor = if app.filter_active() {
+        app.rows.len().saturating_sub(1)
+    } else {
+        app.visible
+            .get(app.cursor)
+            .copied()
+            .unwrap_or(app.rows.len().saturating_sub(1))
+    };
 
     let indices = sample_near_anchor(
         &app.rows,
@@ -305,9 +311,9 @@ mod tests {
         let mut app = App::new(100);
         drain_line(&mut app, "04-02 10:00:00.000  1  1 I Tag     : hello");
         drain_line(&mut app, "04-02 10:00:01.000  1  1 I Tag     : world");
-        app.search_box.begin_editing();
+        app.highlight_box.begin_editing();
         for c in "wor".chars() {
-            app.search_box.push_char(c);
+            app.highlight_box.push_char(c);
         }
         let lines = preview_search_lines(&app).unwrap();
         assert_eq!(lines.len(), 1);

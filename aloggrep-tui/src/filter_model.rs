@@ -124,6 +124,11 @@ impl GroupList {
         self.include_matches(row) && self.excludes_allow(row)
     }
 
+    /// Whether any include group is enabled (the OR list is non-vacuous).
+    pub fn has_any_enabled(&self) -> bool {
+        self.groups.iter().any(|g| g.enabled)
+    }
+
     fn include_matches(&self, row: &EntryRow) -> bool {
         let mut any_enabled = false;
         for g in &self.groups {

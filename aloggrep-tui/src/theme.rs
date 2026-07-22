@@ -29,7 +29,18 @@ pub struct UiTokens {
     pub log_visual_bg: Color,
     pub preview_highlight_bg: Color,
     pub border_inactive: Color,
-    pub candidate_selection_bg: Color,
+    /// Selected candidate row background (picker / field popup).
+    pub candidate_selected_bg: Color,
+    /// Selected candidate row text color.
+    pub candidate_selected_fg: Color,
+    /// Unselected candidate row background (`Reset` = inherit terminal).
+    pub candidate_unselected_bg: Color,
+    /// Unselected candidate row text color.
+    pub candidate_unselected_fg: Color,
+    /// Substring match characters inside candidate labels.
+    pub candidate_match_fg: Color,
+    /// Prefix drawn before the selected candidate row (e.g. `"▌ "`).
+    pub candidate_prefix: String,
     pub bookmark_strip_bg: Color,
 }
 
@@ -45,7 +56,12 @@ impl UiTokens {
             log_visual_bg: Color::Rgb(30, 60, 70),
             preview_highlight_bg: Color::DarkGray,
             border_inactive: Color::DarkGray,
-            candidate_selection_bg: Color::DarkGray,
+            candidate_selected_bg: Color::DarkGray,
+            candidate_selected_fg: Color::White,
+            candidate_unselected_bg: Color::Reset,
+            candidate_unselected_fg: Color::Gray,
+            candidate_match_fg: Color::Cyan,
+            candidate_prefix: "▌ ".to_string(),
             bookmark_strip_bg: Color::DarkGray,
         }
     }
@@ -136,7 +152,7 @@ pub fn disabled_chip_style() -> Style {
 
 /// Status-bar search hit counter `[k/N]`: accent foreground only (no reverse
 /// badge), so it reads as related-but-distinct from the dim filter `cursor/total`.
-pub fn search_match_status_style() -> Style {
+pub fn highlight_match_status_style() -> Style {
     Style::default().fg(accent())
 }
 
@@ -165,13 +181,55 @@ pub fn focus_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// Soft gray highlight for Input/Search candidate list selection — same quiet
-/// wash as [`log_selection_style`], with white fg so colored candidate labels
-/// stay readable (List::highlight_style patches over item fg).
-pub fn candidate_selection_style() -> Style {
+/// Selected candidate row (picker / field popup).
+pub fn candidate_selected_style() -> Style {
     Style::default()
-        .fg(Color::White)
-        .bg(t().candidate_selection_bg)
+        .fg(t().candidate_selected_fg)
+        .bg(t().candidate_selected_bg)
+}
+
+/// Unselected candidate row base style.
+pub fn candidate_unselected_style() -> Style {
+    Style::default()
+        .fg(t().candidate_unselected_fg)
+        .bg(t().candidate_unselected_bg)
+}
+
+/// Match-character foreground for candidate substring hits.
+pub fn candidate_match_style(selected: bool) -> Style {
+    let bg = if selected {
+        t().candidate_selected_bg
+    } else {
+        t().candidate_unselected_bg
+    };
+    Style::default().fg(t().candidate_match_fg).bg(bg)
+}
+
+/// Prefix string for the selected candidate row.
+pub fn candidate_prefix() -> String {
+    t().candidate_prefix.clone()
+}
+
+/// Backward-compatible alias for selected candidate style.
+pub fn candidate_selection_style() -> Style {
+    candidate_selected_style()
+}
+
+/// Soft accent+DIM style for picker mode prefixes (no fill — distinct from chip pills).
+pub fn picker_mode_style() -> Style {
+    Style::default()
+        .fg(accent())
+        .add_modifier(Modifier::DIM)
+}
+
+/// Mode prefix icon: Manage `> `, New `＋ `, Edit `✎ `.
+pub fn picker_mode_prefix(mode: &crate::picker::PickerMode) -> Span<'static> {
+    let icon = match mode {
+        crate::picker::PickerMode::Manage => "> ",
+        crate::picker::PickerMode::New => "＋ ",
+        crate::picker::PickerMode::Edit { .. } => "✎ ",
+    };
+    Span::styled(icon, picker_mode_style())
 }
 
 /// Style for the group `●`/`○` marker (selected = selection_frame, else dim).
@@ -223,7 +281,7 @@ pub fn exclude_pill_style(field: ChipField, value: &str, disabled: bool) -> (Str
 
 /// Body style for a search pill — same single-row fill model as [`chip_pill_style`].
 /// `active_global` underlines the globally active (n/N) search chip.
-pub fn search_pill_style(
+pub fn highlight_pill_style(
     pattern: &str,
     color_idx: usize,
     disabled: bool,
@@ -369,7 +427,7 @@ pub fn minimap_viewport_style() -> Style {
 }
 
 /// H3 minimap: enabled search-hit mark.
-pub fn minimap_search_style() -> Style {
+pub fn minimap_highlight_style() -> Style {
     Style::default().fg(accent())
 }
 
@@ -388,11 +446,39 @@ pub fn bookmark_label_style() -> Style {
     Style::default().fg(warning()).add_modifier(Modifier::BOLD)
 }
 
+/// M2 bookmark disabled (`enabled == false`): dim + hollow-star companion style.
+pub fn bookmark_disabled_style() -> Style {
+    Style::default()
+        .fg(t().border_inactive)
+        .add_modifier(Modifier::DIM)
+}
+
 /// M2 stale bookmark (evicted from ring buffer).
 pub fn bookmark_stale_style() -> Style {
     Style::default()
         .fg(t().border_inactive)
         .add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)
+}
+
+/// Unified Manage list: kind prefix / row tint by category.
+pub fn unified_kind_style(kind: crate::picker::UnifiedKind) -> Style {
+    use crate::picker::UnifiedKind;
+    match kind {
+        UnifiedKind::Filter => Style::default().fg(accent()),
+        UnifiedKind::Highlight => {
+            let ((r, g, b), _) = logcolor::USER_HIGHLIGHT[0];
+            Style::default().fg(Color::Rgb(r, g, b))
+        }
+        UnifiedKind::Exclude => Style::default().fg(warning()),
+        UnifiedKind::Bookmark => Style::default().fg(lock()),
+    }
+}
+
+/// Candidate-list prefix when the row is Tab multi-selected (checked).
+pub fn candidate_checked_prefix_style() -> Style {
+    Style::default()
+        .fg(lock())
+        .add_modifier(Modifier::BOLD)
 }
 
 // ── theme.toml parsing (M4) ──────────────────────────────────────────
@@ -408,6 +494,13 @@ struct ThemeFile {
     log_visual_bg: Option<String>,
     preview_highlight_bg: Option<String>,
     border_inactive: Option<String>,
+    candidate_selected_bg: Option<String>,
+    candidate_selected_fg: Option<String>,
+    candidate_unselected_bg: Option<String>,
+    candidate_unselected_fg: Option<String>,
+    candidate_match_fg: Option<String>,
+    candidate_prefix: Option<String>,
+    /// Deprecated alias for [`Self::candidate_selected_bg`].
     candidate_selection_bg: Option<String>,
     bookmark_strip_bg: Option<String>,
 }
@@ -443,8 +536,25 @@ pub fn parse_theme_toml(text: &str) -> Result<UiTokens, String> {
     if let Some(s) = file.border_inactive {
         t.border_inactive = parse_color(&s)?;
     }
-    if let Some(s) = file.candidate_selection_bg {
-        t.candidate_selection_bg = parse_color(&s)?;
+    if let Some(s) = file.candidate_selected_bg {
+        t.candidate_selected_bg = parse_color(&s)?;
+    } else if let Some(s) = file.candidate_selection_bg {
+        t.candidate_selected_bg = parse_color(&s)?;
+    }
+    if let Some(s) = file.candidate_selected_fg {
+        t.candidate_selected_fg = parse_color(&s)?;
+    }
+    if let Some(s) = file.candidate_unselected_bg {
+        t.candidate_unselected_bg = parse_color(&s)?;
+    }
+    if let Some(s) = file.candidate_unselected_fg {
+        t.candidate_unselected_fg = parse_color(&s)?;
+    }
+    if let Some(s) = file.candidate_match_fg {
+        t.candidate_match_fg = parse_color(&s)?;
+    }
+    if let Some(s) = file.candidate_prefix {
+        t.candidate_prefix = s;
     }
     if let Some(s) = file.bookmark_strip_bg {
         t.bookmark_strip_bg = parse_color(&s)?;
@@ -475,6 +585,7 @@ pub fn parse_color(s: &str) -> Result<Color, String> {
         "lightmagenta" => Ok(Color::LightMagenta),
         "lightcyan" => Ok(Color::LightCyan),
         "white" => Ok(Color::White),
+        "reset" => Ok(Color::Reset),
         other => Err(format!("unknown color '{other}'")),
     }
 }
@@ -514,10 +625,28 @@ mod tests {
     fn test_candidate_selection_style_soft_gray_with_white_fg() {
         install(UiTokens::builtin());
         let style = candidate_selection_style();
-        assert_eq!(style.bg, log_selection_style().bg);
+        assert_eq!(style.bg, Some(Color::DarkGray));
         assert_eq!(style.fg, Some(Color::White));
         assert!(!style.add_modifier.contains(Modifier::REVERSED));
         assert!(!style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_candidate_match_and_prefix_tokens() {
+        install(UiTokens::builtin());
+        assert_eq!(candidate_match_style(false).fg, Some(Color::Cyan));
+        assert_eq!(candidate_prefix(), "▌ ");
+        use crate::picker::PickerMode;
+        assert_eq!(picker_mode_prefix(&PickerMode::Manage).content, "> ");
+        assert_eq!(picker_mode_prefix(&PickerMode::New).content, "＋ ");
+        assert_eq!(
+            picker_mode_prefix(&PickerMode::Edit { index: 0 }).content,
+            "✎ "
+        );
+        let soft = picker_mode_style();
+        assert_eq!(soft.fg, Some(Color::Cyan));
+        assert!(soft.add_modifier.contains(Modifier::DIM));
+        assert_eq!(soft.bg, None);
     }
 
     #[test]
