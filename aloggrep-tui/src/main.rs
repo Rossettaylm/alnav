@@ -4,12 +4,12 @@ mod config;
 mod export;
 mod filter_model;
 mod help;
+mod highlight_model;
 mod ingest;
 mod input;
 mod model;
 mod picker;
 mod preview;
-mod highlight_model;
 mod theme;
 mod ui;
 mod vocab;
@@ -427,122 +427,129 @@ fn run<B: ratatui::backend::Backend>(
         // P4: throttle draws during active file ingest to ~20 FPS.
         // User events (force_draw=true) and post-ingest mode always draw immediately.
         let elapsed_ms = last_draw.elapsed().as_millis() as u64;
-        let should_draw =
-            force_draw || app.ingest_done || elapsed_ms >= MIN_INGEST_DRAW_MS;
+        let should_draw = force_draw || app.ingest_done || elapsed_ms >= MIN_INGEST_DRAW_MS;
 
         if should_draw {
             force_draw = false;
             last_draw = Instant::now();
 
             terminal
-            .draw(|frame| {
-                let frame_area = frame.area();
-                let outer_w = frame_area.width;
-                let filter_h = ui::filter_strip_height(app, outer_w);
-                let exclude_h = ui::exclude_strip_height(app, outer_w);
-                let search_h = ui::highlight_strip_height(app, outer_w);
-                let [filter_area, exclude_area, highlight_strip_area, log_area, status_area] =
-                    Layout::vertical([
-                        Constraint::Length(filter_h),
-                        Constraint::Length(exclude_h),
-                        Constraint::Length(search_h),
-                        Constraint::Fill(1),
-                        Constraint::Length(1),
-                    ])
-                    .areas(frame_area);
-                ui::render_chip_strip(app, frame, filter_area);
-                ui::render_exclude_chip_strip(app, frame, exclude_area);
-                ui::render_highlight_chip_strip(app, frame, highlight_strip_area);
-                ui::render_log_list(app, frame, log_area);
-                ui::render_status_bar(app, frame, status_area);
+                .draw(|frame| {
+                    let frame_area = frame.area();
+                    let outer_w = frame_area.width;
+                    let filter_h = ui::filter_strip_height(app, outer_w);
+                    let exclude_h = ui::exclude_strip_height(app, outer_w);
+                    let search_h = ui::highlight_strip_height(app, outer_w);
+                    let [filter_area, exclude_area, highlight_strip_area, log_area, status_area] =
+                        Layout::vertical([
+                            Constraint::Length(filter_h),
+                            Constraint::Length(exclude_h),
+                            Constraint::Length(search_h),
+                            Constraint::Fill(1),
+                            Constraint::Length(1),
+                        ])
+                        .areas(frame_area);
+                    ui::render_chip_strip(app, frame, filter_area);
+                    ui::render_exclude_chip_strip(app, frame, exclude_area);
+                    ui::render_highlight_chip_strip(app, frame, highlight_strip_area);
+                    ui::render_log_list(app, frame, log_area);
+                    ui::render_status_bar(app, frame, status_area);
 
-                let modal_w = ui::modal_width(frame_area.width);
-                if let Some(data) = picker_render_data(app) {
-                    ui::render_picker(
-                        &data.title,
-                        &data.mode,
-                        &data.text,
-                        &data.match_query,
-                        &data.chips,
-                        data.exclude_chips,
-                        data.draft_field,
-                        &data.labels,
-                        &data.styles,
-                        &data.checked,
-                        data.selected,
-                        &data.empty_msg,
-                        &data.preview,
-                        app.config.picker_left_ratio,
-                        data.show_preview,
-                        frame,
-                        frame_area,
-                    );
-                    if let Some(confirm) = app
-                        .picker
-                        .as_ref()
-                        .and_then(|session| session.confirm.as_ref())
-                    {
-                        ui::render_confirm_dialog(confirm, frame, frame_area);
-                    }
-                // Search / Input use top stack: modal → candidates → Preview (H1).
-                } else if app.highlight_box.editing {
-                    let area = ui::top_modal_rect(frame_area, modal_w, ui::search_modal_height());
-                    ui::render_highlight_modal(&app.highlight_box, frame, area);
-                    let cand = app
-                        .highlight_box
-                        .candidate_indices(&app.highlight_groups.groups)
-                        .len();
-                    let mut stack_bottom = area;
-                    if cand > 0 {
-                        let rect = popup_rect(area, frame_area, cand);
-                        ui::render_highlight_popup(
-                            &app.highlight_box,
-                            &app.highlight_groups.groups,
+                    let modal_w = ui::modal_width(frame_area.width);
+                    if let Some(data) = picker_render_data(app) {
+                        ui::render_picker(
+                            &data.title,
+                            &data.mode,
+                            &data.text,
+                            &data.match_query,
+                            &data.chips,
+                            data.exclude_chips,
+                            data.draft_field,
+                            &data.labels,
+                            &data.styles,
+                            &data.checked,
+                            &data.actions,
+                            data.selected,
+                            &data.empty_msg,
+                            &data.preview,
+                            app.config.picker_left_ratio,
+                            data.show_preview,
                             frame,
-                            rect,
+                            frame_area,
                         );
-                        stack_bottom = rect;
+                        if let Some(confirm) = app
+                            .picker
+                            .as_ref()
+                            .and_then(|session| session.confirm.as_ref())
+                        {
+                            ui::render_confirm_dialog(confirm, frame, frame_area);
+                        }
+                    // Search / Input use top stack: modal → candidates → Preview (H1).
+                    } else if app.highlight_box.editing {
+                        let area =
+                            ui::top_modal_rect(frame_area, modal_w, ui::search_modal_height());
+                        ui::render_highlight_modal(&app.highlight_box, frame, area);
+                        let cand = app
+                            .highlight_box
+                            .candidate_indices(&app.highlight_groups.groups)
+                            .len();
+                        let mut stack_bottom = area;
+                        if cand > 0 {
+                            let rect = popup_rect(area, frame_area, cand);
+                            ui::render_highlight_popup(
+                                &app.highlight_box,
+                                &app.highlight_groups.groups,
+                                frame,
+                                rect,
+                            );
+                            stack_bottom = rect;
+                        }
+                        let preview_lines = preview::preview_search_lines(app).unwrap_or_default();
+                        let content_rows = if preview_lines.is_empty() {
+                            1
+                        } else {
+                            preview_lines.len()
+                        };
+                        let prev = ui::preview_popup_rect(stack_bottom, frame_area, content_rows);
+                        if prev.height > 0 {
+                            ui::render_preview(
+                                "Preview",
+                                &preview_lines,
+                                "输入以预览",
+                                frame,
+                                prev,
+                            );
+                        }
+                    } else if app.focus == app::Focus::Input {
+                        let input_area = ui::top_modal_rect(frame_area, modal_w, 3);
+                        ui::render_input_modal(input, app.mode, frame, input_area);
+                        let mut stack_bottom = input_area;
+                        if input.field_popup_visible() {
+                            // `.max(1)` so empty-match state still gets a row for「无匹配字段」.
+                            let count = input.field_candidates().len().max(1);
+                            let rect = popup_rect(input_area, frame_area, count);
+                            ui::render_popup(input, frame, rect);
+                            stack_bottom = rect;
+                        }
+                        let preview_lines = preview::preview_filter_lines(app, input);
+                        let content_rows = if preview_lines.is_empty() {
+                            1
+                        } else {
+                            preview_lines.len()
+                        };
+                        let prev = ui::preview_popup_rect(stack_bottom, frame_area, content_rows);
+                        if prev.height > 0 {
+                            ui::render_preview("Preview", &preview_lines, "无匹配行", frame, prev);
+                        }
+                    } else if app.detail_open() {
+                        let inner_w = modal_w.saturating_sub(2).max(1);
+                        let content_rows = ui::detail_content_lines(app, inner_w).len().max(1);
+                        let h = ui::detail_modal_height(frame_area, content_rows);
+                        let area = ui::top_modal_rect(frame_area, modal_w, h);
+                        ui::render_detail(app, frame, area);
                     }
-                    let preview_lines = preview::preview_search_lines(app).unwrap_or_default();
-                    let content_rows = if preview_lines.is_empty() {
-                        1
-                    } else {
-                        preview_lines.len()
-                    };
-                    let prev = ui::preview_popup_rect(stack_bottom, frame_area, content_rows);
-                    if prev.height > 0 {
-                        ui::render_preview("Preview", &preview_lines, "输入以预览", frame, prev);
-                    }
-                } else if app.focus == app::Focus::Input {
-                    let input_area = ui::top_modal_rect(frame_area, modal_w, 3);
-                    ui::render_input_modal(input, app.mode, frame, input_area);
-                    let mut stack_bottom = input_area;
-                    if input.field_popup_visible() {
-                        // `.max(1)` so empty-match state still gets a row for「无匹配字段」.
-                        let count = input.field_candidates().len().max(1);
-                        let rect = popup_rect(input_area, frame_area, count);
-                        ui::render_popup(input, frame, rect);
-                        stack_bottom = rect;
-                    }
-                    let preview_lines = preview::preview_filter_lines(app, input);
-                    let content_rows = if preview_lines.is_empty() {
-                        1
-                    } else {
-                        preview_lines.len()
-                    };
-                    let prev = ui::preview_popup_rect(stack_bottom, frame_area, content_rows);
-                    if prev.height > 0 {
-                        ui::render_preview("Preview", &preview_lines, "无匹配行", frame, prev);
-                    }
-                } else if app.detail_open() {
-                    let inner_w = modal_w.saturating_sub(2).max(1);
-                    let content_rows = ui::detail_content_lines(app, inner_w).len().max(1);
-                    let h = ui::detail_modal_height(frame_area, content_rows);
-                    let area = ui::top_modal_rect(frame_area, modal_w, h);
-                    ui::render_detail(app, frame, area);
-                }
-            })
-            .map_err(|e| e.to_string())?;
+                })
+                .map_err(|e| e.to_string())?;
         } // end if should_draw
 
         // Poll for user events. When we skipped the draw (ingest active, drew
@@ -550,7 +557,9 @@ fn run<B: ratatui::backend::Backend>(
         let poll_ms = if should_draw {
             100u64 // normal: wait up to 100ms for the next event
         } else {
-            MIN_INGEST_DRAW_MS.saturating_sub(last_draw.elapsed().as_millis() as u64).max(1)
+            MIN_INGEST_DRAW_MS
+                .saturating_sub(last_draw.elapsed().as_millis() as u64)
+                .max(1)
         };
         if !event::poll(Duration::from_millis(poll_ms)).map_err(|e| e.to_string())? {
             continue;
@@ -629,6 +638,7 @@ struct PickerRenderData {
     labels: Vec<String>,
     styles: Vec<ratatui::style::Style>,
     checked: Vec<bool>,
+    actions: Vec<crate::ui::ActionKind>,
     selected: usize,
     empty_msg: String,
     preview: Vec<preview::PreviewLine>,
@@ -667,8 +677,8 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
         },
     };
     let match_query = text.clone();
-    let show_preview = app.config.picker_preview_enabled
-        && !matches!(session.kind, PickerKind::Unified);
+    let mut show_preview =
+        app.config.picker_preview_enabled && !matches!(session.kind, PickerKind::Unified);
     let mut selected = session.selected;
     let mut chips = Vec::new();
     let mut exclude_chips = false;
@@ -676,64 +686,91 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
     let mut labels = Vec::new();
     let mut styles = Vec::new();
     let mut checked = Vec::new();
+    let mut actions = Vec::new();
     let mut preview_lines = Vec::new();
     let mut empty_msg = "无项目".to_string();
 
     match session.mode {
-        PickerMode::Manage => {
-            let all = unified_picker_items(app);
-            let all_labels: Vec<String> = all.iter().map(|item| item.label.clone()).collect();
-            let visible = PickerSession::filtered_indices(&all_labels, &session.query);
-            labels = visible.iter().map(|&index| all[index].label.clone()).collect();
-            styles = visible
-                .iter()
-                .map(|&index| {
-                    let item = &all[index];
-                    if item.enabled {
-                        theme::unified_kind_style(item.id.kind)
-                    } else {
-                        theme::disabled_chip_style()
-                    }
-                })
-                .collect();
-            checked = visible
-                .iter()
-                .map(|&index| session.checked.contains(&all[index].id))
-                .collect();
+        PickerMode::Manage => match session.kind {
+            PickerKind::Bookmark => {
+                // Bookmark-only panel (F2): no [Bookmark]: prefix, no preview,
+                // no Tab multi-select; all rows get a Jump action icon.
+                let vis = bookmark_visible_indices(app);
+                labels = vis
+                    .iter()
+                    .map(|&i| app.bookmarks.items[i].label.clone())
+                    .collect();
+                styles = vis.iter().map(|_| theme::bookmark_label_style()).collect();
+                checked = vec![false; vis.len()];
+                actions = vec![crate::ui::ActionKind::Jump; vis.len()];
+                empty_msg = "无书签".to_string();
+                show_preview = false;
+                let _ = selected; // bookmark panel reuses session.selected as-is
+            }
+            _ => {
+                // Unified panel: Filter/Highlight/Exclude only (bookmark arm removed).
+                let all = unified_picker_items(app);
+                let all_labels: Vec<String> = all.iter().map(|item| item.label.clone()).collect();
+                let visible = PickerSession::filtered_indices(&all_labels, &session.query);
+                labels = visible
+                    .iter()
+                    .map(|&index| all[index].label.clone())
+                    .collect();
+                styles = visible
+                    .iter()
+                    .map(|&index| {
+                        let item = &all[index];
+                        if item.enabled {
+                            theme::unified_kind_style(item.id.kind)
+                        } else {
+                            theme::disabled_chip_style()
+                        }
+                    })
+                    .collect();
+                checked = visible
+                    .iter()
+                    .map(|&index| session.checked.contains(&all[index].id))
+                    .collect();
+                actions = visible
+                    .iter()
+                    .map(|&index| crate::ui::ActionKind::Toggle {
+                        enabled: all[index].enabled,
+                    })
+                    .collect();
 
-            if show_preview {
-                if let Some(&src) = visible.get(session.selected) {
-                    let item = &all[src];
-                    match item.id.kind {
-                        UnifiedKind::Highlight => {
-                            preview_lines = preview::preview_highlight_pattern_lines(
-                                app,
-                                &app.highlight_groups.groups[item.id.source_index].pattern,
-                            )
-                            .unwrap_or_default();
+                if show_preview {
+                    if let Some(&src) = visible.get(session.selected) {
+                        let item = &all[src];
+                        match item.id.kind {
+                            UnifiedKind::Highlight => {
+                                preview_lines = preview::preview_highlight_pattern_lines(
+                                    app,
+                                    &app.highlight_groups.groups[item.id.source_index].pattern,
+                                )
+                                .unwrap_or_default();
+                            }
+                            UnifiedKind::Filter => {
+                                let input = input::InputBox {
+                                    chips: app.groups.groups[item.id.source_index].chips.clone(),
+                                    ..input::InputBox::default()
+                                };
+                                preview_lines = preview::preview_filter_lines(app, &input);
+                            }
+                            UnifiedKind::Exclude => {
+                                let input = input::InputBox {
+                                    chips: vec![app.groups.excludes[item.id.source_index]
+                                        .chip
+                                        .clone()],
+                                    exclude_mode: true,
+                                    ..input::InputBox::default()
+                                };
+                                preview_lines = preview::preview_filter_lines(app, &input);
+                            }
                         }
-                        UnifiedKind::Filter => {
-                            let input = input::InputBox {
-                                chips: app.groups.groups[item.id.source_index].chips.clone(),
-                                ..input::InputBox::default()
-                            };
-                            preview_lines = preview::preview_filter_lines(app, &input);
-                        }
-                        UnifiedKind::Exclude => {
-                            let input = input::InputBox {
-                                chips: vec![
-                                    app.groups.excludes[item.id.source_index].chip.clone()
-                                ],
-                                exclude_mode: true,
-                                ..input::InputBox::default()
-                            };
-                            preview_lines = preview::preview_filter_lines(app, &input);
-                        }
-                        UnifiedKind::Bookmark => {}
                     }
                 }
             }
-        }
+        },
         PickerMode::New | PickerMode::Edit { .. } => match session.kind {
             PickerKind::Highlight => {
                 if !session.draft.is_empty() {
@@ -752,8 +789,8 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                         .collect();
                     styles = vec![theme::muted(); labels.len()];
                 }
-                preview_lines =
-                    preview::preview_highlight_pattern_lines(app, &session.draft).unwrap_or_default();
+                preview_lines = preview::preview_highlight_pattern_lines(app, &session.draft)
+                    .unwrap_or_default();
                 empty_msg = "输入高亮词".to_string();
             }
             PickerKind::Filter | PickerKind::Exclude => {
@@ -767,7 +804,9 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                             labels = fields.iter().map(|f| f.keyword().to_string()).collect();
                             styles = fields
                                 .iter()
-                                .map(|f| ratatui::style::Style::default().fg(theme::field_color(*f)))
+                                .map(|f| {
+                                    ratatui::style::Style::default().fg(theme::field_color(*f))
+                                })
                                 .collect();
                             selected = input.field_selected;
                         }
@@ -782,14 +821,17 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                                     let ql = q.to_lowercase();
                                     LEVEL_CANDIDATES
                                         .iter()
-                                        .filter(|&&s| ql.is_empty() || s.to_lowercase().contains(&ql))
+                                        .filter(|&&s| {
+                                            ql.is_empty() || s.to_lowercase().contains(&ql)
+                                        })
                                         .map(|&s| s.to_string())
                                         .collect()
                                 }
                                 ChipField::Pid | ChipField::Tid => vec![],
                             };
                             styles = vec![
-                                ratatui::style::Style::default().fg(theme::field_color(field));
+                                ratatui::style::Style::default()
+                                    .fg(theme::field_color(field));
                                 labels.len()
                             ];
                         }
@@ -800,12 +842,9 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                 }
                 empty_msg = "Enter 收 pill / 提交".to_string();
             }
-            PickerKind::Bookmark => {
-                empty_msg = "Enter 添加当前行".to_string();
-            }
+            PickerKind::Bookmark => {}
             PickerKind::MsgChip { .. } => {
-                let visible =
-                    PickerSession::filtered_indices(&session.choices, &session.draft);
+                let visible = PickerSession::filtered_indices(&session.choices, &session.draft);
                 labels = visible
                     .iter()
                     .map(|&index| session.choices[index].clone())
@@ -832,14 +871,14 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
         labels,
         styles,
         checked,
+        actions,
         selected,
         empty_msg,
         preview: preview_lines,
         show_preview,
     })
 }
-
-/// Aggregate Filter → Highlight → Exclude → Bookmark (newest-first) for Manage.
+/// Aggregate Filter → Highlight → Exclude for Manage (bookmark segment removed, F2).
 fn unified_picker_items(app: &App) -> Vec<crate::picker::UnifiedItem> {
     use crate::picker::{UnifiedId, UnifiedItem, UnifiedKind};
 
@@ -875,16 +914,6 @@ fn unified_picker_items(app: &App) -> Vec<crate::picker::UnifiedItem> {
             enabled: entry.enabled,
         });
     }
-    for (displayed, bookmark) in app.bookmarks.items.iter().enumerate().rev() {
-        items.push(UnifiedItem {
-            id: UnifiedId {
-                kind: UnifiedKind::Bookmark,
-                source_index: displayed,
-            },
-            label: format!("[{}]: {}", UnifiedKind::Bookmark.tag(), bookmark.label),
-            enabled: bookmark.enabled,
-        });
-    }
     items
 }
 
@@ -895,6 +924,10 @@ fn unified_visible_ids(app: &App) -> Vec<crate::picker::UnifiedId> {
         Some(s) => s,
         None => return Vec::new(),
     };
+    // Bookmark panel keys off its own helpers; never enters the unified path.
+    if session.kind == crate::picker::PickerKind::Bookmark {
+        return Vec::new();
+    }
     let all = unified_picker_items(app);
     let labels: Vec<String> = all.iter().map(|item| item.label.clone()).collect();
     let visible = PickerSession::filtered_indices(&labels, &session.query);
@@ -903,8 +936,40 @@ fn unified_visible_ids(app: &App) -> Vec<crate::picker::UnifiedId> {
 
 fn unified_selected_id(app: &App) -> Option<crate::picker::UnifiedId> {
     let session = app.picker.as_ref()?;
+    if session.kind == crate::picker::PickerKind::Bookmark {
+        return None;
+    }
     let ids = unified_visible_ids(app);
     ids.get(session.selected).copied()
+}
+
+/// Visible indices into `app.bookmarks.items` (newest-first display order)
+/// for the bookmark Manage panel, filtered by the session query (F2).
+fn bookmark_visible_indices(app: &App) -> Vec<usize> {
+    use crate::picker::PickerSession;
+    let session = match app.picker.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let len = app.bookmarks.items.len();
+    // Newest-first display: rev the labels, filter, then map back to real index.
+    let labels: Vec<String> = app
+        .bookmarks
+        .items
+        .iter()
+        .rev()
+        .map(|b| b.label.clone())
+        .collect();
+    let vis = PickerSession::filtered_indices(&labels, &session.query);
+    vis.iter().map(|&i| len - 1 - i).collect()
+}
+
+/// The real `app.bookmarks.items` index currently selected in the bookmark panel.
+#[allow(dead_code)]
+fn bookmark_selected_index(app: &App) -> Option<usize> {
+    let vis = bookmark_visible_indices(app);
+    let session = app.picker.as_ref()?;
+    vis.get(session.selected).copied()
 }
 
 fn confirm_picker_delete(app: &mut App) {
@@ -917,22 +982,33 @@ fn confirm_picker_delete(app: &mut App) {
     else {
         return;
     };
-    let ConfirmKind::DeleteMany { mut items } = confirm;
-    // Delete high indices first within each kind so earlier indices stay valid.
-    items.sort_by(|a, b| {
-        a.kind
-            .tag()
-            .cmp(b.kind.tag())
-            .then(b.source_index.cmp(&a.source_index))
-    });
-    for id in &items {
-        app.delete_unified_at(id.kind, id.source_index);
-    }
-    let count = unified_picker_items(app).len();
-    if let Some(session) = app.picker.as_mut() {
-        session.cancel_confirm();
-        session.checked.clear();
-        session.selected = session.selected.min(count.saturating_sub(1));
+    match confirm {
+        ConfirmKind::DeleteMany { mut items } => {
+            // Delete high indices first within each kind so earlier indices stay valid.
+            items.sort_by(|a, b| {
+                a.kind
+                    .tag()
+                    .cmp(b.kind.tag())
+                    .then(b.source_index.cmp(&a.source_index))
+            });
+            for id in &items {
+                app.delete_unified_at(id.kind, id.source_index);
+            }
+            let count = unified_picker_items(app).len();
+            if let Some(session) = app.picker.as_mut() {
+                session.cancel_confirm();
+                session.checked.clear();
+                session.selected = session.selected.min(count.saturating_sub(1));
+            }
+        }
+        ConfirmKind::DeleteBookmark { index } => {
+            app.delete_bookmark_at_index(index);
+            let count = bookmark_visible_indices(app).len();
+            if let Some(session) = app.picker.as_mut() {
+                session.cancel_confirm();
+                session.selected = session.selected.min(count.saturating_sub(1));
+            }
+        }
     }
 }
 
@@ -946,17 +1022,13 @@ fn replace_last_token(draft: &str, replacement: &str) -> String {
 fn submit_highlight_picker(app: &mut App) {
     use crate::picker::PickerMode;
 
-    let Some((mode, draft, candidate_selected)) = app
-        .picker
-        .as_ref()
-        .map(|session| {
-            (
-                session.mode.clone(),
-                session.draft.clone(),
-                session.selected,
-            )
-        })
-    else {
+    let Some((mode, draft, candidate_selected)) = app.picker.as_ref().map(|session| {
+        (
+            session.mode.clone(),
+            session.draft.clone(),
+            session.selected,
+        )
+    }) else {
         return;
     };
     let mut highlight_box = crate::highlight_model::HighlightBox {
@@ -996,7 +1068,11 @@ fn submit_filter_picker(app: &mut App) {
     };
 
     {
-        let Some(input) = app.picker.as_mut().and_then(|session| session.input.as_mut()) else {
+        let Some(input) = app
+            .picker
+            .as_mut()
+            .and_then(|session| session.input.as_mut())
+        else {
             return;
         };
         if input.confirm_field_candidate_on_enter() {
@@ -1106,46 +1182,15 @@ fn submit_filter_picker(app: &mut App) {
     app.close_picker();
 }
 
-fn submit_bookmark_picker(app: &mut App) {
-    use crate::picker::PickerMode;
-
-    let Some((mode, draft)) = app
-        .picker
-        .as_ref()
-        .map(|session| (session.mode.clone(), session.draft.clone()))
-    else {
-        return;
-    };
-    match mode {
-        PickerMode::New => {
-            let before = app.bookmarks.len();
-            app.bookmark_add_current();
-            if app.bookmarks.len() == before {
-                return;
-            }
-        }
-        PickerMode::Edit { index } => {
-            if draft.is_empty() {
-                return;
-            }
-            let Some(row_id) = app.bookmarks.items.get(index).map(|bookmark| bookmark.row_id)
-            else {
-                return;
-            };
-            if !app.update_bookmark_label(row_id, draft) {
-                return;
-            }
-        }
-        PickerMode::Manage => return,
-    };
-    app.close_picker();
-}
-
 fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
     use crate::picker::{PickerKind, PickerMode, PickerSession};
 
     let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
-    if app.picker.as_ref().is_some_and(|session| session.confirm.is_some()) {
+    if app
+        .picker
+        .as_ref()
+        .is_some_and(|session| session.confirm.is_some())
+    {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') => confirm_picker_delete(app),
             KeyCode::Esc | KeyCode::Char('n') => {
@@ -1174,116 +1219,168 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
     };
 
     if matches!(mode, PickerMode::Manage) {
-        let ids = unified_visible_ids(app);
-        match key.code {
-            KeyCode::Up => {
-                app.picker.as_mut().unwrap().selected =
-                    app.picker.as_ref().unwrap().selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                let session = app.picker.as_mut().unwrap();
-                session.selected = (session.selected + 1).min(ids.len().saturating_sub(1));
-            }
-            KeyCode::Backspace => {
-                let session = app.picker.as_mut().unwrap();
-                session.query.pop();
-                session.selected = 0;
-            }
-            KeyCode::Tab => {
-                let Some(id) = unified_selected_id(app) else {
-                    return;
-                };
-                let session = app.picker.as_mut().unwrap();
-                if session.checked.contains(&id) {
-                    session.checked.remove(&id);
-                } else {
-                    session.checked.insert(id);
-                }
-                let count = ids.len();
-                session.selected = (session.selected + 1).min(count.saturating_sub(1));
-            }
-            KeyCode::Char('e') if ctrl => {
-                if app.picker.as_ref().is_some_and(|s| s.checked.len() > 1) {
-                    app.set_flash("不支持批量编辑");
-                    return;
-                }
-                let Some(id) = (|| {
-                    let session = app.picker.as_ref()?;
-                    if session.checked.len() == 1 {
-                        session.checked.iter().next().copied()
-                    } else {
-                        unified_selected_id(app)
+        match kind {
+            PickerKind::Bookmark => {
+                // Bookmark panel (F2): Tab no-op, Ctrl-E no-op, Ctrl-D delete,
+                // Enter jump-to-row + close + focus LogList.
+                let vis = bookmark_visible_indices(app);
+                match key.code {
+                    KeyCode::Up => {
+                        app.picker.as_mut().unwrap().selected =
+                            app.picker.as_ref().unwrap().selected.saturating_sub(1);
                     }
-                })() else {
-                    return;
-                };
-                use crate::picker::UnifiedKind;
-                match id.kind {
-                    UnifiedKind::Highlight => {
-                        let pattern =
-                            app.highlight_groups.groups[id.source_index].pattern.clone();
+                    KeyCode::Down => {
                         let session = app.picker.as_mut().unwrap();
-                        session.kind = id.kind.as_picker_kind();
-                        session.enter_edit(id.source_index, pattern);
+                        session.selected = (session.selected + 1).min(vis.len().saturating_sub(1));
                     }
-                    UnifiedKind::Filter => {
-                        let input = crate::input::InputBox {
-                            chips: app.groups.groups[id.source_index].chips.clone(),
-                            ..crate::input::InputBox::default()
+                    KeyCode::Backspace => {
+                        let session = app.picker.as_mut().unwrap();
+                        session.query.pop();
+                        session.selected = 0;
+                    }
+                    KeyCode::Tab => { /* no-op: bookmark panel has no multi-select */ }
+                    KeyCode::Char('e') if ctrl => {
+                        app.set_flash("书签不支持编辑");
+                    }
+                    KeyCode::Char('d') if ctrl => {
+                        if let Some(&idx) = vis.get(app.picker.as_ref().unwrap().selected) {
+                            app.picker.as_mut().unwrap().confirm =
+                                Some(crate::picker::ConfirmKind::DeleteBookmark { index: idx });
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(&idx) = vis.get(app.picker.as_ref().unwrap().selected) {
+                            let row_id = app.bookmarks.items[idx].row_id;
+                            match app.jump_to_bookmark(row_id) {
+                                crate::bookmark::JumpResult::Ok => {
+                                    app.close_picker();
+                                }
+                                crate::bookmark::JumpResult::Evicted => {
+                                    app.set_flash("书签行已淘汰");
+                                }
+                                crate::bookmark::JumpResult::Filtered => {
+                                    app.set_flash("书签行不在当前视图");
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) if !ctrl => {
+                        let session = app.picker.as_mut().unwrap();
+                        session.query.push(c);
+                        session.selected = 0;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            _ => {
+                // Unified panel (Filter/Highlight/Exclude; bookmark arm removed).
+                let ids = unified_visible_ids(app);
+                match key.code {
+                    KeyCode::Up => {
+                        app.picker.as_mut().unwrap().selected =
+                            app.picker.as_ref().unwrap().selected.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        let session = app.picker.as_mut().unwrap();
+                        session.selected = (session.selected + 1).min(ids.len().saturating_sub(1));
+                    }
+                    KeyCode::Backspace => {
+                        let session = app.picker.as_mut().unwrap();
+                        session.query.pop();
+                        session.selected = 0;
+                    }
+                    KeyCode::Tab => {
+                        let Some(id) = unified_selected_id(app) else {
+                            return;
                         };
                         let session = app.picker.as_mut().unwrap();
-                        session.kind = id.kind.as_picker_kind();
-                        session.enter_edit_input(id.source_index, input);
+                        if session.checked.contains(&id) {
+                            session.checked.remove(&id);
+                        } else {
+                            session.checked.insert(id);
+                        }
+                        let count = ids.len();
+                        session.selected = (session.selected + 1).min(count.saturating_sub(1));
                     }
-                    UnifiedKind::Exclude => {
-                        let input = crate::input::InputBox {
-                            chips: vec![app.groups.excludes[id.source_index].chip.clone()],
-                            exclude_mode: true,
-                            ..crate::input::InputBox::default()
+                    KeyCode::Char('e') if ctrl => {
+                        if app.picker.as_ref().is_some_and(|s| s.checked.len() > 1) {
+                            app.set_flash("不支持批量编辑");
+                            return;
+                        }
+                        let Some(id) = (|| {
+                            let session = app.picker.as_ref()?;
+                            if session.checked.len() == 1 {
+                                session.checked.iter().next().copied()
+                            } else {
+                                unified_selected_id(app)
+                            }
+                        })() else {
+                            return;
                         };
-                        let session = app.picker.as_mut().unwrap();
-                        session.kind = id.kind.as_picker_kind();
-                        session.enter_edit_input(id.source_index, input);
+                        use crate::picker::UnifiedKind;
+                        match id.kind {
+                            UnifiedKind::Highlight => {
+                                let pattern =
+                                    app.highlight_groups.groups[id.source_index].pattern.clone();
+                                let session = app.picker.as_mut().unwrap();
+                                session.kind = id.kind.as_picker_kind();
+                                session.enter_edit(id.source_index, pattern);
+                            }
+                            UnifiedKind::Filter => {
+                                let input = crate::input::InputBox {
+                                    chips: app.groups.groups[id.source_index].chips.clone(),
+                                    ..crate::input::InputBox::default()
+                                };
+                                let session = app.picker.as_mut().unwrap();
+                                session.kind = id.kind.as_picker_kind();
+                                session.enter_edit_input(id.source_index, input);
+                            }
+                            UnifiedKind::Exclude => {
+                                let input = crate::input::InputBox {
+                                    chips: vec![app.groups.excludes[id.source_index].chip.clone()],
+                                    exclude_mode: true,
+                                    ..crate::input::InputBox::default()
+                                };
+                                let session = app.picker.as_mut().unwrap();
+                                session.kind = id.kind.as_picker_kind();
+                                session.enter_edit_input(id.source_index, input);
+                            }
+                        }
                     }
-                    UnifiedKind::Bookmark => {
-                        let label = app.bookmarks.items[id.source_index].label.clone();
-                        let session = app.picker.as_mut().unwrap();
-                        session.kind = id.kind.as_picker_kind();
-                        session.enter_edit(id.source_index, label);
+                    KeyCode::Char('d') if ctrl => {
+                        let session = app.picker.as_ref().unwrap();
+                        let items: Vec<crate::picker::UnifiedId> = if session.checked.is_empty() {
+                            unified_selected_id(app).into_iter().collect()
+                        } else {
+                            session.checked.iter().copied().collect()
+                        };
+                        if !items.is_empty() {
+                            app.picker.as_mut().unwrap().request_delete_many(items);
+                        }
                     }
-                }
-            }
-            KeyCode::Char('d') if ctrl => {
-                let session = app.picker.as_ref().unwrap();
-                let items: Vec<crate::picker::UnifiedId> = if session.checked.is_empty() {
-                    unified_selected_id(app).into_iter().collect()
-                } else {
-                    session.checked.iter().copied().collect()
-                };
-                if !items.is_empty() {
-                    app.picker.as_mut().unwrap().request_delete_many(items);
-                }
-            }
-            KeyCode::Enter => {
-                let session = app.picker.as_ref().unwrap();
-                if !session.checked.is_empty() {
-                    let items: Vec<_> = session.checked.iter().copied().collect();
-                    for id in items {
+                    KeyCode::Enter => {
+                        let session = app.picker.as_ref().unwrap();
+                        if !session.checked.is_empty() {
+                            let items: Vec<_> = session.checked.iter().copied().collect();
+                            for id in items {
+                                app.toggle_unified_enabled(id.kind, id.source_index);
+                            }
+                            return;
+                        }
+                        let Some(id) = unified_selected_id(app) else {
+                            return;
+                        };
                         app.toggle_unified_enabled(id.kind, id.source_index);
                     }
-                    return;
+                    KeyCode::Char(c) if !ctrl => {
+                        let session = app.picker.as_mut().unwrap();
+                        session.query.push(c);
+                        session.selected = 0;
+                    }
+                    _ => {}
                 }
-                let Some(id) = unified_selected_id(app) else {
-                    return;
-                };
-                app.toggle_unified_enabled(id.kind, id.source_index);
             }
-            KeyCode::Char(c) if !ctrl => {
-                let session = app.picker.as_mut().unwrap();
-                session.query.push(c);
-                session.selected = 0;
-            }
-            _ => {}
         }
         return;
     }
@@ -1458,14 +1555,6 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             }
             _ => {}
         },
-        PickerKind::Bookmark => match key.code {
-            KeyCode::Enter => submit_bookmark_picker(app),
-            KeyCode::Backspace => {
-                app.picker.as_mut().unwrap().draft.pop();
-            }
-            KeyCode::Char(c) if !ctrl => app.picker.as_mut().unwrap().draft.push(c),
-            _ => {}
-        },
         PickerKind::MsgChip { .. } => match key.code {
             KeyCode::Enter | KeyCode::Tab => {
                 let _ = app.confirm_msg_chip_picker();
@@ -1476,8 +1565,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             }
             KeyCode::Down => {
                 let session = app.picker.as_ref().unwrap();
-                let count =
-                    PickerSession::filtered_indices(&session.choices, &session.draft).len();
+                let count = PickerSession::filtered_indices(&session.choices, &session.draft).len();
                 app.picker.as_mut().unwrap().selected =
                     (session.selected + 1).min(count.saturating_sub(1));
             }
@@ -1494,6 +1582,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             _ => {}
         },
         PickerKind::Unified => {}
+        PickerKind::Bookmark => {}
     }
 }
 
@@ -1573,10 +1662,17 @@ fn handle_highlight_box_key(app: &mut App, key: event::KeyEvent) {
     let is_ctrl_c =
         key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Up => app.highlight_box.move_selection(&app.highlight_groups.groups, -1),
-        KeyCode::Down => app.highlight_box.move_selection(&app.highlight_groups.groups, 1),
+        KeyCode::Up => app
+            .highlight_box
+            .move_selection(&app.highlight_groups.groups, -1),
+        KeyCode::Down => app
+            .highlight_box
+            .move_selection(&app.highlight_groups.groups, 1),
         KeyCode::Enter | KeyCode::Tab => {
-            match app.highlight_box.confirm_or_submit(&app.highlight_groups.groups) {
+            match app
+                .highlight_box
+                .confirm_or_submit(&app.highlight_groups.groups)
+            {
                 Ok(Some(group)) => {
                     let idx = app.push_or_find_highlight_group(group);
                     app.highlight_box.clear();
@@ -1861,8 +1957,8 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         }
     }
 
-    // Bookmark operator pending (`m`/`M` + a/d/m/M). Esc clears pending only.
-    // `mm` → Manage, `MM` → New; mixed case on the second key follows that key.
+    // Bookmark operator pending (`m`/`M` + a/d/m). Esc clears pending only.
+    // `mm` → Manage; `MM` falls through to `_ => 未知` (out of scope, F-doc).
     if app.pending_m {
         app.pending_m = false;
         if app.focus == Focus::LogList {
@@ -1871,7 +1967,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                 KeyCode::Char('a') => app.bookmark_add_current(),
                 KeyCode::Char('d') => app.bookmark_remove_current(),
                 KeyCode::Char('m') => {
-                    app.open_picker_new(crate::picker::PickerKind::Bookmark);
+                    app.open_picker(crate::picker::PickerKind::Bookmark);
                 }
                 _ => app.set_flash("未知"),
             }
@@ -1977,8 +2073,12 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (Focus::ChipStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Filter, 1),
         (Focus::ExcludeStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Exclude, -1),
         (Focus::ExcludeStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Exclude, 1),
-        (Focus::HighlightStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Highlight, -1),
-        (Focus::HighlightStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Highlight, 1),
+        (Focus::HighlightStrip, KeyCode::Char('h')) => {
+            app.move_strip_cursor(StripKind::Highlight, -1)
+        }
+        (Focus::HighlightStrip, KeyCode::Char('l')) => {
+            app.move_strip_cursor(StripKind::Highlight, 1)
+        }
         // Unified Manage: Space Space · New: `;` Filter · `/` Highlight · `` ` `` Exclude · `mm` Bookmark
         (_, KeyCode::Char(';')) => {
             app.open_picker_new(crate::picker::PickerKind::Filter);
@@ -2173,9 +2273,9 @@ mod dispatch_tests {
         assert!(app.pending_m);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         assert!(!app.pending_m);
-        let bookmark = app.picker.as_ref().expect("mm opens bookmark New");
+        let bookmark = app.picker.as_ref().expect("mm opens bookmark Manage");
         assert_eq!(bookmark.kind, PickerKind::Bookmark);
-        assert_eq!(bookmark.mode, PickerMode::New);
+        assert_eq!(bookmark.mode, PickerMode::Manage);
     }
 
     #[test]
@@ -2221,10 +2321,7 @@ mod dispatch_tests {
         let picker = app.picker.as_ref().unwrap();
         assert_eq!(picker.mode, PickerMode::New);
         assert_eq!(picker.kind, PickerKind::Filter);
-        assert!(picker
-            .input
-            .as_ref()
-            .is_some_and(|box_| box_.is_empty()));
+        assert!(picker.input.as_ref().is_some_and(|box_| box_.is_empty()));
     }
 
     #[test]
@@ -2286,10 +2383,7 @@ mod dispatch_tests {
                 KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
             );
         }
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.highlight_groups.groups.len(), 1);
         assert_eq!(app.highlight_groups.groups[0].pattern, "error");
@@ -2329,10 +2423,7 @@ mod dispatch_tests {
             "confirm state must swallow keys instead of editing the picker"
         );
         assert!(app.picker.as_ref().unwrap().confirm.is_some());
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.highlight_groups.groups.len(), 1);
         assert!(app.picker.as_ref().unwrap().confirm.is_none());
 
@@ -2340,10 +2431,7 @@ mod dispatch_tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
         );
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.highlight_groups.groups.is_empty());
         assert!(app.picker.is_some());
     }
@@ -2368,14 +2456,8 @@ mod dispatch_tests {
             enabled: true,
         });
         app.open_unified_picker();
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        );
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.picker.is_some());
         assert!(app.groups.groups[0].enabled);
@@ -2406,10 +2488,7 @@ mod dispatch_tests {
         handle_picker_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.picker.as_ref().unwrap().checked.len(), 2);
 
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.picker.as_ref().unwrap().confirm.is_none());
         assert!(!app.groups.groups[0].enabled);
         assert!(!app.highlight_groups.groups[0].enabled);
@@ -2449,8 +2528,8 @@ mod dispatch_tests {
 
     #[test]
     fn filtered_highlight_edit_submit_closes_and_updates_pattern() {
-        use crate::picker::PickerMode;
         use crate::highlight_model::HighlightGroup;
+        use crate::picker::PickerMode;
 
         let mut app = App::new(100);
         for pattern in ["alpha", "error", "warn"] {
@@ -2475,10 +2554,7 @@ mod dispatch_tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
         );
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.picker.is_none());
         assert_eq!(app.highlight_groups.groups[2].pattern, "warni");
@@ -2665,7 +2741,10 @@ mod dispatch_tests {
             .expect("filter new keeps InputBox");
         assert_eq!(input.draft_field, Some(input::ChipField::Tag));
         assert!(input.draft.is_empty());
-        assert!(input.chips.is_empty(), "field confirm must not commit a pill");
+        assert!(
+            input.chips.is_empty(),
+            "field confirm must not commit a pill"
+        );
         assert!(matches!(
             app.picker.as_ref().map(|session| &session.mode),
             Some(PickerMode::New)
@@ -3470,7 +3549,9 @@ mod dispatch_tests {
         );
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_highlight_group(highlight_model::HighlightGroup::from_pattern("hit").unwrap());
+        app.push_or_find_highlight_group(
+            highlight_model::HighlightGroup::from_pattern("hit").unwrap(),
+        );
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 1);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
@@ -3529,7 +3610,9 @@ mod dispatch_tests {
         );
         app.following = false;
         app.cursor = 0;
-        app.push_or_find_highlight_group(highlight_model::HighlightGroup::from_pattern("hit").unwrap());
+        app.push_or_find_highlight_group(
+            highlight_model::HighlightGroup::from_pattern("hit").unwrap(),
+        );
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 2, "n follows search, not severe");
         handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
@@ -3579,10 +3662,7 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('l'));
         assert_eq!(app.visible.len(), 3, "level>=W keeps W/E/F");
-        let levels: Vec<_> = app
-            .visible_rows()
-            .map(|r| r.level.as_char())
-            .collect();
+        let levels: Vec<_> = app.visible_rows().map(|r| r.level.as_char()).collect();
         assert_eq!(levels, vec!['W', 'E', 'F']);
     }
 
@@ -3618,7 +3698,9 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         assert!(matches!(
-            app.picker.as_ref().map(|picker| (picker.kind, &picker.mode)),
+            app.picker
+                .as_ref()
+                .map(|picker| (picker.kind, &picker.mode)),
             Some((PickerKind::MsgChip { exclude: false }, PickerMode::New))
         ));
         // filter to "timeout"
@@ -4131,7 +4213,7 @@ mod dispatch_tests {
         ));
         assert_eq!(
             app.picker.as_ref().map(|picker| &picker.mode),
-            Some(&crate::picker::PickerMode::New)
+            Some(&crate::picker::PickerMode::Manage)
         );
         handle_picker_key(
             &mut app,
@@ -4144,6 +4226,163 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
         assert!(app.bookmarks.is_empty());
         assert_eq!(app.status_msg.as_deref(), Some("已删除"));
+    }
+
+    #[test]
+    fn bookmark_panel_enter_jumps_to_row_and_closes() {
+        // mm opens the bookmark-only Manage panel (F2); Enter jumps to the
+        // selected bookmark's row, closes the panel, and focuses LogList.
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I TagA    : first",
+                "04-02 10:00:01.000  1  1 I TagB    : second",
+            ],
+        );
+        app.following = false;
+        app.cursor = 0;
+        app.bookmark_add_current();
+        // Move cursor off the bookmark, then open the panel and jump back.
+        app.cursor = 1;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        assert_eq!(
+            app.picker.as_ref().unwrap().mode,
+            crate::picker::PickerMode::Manage
+        );
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
+        );
+        assert!(app.picker.is_none(), "Enter closes the bookmark panel");
+        assert_eq!(app.focus, app::Focus::LogList);
+        // Jumped back to the bookmarked row (visible index 0).
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn bookmark_panel_tab_is_noop() {
+        // The bookmark panel disables Tab multi-select entirely (F2).
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        app.bookmark_add_current();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        let before = app.picker.as_ref().unwrap().checked.len();
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Tab, event::KeyModifiers::NONE),
+        );
+        // Tab neither toggles a check nor errors.
+        assert_eq!(app.picker.as_ref().unwrap().checked.len(), before);
+    }
+
+    #[test]
+    fn bookmark_panel_ctrl_d_confirms_and_deletes() {
+        // Ctrl-D arms a DeleteBookmark confirm; confirming removes the bookmark.
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        app.bookmark_add_current();
+        assert_eq!(app.bookmarks.len(), 1);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('d'), event::KeyModifiers::CONTROL),
+        );
+        assert!(app.picker.as_ref().unwrap().confirm.is_some());
+        // Confirm with Enter.
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
+        );
+        assert!(app.bookmarks.is_empty(), "bookmark deleted on confirm");
+        assert!(app.bookmark_row_ids.is_empty(), "row-id cache cleared");
+    }
+
+    #[test]
+    fn bookmark_panel_ctrl_e_is_noop() {
+        // The bookmark panel does not support edit (F2).
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        app.bookmark_add_current();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        let mode_before = app.picker.as_ref().unwrap().mode.clone();
+        handle_picker_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('e'), event::KeyModifiers::CONTROL),
+        );
+        // Still Manage (no Edit transition).
+        assert_eq!(app.picker.as_ref().unwrap().mode, mode_before);
+    }
+
+    #[test]
+    fn bookmark_row_ids_cache_synced_on_add_and_remove() {
+        // F1: the O(1) bookmark-row cache stays in sync with the bookmark list.
+        let mut app = App::new(100);
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I TagA    : first",
+                "04-02 10:00:01.000  1  1 I TagB    : second",
+            ],
+        );
+        let rid0 = app.view_source()[app.visible[0]].row_id;
+        app.cursor = 0;
+        app.bookmark_add_current();
+        assert!(app.is_bookmark_row(rid0));
+        assert!(app.bookmark_row_ids.contains(&rid0));
+        app.bookmark_remove_current();
+        assert!(!app.is_bookmark_row(rid0));
+        assert!(!app.bookmark_row_ids.contains(&rid0));
+    }
+
+    #[test]
+    fn unified_picker_has_no_bookmark_items() {
+        // AC2/F2: the aggregated panel no longer lists bookmarks.
+        let mut app = App::new(100);
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        app.cursor = 0;
+        app.bookmark_add_current();
+        let items = unified_picker_items(&app);
+        // No item label carries a bookmark-style prefix, and the bookmark
+        // still exists in the session (it just isn't surfaced in the panel).
+        assert!(items.iter().all(|i| !i.label.starts_with("[Bookmark]")));
+        assert!(items
+            .iter()
+            .all(|i| i.id.kind != crate::picker::UnifiedKind::Filter
+                || i.label.starts_with("[Filter]")));
+        assert_eq!(
+            app.bookmarks.len(),
+            1,
+            "bookmark still exists outside panel"
+        );
+    }
+
+    #[test]
+    fn bookmark_panel_render_data_has_jump_actions_and_no_preview() {
+        // F2/F3: bookmark panel rows carry Jump icons and never show a preview.
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
+        app.bookmark_add_current();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+        let data = picker_render_data(&app).unwrap();
+        assert!(
+            data.actions
+                .iter()
+                .all(|a| matches!(a, crate::ui::ActionKind::Jump)),
+            "all bookmark rows get a Jump action"
+        );
+        assert!(!data.show_preview, "bookmark panel never shows preview");
+        assert_eq!(data.empty_msg, "无书签");
     }
 
     #[test]
@@ -4174,77 +4413,6 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn unified_enter_toggles_bookmark_enabled() {
-        let mut app = App::new(100);
-        drain_lines(
-            &mut app,
-            &[
-                "04-02 10:00:00.000  1  1 I Old     : first",
-                "04-02 10:00:01.000  1  1 I New     : second",
-            ],
-        );
-        app.cursor = 0;
-        app.bookmark_add_current();
-        app.cursor = 1;
-        app.bookmark_add_current();
-        app.open_unified_picker();
-        // Newest bookmark is first among bookmark rows; with only bookmarks, selected=0.
-        handle_picker_key(
-            &mut app,
-            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
-        );
-        assert!(app.picker.is_some());
-        // Newest-first display: storage index 1 is first in unified list.
-        assert!(!app.bookmarks.items[1].enabled);
-        assert!(app.bookmarks.items[0].enabled);
-    }
-
-    #[test]
-    fn bookmark_picker_edit_and_new_use_current_row() {
-        use crate::picker::{PickerKind, PickerMode};
-
-        let mut app = App::new(100);
-        drain_lines(
-            &mut app,
-            &[
-                "04-02 10:00:00.000  1  1 I Old     : first",
-                "04-02 10:00:01.000  1  1 I New     : second",
-            ],
-        );
-        app.cursor = 0;
-        app.bookmark_add_current();
-        app.open_unified_picker();
-        // Query "Bookmark" so only bookmark rows remain (Filter/Highlight/Exclude absent).
-        handle_picker_key(
-            &mut app,
-            event::KeyEvent::new(KeyCode::Char('e'), event::KeyModifiers::CONTROL),
-        );
-        assert!(matches!(
-            app.picker.as_ref().unwrap().mode,
-            PickerMode::Edit { .. }
-        ));
-        app.picker.as_mut().unwrap().draft = "renamed".into();
-        handle_picker_key(
-            &mut app,
-            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
-        );
-        assert_eq!(app.bookmarks.items[0].label, "renamed");
-        assert!(app.picker.is_none(), "Edit submit closes picker");
-        assert_eq!(app.focus, app::Focus::LogList);
-
-        app.cursor = 1;
-        app.open_picker_new(PickerKind::Bookmark);
-        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
-        handle_picker_key(
-            &mut app,
-            event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
-        );
-        assert_eq!(app.bookmarks.len(), 2);
-        assert!(app.picker.is_none(), "New submit closes picker");
-        assert_eq!(app.focus, app::Focus::LogList);
-    }
-
-    #[test]
     fn filter_picker_new_submit_returns_focus_to_loglist() {
         use crate::input::{Chip, ChipField};
         use crate::picker::{PickerKind, PickerMode};
@@ -4258,10 +4426,7 @@ mod dispatch_tests {
             field: ChipField::Tag,
             value: "Foo".into(),
         });
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.groups.groups.len(), 1);
         assert!(app.picker.is_none());
@@ -4282,10 +4447,7 @@ mod dispatch_tests {
             field: ChipField::Tag,
             value: "noise".into(),
         });
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.groups.excludes.len(), 1);
         assert!(app.picker.is_none());
@@ -4298,8 +4460,7 @@ mod dispatch_tests {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(
-            crate::model::EntryRow::from_line("01-01 00:00:00.000  1 1 I TargetTag: msg")
-                .unwrap(),
+            crate::model::EntryRow::from_line("01-01 00:00:00.000  1 1 I TargetTag: msg").unwrap(),
         )
         .unwrap();
         drop(tx);
@@ -4338,7 +4499,10 @@ mod dispatch_tests {
         let mut app = App::new(100);
         app.open_picker(PickerKind::Unified);
         let data = picker_render_data(&app).unwrap();
-        assert!(!data.show_preview, "Unified picker must never render preview");
+        assert!(
+            !data.show_preview,
+            "Unified picker must never render preview"
+        );
         assert!(data.preview.is_empty());
     }
 
@@ -4364,8 +4528,7 @@ mod dispatch_tests {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(
-            crate::model::EntryRow::from_line("01-01 00:00:00.000  1 1 I TargetTag: msg")
-                .unwrap(),
+            crate::model::EntryRow::from_line("01-01 00:00:00.000  1 1 I TargetTag: msg").unwrap(),
         )
         .unwrap();
         drop(tx);
@@ -4378,7 +4541,10 @@ mod dispatch_tests {
         // field set but draft still empty: no preview content yet
         let data = picker_render_data(&app).unwrap();
         assert!(data.draft_field == Some(ChipField::Tag));
-        assert!(data.preview.is_empty(), "empty draft value must not preview");
+        assert!(
+            data.preview.is_empty(),
+            "empty draft value must not preview"
+        );
     }
 
     #[test]
@@ -4396,10 +4562,8 @@ mod dispatch_tests {
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(100);
-        let row = crate::model::EntryRow::from_line(
-            "01-01 00:00:00.000  1 1 I TabTestTag: msg",
-        )
-        .unwrap();
+        let row =
+            crate::model::EntryRow::from_line("01-01 00:00:00.000  1 1 I TabTestTag: msg").unwrap();
         tx.send(row).unwrap();
         drop(tx);
         app.drain(&rx);
@@ -4428,6 +4592,9 @@ mod dispatch_tests {
             .unwrap()
             .draft
             .clone();
-        assert_eq!(draft, "TabTestTag", "Tab should fill vocab candidate into draft");
+        assert_eq!(
+            draft, "TabTestTag",
+            "Tab should fill vocab candidate into draft"
+        );
     }
 }

@@ -23,30 +23,33 @@ use crate::input::ChipField;
 // glyph literals. See prd.md R4 / design.md D1 for the rationale and table.
 // ---------------------------------------------------------------------------
 
-pub const GLYPH_MODE_MANAGE: &str = "\u{f0b7}"; // 
-pub const GLYPH_MODE_NEW: &str = "\u{f0fe}"; // 
-pub const GLYPH_MODE_EDIT: &str = "\u{f044}"; // 
-pub const GLYPH_CARET_SEL: &str = "\u{f0da}"; // 
-pub const GLYPH_TITLE_PICKER: &str = "\u{f002}"; // 
-pub const GLYPH_TITLE_LOG: &str = "\u{f0c5}"; // 
-pub const GLYPH_TITLE_FILTER: &str = "\u{f0b0}"; // 
-pub const GLYPH_TITLE_EXCLUDE: &str = "\u{f056}"; // 
-pub const GLYPH_TITLE_HIGHLIGHT: &str = "\u{f0e0}"; // 
-pub const GLYPH_GROUP_ON: &str = "\u{f192}"; // 
-pub const GLYPH_GROUP_OFF: &str = "\u{f10c}"; // 
-pub const GLYPH_BOOKMARK: &str = "\u{f02e}"; // 
-pub const GLYPH_LOCK: &str = "\u{f023}"; // 
-pub const GLYPH_FOLLOWING: &str = "\u{f062}"; // 
-pub const GLYPH_VISUAL: &str = "\u{f245}"; // 
-pub const GLYPH_SEARCH: &str = "\u{f002}"; // 
-pub const GLYPH_CRASH: &str = "\u{f071}"; // 
-pub const GLYPH_SEP: &str = "\u{e0bf}"; // 
-pub const GLYPH_FIELD_TAG: &str = "\u{f02b}"; // 
-pub const GLYPH_FIELD_MSG: &str = "\u{f075}"; // 
-pub const GLYPH_FIELD_PKG: &str = "\u{f187}"; // 
-pub const GLYPH_FIELD_PID: &str = "\u{f292}"; // 
-pub const GLYPH_FIELD_TID: &str = "\u{f2bd}"; // 
-pub const GLYPH_FIELD_LEVEL: &str = "\u{f0d0}"; // 
+pub const GLYPH_MODE_MANAGE: &str = "\u{f0b7}"; //
+pub const GLYPH_MODE_NEW: &str = "\u{f0fe}"; //
+pub const GLYPH_MODE_EDIT: &str = "\u{f044}"; //
+pub const GLYPH_CARET_SEL: &str = "\u{f0da}"; //
+pub const GLYPH_TITLE_PICKER: &str = "\u{f002}"; //
+pub const GLYPH_TITLE_LOG: &str = "\u{f0c5}"; //
+pub const GLYPH_TITLE_FILTER: &str = "\u{f0b0}"; //
+pub const GLYPH_TITLE_EXCLUDE: &str = "\u{f056}"; //
+pub const GLYPH_TITLE_HIGHLIGHT: &str = "\u{f0e0}"; //
+pub const GLYPH_GROUP_ON: &str = "\u{f192}"; //
+pub const GLYPH_GROUP_OFF: &str = "\u{f10c}"; //
+pub const GLYPH_BOOKMARK: &str = "\u{f02e}"; //
+pub const GLYPH_ACTION_JUMP: &str = "\u{f061}"; //  nf-fa-arrow_right
+pub const GLYPH_ACTION_TOGGLE_ON: &str = "\u{f205}"; //  nf-fa-toggle_on
+pub const GLYPH_ACTION_TOGGLE_OFF: &str = "\u{f204}"; //  nf-fa-toggle_off
+pub const GLYPH_LOCK: &str = "\u{f023}"; //
+pub const GLYPH_FOLLOWING: &str = "\u{f062}"; //
+pub const GLYPH_VISUAL: &str = "\u{f245}"; //
+pub const GLYPH_SEARCH: &str = "\u{f002}"; //
+pub const GLYPH_CRASH: &str = "\u{f071}"; //
+pub const GLYPH_SEP: &str = "\u{e0bf}"; //
+pub const GLYPH_FIELD_TAG: &str = "\u{f02b}"; //
+pub const GLYPH_FIELD_MSG: &str = "\u{f075}"; //
+pub const GLYPH_FIELD_PKG: &str = "\u{f187}"; //
+pub const GLYPH_FIELD_PID: &str = "\u{f292}"; //
+pub const GLYPH_FIELD_TID: &str = "\u{f2bd}"; //
+pub const GLYPH_FIELD_LEVEL: &str = "\u{f0d0}"; //
 pub const GLYPH_HR: &str = "\u{2500}"; // ─
 
 /// Map a chip field to its nerdfont icon glyph.
@@ -86,6 +89,8 @@ pub struct UiTokens {
     /// Prefix drawn before the selected candidate row (e.g. `"▌ "`).
     pub candidate_prefix: String,
     pub bookmark_strip_bg: Color,
+    /// Bookmark row background in LogList (faint yellow, distinct from selection).
+    pub bookmark_row_bg: Color,
 }
 
 impl UiTokens {
@@ -107,6 +112,7 @@ impl UiTokens {
             candidate_match_fg: Color::Cyan,
             candidate_prefix: "▌ ".to_string(),
             bookmark_strip_bg: Color::DarkGray,
+            bookmark_row_bg: Color::Rgb(54, 46, 0),
         }
     }
 }
@@ -250,9 +256,7 @@ pub fn candidate_selection_style() -> Style {
 
 /// Soft accent+DIM style for picker mode prefixes (no fill — distinct from chip pills).
 pub fn picker_mode_style() -> Style {
-    Style::default()
-        .fg(accent())
-        .add_modifier(Modifier::DIM)
+    Style::default().fg(accent()).add_modifier(Modifier::DIM)
 }
 
 /// Mode prefix icon (nerdfont): Manage ``, New ``, Edit ``.
@@ -427,9 +431,7 @@ pub fn caret_bar() -> Span<'static> {
 /// dim gray otherwise.
 pub fn border_style(active: bool) -> Style {
     if active {
-        Style::default()
-            .fg(accent())
-            .add_modifier(Modifier::DIM)
+        Style::default().fg(accent()).add_modifier(Modifier::DIM)
     } else {
         Style::default()
             .fg(t().border_inactive)
@@ -573,12 +575,16 @@ pub fn bookmark_strip_style() -> Style {
 pub fn bookmark_label_style() -> Style {
     Style::default().fg(warning()).add_modifier(Modifier::BOLD)
 }
+/// LogList row background for bookmarked rows (faint yellow). Priority:
+/// `visual > bookmark-bg > cursor-selection` (see `ui::render_log_list`).
+pub fn bookmark_row_style() -> Style {
+    Style::default().bg(t().bookmark_row_bg)
+}
 
-/// M2 bookmark disabled (`enabled == false`): dim + hollow-star companion style.
-pub fn bookmark_disabled_style() -> Style {
-    Style::default()
-        .fg(t().border_inactive)
-        .add_modifier(Modifier::DIM)
+/// Foreground color for the minimap Bookmark mark (F5). Same color family as
+/// the bookmark row bg so the rail mark reads as related to the row wash.
+pub fn bookmark_minimap_color() -> Color {
+    t().bookmark_row_bg
 }
 
 /// M2 stale bookmark (evicted from ring buffer).
@@ -598,15 +604,12 @@ pub fn unified_kind_style(kind: crate::picker::UnifiedKind) -> Style {
             Style::default().fg(Color::Rgb(r, g, b))
         }
         UnifiedKind::Exclude => Style::default().fg(warning()),
-        UnifiedKind::Bookmark => Style::default().fg(lock()),
     }
 }
 
 /// Candidate-list prefix when the row is Tab multi-selected (checked).
 pub fn candidate_checked_prefix_style() -> Style {
-    Style::default()
-        .fg(lock())
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(lock()).add_modifier(Modifier::BOLD)
 }
 
 // ── theme.toml parsing (M4) ──────────────────────────────────────────
@@ -631,6 +634,7 @@ struct ThemeFile {
     /// Deprecated alias for [`Self::candidate_selected_bg`].
     candidate_selection_bg: Option<String>,
     bookmark_strip_bg: Option<String>,
+    bookmark_row_bg: Option<String>,
 }
 
 /// Parse a theme.toml body into tokens (merged onto builtin defaults).
@@ -686,6 +690,9 @@ pub fn parse_theme_toml(text: &str) -> Result<UiTokens, String> {
     }
     if let Some(s) = file.bookmark_strip_bg {
         t.bookmark_strip_bg = parse_color(&s)?;
+    }
+    if let Some(s) = file.bookmark_row_bg {
+        t.bookmark_row_bg = parse_color(&s)?;
     }
     Ok(t)
 }
@@ -765,8 +772,14 @@ mod tests {
         assert_eq!(candidate_match_style(false).fg, Some(Color::Cyan));
         assert_eq!(candidate_prefix(), format!("{} ", GLYPH_CARET_SEL));
         use crate::picker::PickerMode;
-        assert_eq!(picker_mode_prefix(&PickerMode::Manage).content, format!("{} ", GLYPH_MODE_MANAGE));
-        assert_eq!(picker_mode_prefix(&PickerMode::New).content, format!("{} ", GLYPH_MODE_NEW));
+        assert_eq!(
+            picker_mode_prefix(&PickerMode::Manage).content,
+            format!("{} ", GLYPH_MODE_MANAGE)
+        );
+        assert_eq!(
+            picker_mode_prefix(&PickerMode::New).content,
+            format!("{} ", GLYPH_MODE_NEW)
+        );
         assert_eq!(
             picker_mode_prefix(&PickerMode::Edit { index: 0 }).content,
             format!("{} ", GLYPH_MODE_EDIT)

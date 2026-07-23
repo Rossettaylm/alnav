@@ -7,9 +7,9 @@ use regex::Regex;
 
 use crate::app::{App, Focus, Mode};
 use crate::filter_model::Group;
+use crate::highlight_model::{HighlightBox, HighlightGroup};
 use crate::input::{ChipField, InputBox};
 use crate::model::EntryRow;
-use crate::highlight_model::{HighlightBox, HighlightGroup};
 use crate::theme;
 
 /// Horizontal gap (columns) between chip groups on the same wrap row.
@@ -30,6 +30,33 @@ const PICKER_FRAME_MIN_HEIGHT: u16 = 10;
 const PICKER_LR_MIN_WIDTH: u16 = 10;
 /// Search prompt row height at the bottom of the left pane.
 const PICKER_SEARCH_HEIGHT: u16 = 3;
+/// Per-row action icon for candidate lists (F3). `None` = no icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionKind {
+    None,
+    Jump,
+    Toggle { enabled: bool },
+}
+
+impl ActionKind {
+    fn icon(self) -> &'static str {
+        match self {
+            ActionKind::None => "",
+            ActionKind::Jump => theme::GLYPH_ACTION_JUMP,
+            ActionKind::Toggle { enabled: true } => theme::GLYPH_ACTION_TOGGLE_ON,
+            ActionKind::Toggle { enabled: false } => theme::GLYPH_ACTION_TOGGLE_OFF,
+        }
+    }
+
+    fn icon_style(self) -> Style {
+        match self {
+            ActionKind::None => Style::default(),
+            ActionKind::Jump => Style::default().fg(theme::accent()),
+            ActionKind::Toggle { enabled: true } => Style::default().fg(theme::success()),
+            ActionKind::Toggle { enabled: false } => theme::disabled_chip_style(),
+        }
+    }
+}
 
 fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
     Block::new()
@@ -168,7 +195,10 @@ pub fn picker_left_stack(left: Rect) -> (Rect, Rect) {
 /// Returns the inner content rect (2 cols wider than the old rounded shell).
 pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
     frame.render_widget(Clear, area);
-    let block = divider_block(theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true), true);
+    let block = divider_block(
+        theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true),
+        true,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
@@ -212,7 +242,10 @@ fn candidate_label_spans(
     selected: bool,
     checked: bool,
     base: Style,
+    action: ActionKind,
+    area_width: u16,
 ) -> Vec<Span<'static>> {
+    use crate::bookmark::fit_label;
     let match_style = theme::candidate_match_style(selected);
     let prefix = if selected || checked {
         theme::candidate_prefix()
@@ -224,19 +257,40 @@ fn candidate_label_spans(
     } else {
         base
     };
+    // icon occupies 1 glyph + 1 trailing pad when present.
+    let icon_glyph = action.icon();
+    let icon_w: u16 = if icon_glyph.is_empty() { 0 } else { 2 };
+    let prefix_len = prefix.chars().count() as u16;
+    // label budget = area − prefix − icon+pad − 1 trailing pad
+    let label_max = (area_width as usize)
+        .saturating_sub(prefix_len as usize)
+        .saturating_sub(icon_w as usize)
+        .saturating_sub(1)
+        .max(1);
+    let truncated = fit_label(label, label_max);
     let mut spans = vec![Span::styled(prefix, prefix_style)];
-    if let Some((s, e)) = find_ignore_case_range(label, query) {
+    if let Some((s, e)) = find_ignore_case_range(&truncated, query) {
         if s > 0 {
-            spans.push(Span::styled(label[..s].to_string(), base));
+            spans.push(Span::styled(truncated[..s].to_string(), base));
         }
-        spans.push(Span::styled(label[s..e].to_string(), match_style));
-        if e < label.len() {
-            spans.push(Span::styled(label[e..].to_string(), base));
+        spans.push(Span::styled(truncated[s..e].to_string(), match_style));
+        if e < truncated.len() {
+            spans.push(Span::styled(truncated[e..].to_string(), base));
         }
     } else {
-        spans.push(Span::styled(label.to_string(), base));
+        spans.push(Span::styled(truncated, base));
     }
-    spans.push(Span::styled(" ", base));
+    // padding to push the icon flush right, then the icon span.
+    let used: usize = spans.iter().map(|sp| sp.content.chars().count()).sum();
+    let pad = (area_width as usize)
+        .saturating_sub(used)
+        .saturating_sub(icon_w as usize);
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    if !icon_glyph.is_empty() {
+        spans.push(Span::styled(icon_glyph.to_string(), action.icon_style()));
+    }
     spans
 }
 
@@ -248,13 +302,17 @@ pub fn render_candidate_list(
     labels: &[String],
     styles: &[Style],
     checked: &[bool],
+    actions: &[ActionKind],
     selected: usize,
     empty_msg: &str,
     query: &str,
     frame: &mut Frame,
     area: Rect,
 ) {
-    let block = divider_block(theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true), true);
+    let block = divider_block(
+        theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true),
+        true,
+    );
     if labels.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -288,7 +346,13 @@ pub fn render_candidate_list(
                 }
             }
             ListItem::new(Line::from(candidate_label_spans(
-                label, query, is_sel, is_checked, base,
+                label,
+                query,
+                is_sel,
+                is_checked,
+                base,
+                actions.get(i).copied().unwrap_or(ActionKind::None),
+                area.width,
             )))
             .style(base)
         })
@@ -569,7 +633,8 @@ pub enum MinimapMark {
     Track = 0,
     Viewport = 1,
     Highlight = 2,
-    Severe = 3,
+    Bookmark = 3,
+    Severe = 4,
 }
 
 /// Max visible indices scanned per frame for search/severe marks (H3).
@@ -623,6 +688,30 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
             cells[r] = MinimapMark::Severe;
         }
     }
+
+    // Bookmarks (F5): full scan (≤ BOOKMARK_SOFT_CAP), mark alive rows in
+    // visible. Priority Severe > Bookmark > Highlight; only upgrade cells
+    // below Bookmark. Builds a row_id → visible index map once per frame.
+    if !app.bookmarks.items.is_empty() {
+        let source = app.view_source();
+        let row_id_to_vis: std::collections::HashMap<u64, usize> = app
+            .visible
+            .iter()
+            .enumerate()
+            .map(|(i, &src_idx)| (source[src_idx].row_id, i))
+            .collect();
+        for bm in &app.bookmarks.items {
+            if !app.bookmark_alive(bm.row_id) {
+                continue;
+            }
+            if let Some(&i) = row_id_to_vis.get(&bm.row_id) {
+                let r = minimap_row_for_index(i, n, h);
+                if cells[r] < MinimapMark::Bookmark {
+                    cells[r] = MinimapMark::Bookmark;
+                }
+            }
+        }
+    }
     cells
 }
 
@@ -653,6 +742,10 @@ fn render_minimap(app: &App, frame: &mut Frame, rail: Rect) {
             MinimapMark::Highlight => {
                 cell.set_char('•');
                 cell.set_style(theme::minimap_highlight_style());
+            }
+            MinimapMark::Bookmark => {
+                cell.set_char('•');
+                cell.set_style(Style::default().fg(theme::bookmark_minimap_color()));
             }
             MinimapMark::Severe => {
                 cell.set_char('•');
@@ -751,7 +844,11 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 if let Some((lo, hi)) = selection {
                     if abs_i >= lo && abs_i <= hi {
                         item = item.style(theme::log_visual_style());
+                    } else if app.is_bookmark_row(row.row_id) {
+                        item = item.style(theme::bookmark_row_style());
                     }
+                } else if app.is_bookmark_row(row.row_id) {
+                    item = item.style(theme::bookmark_row_style());
                 } else if active && abs_i == app.cursor {
                     item = item.style(theme::log_selection_style());
                 }
@@ -806,9 +903,7 @@ pub fn render_bookmark_strip(app: &App, frame: &mut Frame, area: Rect) {
         .take(area.height as usize)
         .map(|bm| {
             let alive = app.bookmark_alive(bm.row_id);
-            let (mark, style) = if !bm.enabled {
-                ("☆", theme::bookmark_disabled_style())
-            } else if alive {
+            let (mark, style) = if alive {
                 ("★", theme::bookmark_label_style())
             } else {
                 ("☆", theme::bookmark_stale_style())
@@ -1078,13 +1173,13 @@ pub fn render_highlight_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
     let block = divider_block(theme::numbered_title(3, "Highlight", active), active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(highlight_strip_lines(app, inner.width)), inner);
+    frame.render_widget(
+        Paragraph::new(highlight_strip_lines(app, inner.width)),
+        inner,
+    );
 }
 
-fn committed_chip_spans(
-    chips: &[crate::input::Chip],
-    exclude_mode: bool,
-) -> Vec<Span<'static>> {
+fn committed_chip_spans(chips: &[crate::input::Chip], exclude_mode: bool) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (i, chip) in chips.iter().enumerate() {
         if i > 0 {
@@ -1431,6 +1526,7 @@ pub fn render_picker(
     labels: &[String],
     styles: &[Style],
     checked: &[bool],
+    actions: &[ActionKind],
     selected: usize,
     empty_msg: &str,
     preview_lines: &[crate::preview::PreviewLine],
@@ -1457,6 +1553,7 @@ pub fn render_picker(
             labels,
             styles,
             checked,
+            actions,
             selected,
             empty_msg,
             match_query,
@@ -1488,6 +1585,7 @@ fn confirm_dialog_question(confirm: &crate::picker::ConfirmKind) -> String {
                 format!("删除选中 {} 项？", items.len())
             }
         }
+        crate::picker::ConfirmKind::DeleteBookmark { .. } => "删除书签？".to_string(),
     }
 }
 
@@ -1503,8 +1601,11 @@ pub fn render_confirm_dialog(
     let area = centered_modal_rect(picker_area, width, height);
     let inner = render_modal_shell("确认删除", frame, area);
     let text = vec![
-        Line::from(Span::styled(question, Style::default().add_modifier(Modifier::BOLD)))
-            .alignment(Alignment::Center),
+        Line::from(Span::styled(
+            question,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center),
         Line::from(Span::styled(
             "y/Enter 确认  n/Esc 取消",
             theme::context_help_style(),
@@ -1558,6 +1659,7 @@ pub fn render_highlight_popup(
         &labels,
         &styles,
         &[],
+        &[],
         selected,
         "无匹配历史",
         &search.draft,
@@ -1585,6 +1687,7 @@ pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
         "字段",
         &labels,
         &styles,
+        &[],
         &[],
         selected,
         "无匹配字段",
@@ -1822,6 +1925,101 @@ mod tests {
             }
         }
         assert!(found, "keyword highlight bg must survive selection overlay");
+    }
+    #[test]
+    fn test_render_log_list_bookmark_row_bg_priority() {
+        // AC1: bookmarked rows get a faint-yellow bg; an active visual selection
+        // overrides it; the cursor-selection gray only applies when neither
+        // visual nor bookmark bg is present. Priority: visual > bookmark-bg > cursor.
+        // The whole buffer is scanned (bookmark strip shifts list content, so
+        // fixed row coords are unreliable).
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I TagA   : first").unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I TagB   : second")
+                .unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:02.000  1  1 I TagC   : third").unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+
+        // Bookmark rows 0 and 1; row 2 stays plain.
+        app.cursor = 0;
+        app.bookmark_add_current();
+        app.cursor = 1;
+        let bm_bg = theme::bookmark_row_style().bg;
+        let vis_bg = theme::log_visual_style().bg;
+        let sel_bg = theme::log_selection_style().bg;
+
+        let scan_bg_in_rows =
+            |terminal: &Terminal<TestBackend>, target: Option<Color>, y0: u16, y1: u16| -> bool {
+                let buf = terminal.backend().buffer();
+                for y in y0..y1 {
+                    for x in 0..buf.area.width {
+                        if buf[(x, y)].style().bg == target {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+
+        // Case 1: cursor on row 2 (focused, no visual selection). Rows 0 and 1
+        // are bookmarked but not the cursor row → they get the bookmark bg;
+        // the cursor row gets the selection gray.
+        app.cursor = 2;
+        app.focus = Focus::LogList;
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
+        assert!(
+            scan_bg_in_rows(&terminal, bm_bg, 0, terminal.backend().buffer().area.height),
+            "bookmarked non-cursor row must get the bookmark bg"
+        );
+        assert!(
+            scan_bg_in_rows(
+                &terminal,
+                sel_bg,
+                0,
+                terminal.backend().buffer().area.height
+            ),
+            "focused cursor row must get the selection bg"
+        );
+
+        // Case 2: enter visual-line on row 0, extend cursor to row 1. Both
+        // bookmarked rows are inside the visual range → visual overrides bookmark.
+        // The bookmark strip occupies the top rows (1 border + 2 strip rows),
+        // so list content starts at y=3; rows 0,1 land at y=3,4 and must carry
+        // the visual bg, NOT the bookmark bg.
+        app.enter_visual_line(); // anchor at row 0
+        app.cursor = 1; // range [0,1]
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
+        assert!(
+            scan_bg_in_rows(
+                &terminal,
+                vis_bg,
+                3,
+                terminal.backend().buffer().area.height
+            ),
+            "visual selection must override bookmark bg on list rows"
+        );
+        assert!(
+            !scan_bg_in_rows(&terminal, bm_bg, 3, terminal.backend().buffer().area.height),
+            "bookmark bg must yield to visual selection on list rows"
+        );
     }
 
     #[test]
@@ -2163,7 +2361,10 @@ mod tests {
         );
         // divider_block draws top + bottom horizontal rules (─), no rounded corners.
         let rules = before.chars().filter(|c| *c == '─').count();
-        assert!(rules >= 2, "strip should have top+bottom ─ rules, got {rules}");
+        assert!(
+            rules >= 2,
+            "strip should have top+bottom ─ rules, got {rules}"
+        );
     }
 
     #[test]
@@ -2322,6 +2523,34 @@ mod tests {
     }
 
     #[test]
+    fn test_build_minimap_marks_bookmark_over_highlight() {
+        // F5: a bookmarked alive row produces a Bookmark mark; on overlap with
+        // a Highlight mark, Bookmark wins (Severe > Bookmark > Highlight).
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : findme").unwrap())
+            .unwrap();
+        tx.send(EntryRow::from_line("04-02 10:00:01.000  1  1 I Tag     : other").unwrap())
+            .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.highlight_groups
+            .groups
+            .push(HighlightGroup::from_pattern("findme").unwrap());
+        app.cursor = 0;
+        app.bookmark_add_current();
+        app.list_offset = 0;
+
+        let marks = build_minimap_marks(&app, 4);
+        assert!(
+            marks.iter().any(|m| *m == MinimapMark::Bookmark),
+            "bookmark row yields a Bookmark mark: {marks:?}"
+        );
+        // Index 0 is both highlighted and bookmarked; Bookmark must win there.
+        assert_eq!(marks[minimap_row_for_index(0, 2, 4)], MinimapMark::Bookmark);
+    }
+
+    #[test]
     fn test_build_minimap_empty_when_no_visible() {
         let app = App::new(100);
         assert!(build_minimap_marks(&app, 10).is_empty());
@@ -2407,6 +2636,7 @@ mod tests {
                     &[],
                     &[],
                     &[],
+                    &[],
                     0,
                     "无项目",
                     &[],
@@ -2438,6 +2668,7 @@ mod tests {
                     &[],
                     false,
                     Some(ChipField::Tag),
+                    &[],
                     &[],
                     &[],
                     &[],
@@ -2483,6 +2714,7 @@ mod tests {
                     None,
                     &["error".into()],
                     &[theme::muted()],
+                    &[],
                     &[],
                     0,
                     "无项目",

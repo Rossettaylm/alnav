@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{mpsc::Receiver, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -7,8 +7,8 @@ use aloggrep::parser::Level;
 
 use crate::bookmark::{bookmark_label, AddError, Bookmark, BookmarkList, JumpResult};
 use crate::filter_model::{ExcludeEntry, Group, GroupList};
-use crate::model::EntryRow;
 use crate::highlight_model::{HighlightBox, HighlightGroup, HighlightGroupList};
+use crate::model::EntryRow;
 use crate::vocab::Vocab;
 
 /// Hard cap on the matched-rows buffer (OOM safety). When a filter is active,
@@ -176,6 +176,8 @@ pub struct App {
     pub picker: Option<crate::picker::PickerSession>,
     /// Session bookmarks (M2).
     pub bookmarks: BookmarkList,
+    /// O(1) cache of bookmarked `row_id`s for LogList bg lookup (F1).
+    pub bookmark_row_ids: HashSet<u64>,
     /// Next ingest `row_id` (M2).
     pub next_row_id: u64,
     /// Session lock: at most one of pid/tid is set (H8; AND after chip filter).
@@ -242,6 +244,7 @@ impl App {
             pending_leader: false,
             picker: None,
             bookmarks: BookmarkList::default(),
+            bookmark_row_ids: HashSet::new(),
             next_row_id: 1,
             lock_pid: None,
             lock_tid: None,
@@ -770,13 +773,16 @@ impl App {
             self.set_flash("无选中行");
             return;
         };
+        let row_id = row.row_id;
         let bm = Bookmark {
-            row_id: row.row_id,
+            row_id,
             label: bookmark_label(&row.tag, &row.msg),
-            enabled: true,
         };
         match self.bookmarks.try_add(bm) {
-            Ok(()) => self.set_flash("已收藏"),
+            Ok(()) => {
+                self.bookmark_row_ids.insert(row_id);
+                self.set_flash("已收藏");
+            }
             Err(AddError::Duplicate) => self.set_flash("已存在"),
             Err(AddError::Full) => self.set_flash("书签已满"),
         }
@@ -790,7 +796,9 @@ impl App {
             self.set_flash("无选中行");
             return;
         };
-        if self.bookmarks.remove_id(row.row_id) {
+        let row_id = row.row_id;
+        if self.bookmarks.remove_id(row_id) {
+            self.bookmark_row_ids.remove(&row_id);
             self.set_flash("已删除");
         } else {
             self.set_flash("未收藏");
@@ -798,18 +806,9 @@ impl App {
     }
 
     /// Jump to a bookmarked row_id; sets `following=false` on success.
-    /// Disabled bookmarks (`enabled == false`) are treated as filtered-out.
+    /// A bookmark is jumpable iff its row is still alive (`row_alive`).
     /// A row retained in `matched` (evicted from `rows`) is still jumpable.
     pub fn jump_to_bookmark(&mut self, row_id: u64) -> JumpResult {
-        if self
-            .bookmarks
-            .items
-            .iter()
-            .find(|b| b.row_id == row_id)
-            .is_some_and(|b| !b.enabled)
-        {
-            return JumpResult::Filtered;
-        }
         // `view_source()` is the active buffer `visible` indexes; by
         // construction every entry there is in `visible` (front-eviction
         // shifts both in tandem), so a hit here is always jumpable.
@@ -1039,10 +1038,8 @@ impl App {
             let crate::picker::PickerKind::MsgChip { exclude } = picker.kind else {
                 return None;
             };
-            let visible = crate::picker::PickerSession::filtered_indices(
-                &picker.choices,
-                &picker.draft,
-            );
+            let visible =
+                crate::picker::PickerSession::filtered_indices(&picker.choices, &picker.draft);
             let value = visible
                 .get(picker.selected)
                 .and_then(|&index| picker.choices.get(index))
@@ -1386,15 +1383,34 @@ impl App {
     }
 
     pub fn clear_bookmarks(&mut self) {
+        self.bookmark_row_ids.clear();
         self.bookmarks.clear();
     }
 
-    pub fn delete_bookmark_at(&mut self, index: usize) -> bool {
-        self.bookmarks.delete_at(index)
+    /// Delete a bookmark by index into `bookmarks.items`; keeps
+    /// `bookmark_row_ids` in sync (F1). Returns false if index out of range.
+    pub fn delete_bookmark_at_index(&mut self, index: usize) -> bool {
+        let row_id = self.bookmarks.items.get(index).map(|b| b.row_id);
+        if !self.bookmarks.delete_at(index) {
+            return false;
+        }
+        if let Some(rid) = row_id {
+            self.bookmark_row_ids.remove(&rid);
+        }
+        true
+    }
+
+    /// O(1) bookmark-row check for LogList bg (F1).
+    pub fn is_bookmark_row(&self, row_id: u64) -> bool {
+        self.bookmark_row_ids.contains(&row_id)
     }
 
     /// Toggle `enabled` on a unified Manage item. Returns whether state changed.
-    pub fn toggle_unified_enabled(&mut self, kind: crate::picker::UnifiedKind, index: usize) -> bool {
+    pub fn toggle_unified_enabled(
+        &mut self,
+        kind: crate::picker::UnifiedKind,
+        index: usize,
+    ) -> bool {
         use crate::picker::UnifiedKind;
         match kind {
             UnifiedKind::Filter => {
@@ -1420,13 +1436,6 @@ impl App {
                 self.rebuild_visible();
                 true
             }
-            UnifiedKind::Bookmark => {
-                let Some(b) = self.bookmarks.items.get_mut(index) else {
-                    return false;
-                };
-                b.enabled = !b.enabled;
-                true
-            }
         }
     }
 
@@ -1437,14 +1446,16 @@ impl App {
             UnifiedKind::Filter => self.delete_filter_group_at(index),
             UnifiedKind::Highlight => self.delete_highlight_group_at(index),
             UnifiedKind::Exclude => self.delete_exclude_group_at(index),
-            UnifiedKind::Bookmark => self.delete_bookmark_at(index),
         }
     }
 
     /// Push a search group, or return the index of an existing equivalent.
     /// Always marks the returned index as the globally active search.
     /// Caller always jumps to that group's first match.
-    pub fn push_or_find_highlight_group(&mut self, group: crate::highlight_model::HighlightGroup) -> usize {
+    pub fn push_or_find_highlight_group(
+        &mut self,
+        group: crate::highlight_model::HighlightGroup,
+    ) -> usize {
         let idx = if let Some(idx) = self.highlight_groups.find_equivalent(&group.pattern) {
             idx
         } else {
@@ -2290,7 +2301,6 @@ mod flash_tests {
             .try_add(Bookmark {
                 row_id: 1,
                 label: "test".into(),
-                enabled: true,
             })
             .unwrap();
         app.clear_bookmarks();
@@ -2304,30 +2314,11 @@ mod flash_tests {
             .try_add(Bookmark {
                 row_id: 42,
                 label: "old".into(),
-                enabled: true,
             })
             .unwrap();
         assert!(app.update_bookmark_label(42, "new".into()));
         assert_eq!(app.bookmarks.items[0].label, "new");
         assert!(!app.update_bookmark_label(99, "x".into()));
-    }
-
-    #[test]
-    fn toggle_unified_enabled_bookmark() {
-        use crate::picker::UnifiedKind;
-
-        let mut app = App::new(100);
-        app.bookmarks
-            .try_add(Bookmark {
-                row_id: 1,
-                label: "b".into(),
-                enabled: true,
-            })
-            .unwrap();
-        assert!(app.toggle_unified_enabled(UnifiedKind::Bookmark, 0));
-        assert!(!app.bookmarks.items[0].enabled);
-        assert!(app.toggle_unified_enabled(UnifiedKind::Bookmark, 0));
-        assert!(app.bookmarks.items[0].enabled);
     }
 
     #[test]
@@ -2469,7 +2460,10 @@ mod vocab_tests {
         );
         app.push_row(row.unwrap());
         let cands = app.vocab.tag_candidates("Vocab");
-        assert!(!cands.is_empty(), "VocabTag should appear in tag candidates");
+        assert!(
+            !cands.is_empty(),
+            "VocabTag should appear in tag candidates"
+        );
         assert_eq!(cands[0], "VocabTag");
     }
 }

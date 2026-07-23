@@ -10,8 +10,6 @@ pub struct Bookmark {
     pub row_id: u64,
     /// Full strip/picker label (tag + first msg line); display truncates by width.
     pub label: String,
-    /// When false: still shown in the top strip (dim + hollow star) but not jumpable.
-    pub enabled: bool,
 }
 
 #[derive(Debug, Default)]
@@ -133,7 +131,6 @@ mod tests {
         Bookmark {
             row_id,
             label: label.into(),
-            enabled: true,
         }
     }
 

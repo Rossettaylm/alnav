@@ -7,7 +7,6 @@ pub enum UnifiedKind {
     Filter,
     Highlight,
     Exclude,
-    Bookmark,
 }
 
 impl UnifiedKind {
@@ -16,7 +15,6 @@ impl UnifiedKind {
             Self::Filter => "Filter",
             Self::Highlight => "Highlight",
             Self::Exclude => "Exclude",
-            Self::Bookmark => "Bookmark",
         }
     }
 
@@ -25,7 +23,6 @@ impl UnifiedKind {
             Self::Filter => PickerKind::Filter,
             Self::Highlight => PickerKind::Highlight,
             Self::Exclude => PickerKind::Exclude,
-            Self::Bookmark => PickerKind::Bookmark,
         }
     }
 }
@@ -53,7 +50,9 @@ pub enum PickerKind {
     Highlight,
     Bookmark,
     Exclude,
-    MsgChip { exclude: bool },
+    MsgChip {
+        exclude: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +66,8 @@ pub enum PickerMode {
 pub enum ConfirmKind {
     /// Delete one or more unified items (single or Tab multi-select).
     DeleteMany { items: Vec<UnifiedId> },
+    /// Delete a single bookmark by index into `bookmarks.items` (F2/F4).
+    DeleteBookmark { index: usize },
 }
 
 pub struct PickerSession {
@@ -234,6 +235,6 @@ mod tests {
     #[test]
     fn unified_kind_tags() {
         assert_eq!(UnifiedKind::Filter.tag(), "Filter");
-        assert_eq!(UnifiedKind::Bookmark.as_picker_kind(), PickerKind::Bookmark);
+        assert_eq!(UnifiedKind::Exclude.as_picker_kind(), PickerKind::Exclude);
     }
 }
