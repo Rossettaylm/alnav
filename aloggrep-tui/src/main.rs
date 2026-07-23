@@ -597,6 +597,7 @@ fn run<B: ratatui::backend::Backend>(
         }
 
         // Ctrl-d/Ctrl-u page the log list when it has focus in Normal mode.
+        // Ctrl-L clears buffered logs in --hdc (see `try_handle_ctrl_l`).
         // Intercepted here (like Ctrl+C above) rather than threading the full
         // KeyEvent into `handle_normal_key`, which deliberately only takes a
         // bare `KeyCode`.
@@ -611,6 +612,10 @@ fn run<B: ratatui::backend::Backend>(
                 }
                 KeyCode::Char('u') => {
                     app.move_cursor_manual(-PAGE_SIZE);
+                    continue;
+                }
+                KeyCode::Char('l') => {
+                    try_handle_ctrl_l(app);
                     continue;
                 }
                 _ => {}
@@ -1611,6 +1616,18 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
             focus_loglist(app);
         }
     }
+}
+
+/// `--hdc` Ctrl-L: clear buffered logs when no detail overlay is open.
+/// File mode and detail-open are silent no-ops. Caller must already gate on
+/// Normal + LogList (and Picker / HighlightBox are handled earlier in the loop).
+fn try_handle_ctrl_l(app: &mut App) {
+    use crate::export::ExportSource;
+
+    if !matches!(app.export_source, ExportSource::Hdc { .. }) || app.detail_open() {
+        return;
+    }
+    app.clear_buffered_logs();
 }
 
 /// Return keyboard focus to the log list without changing cursor / offset /
@@ -2899,6 +2916,71 @@ mod dispatch_tests {
         handle_ctrl_c(&mut app, &mut input);
         assert!(app.should_quit);
         assert_eq!(app.mode, app::Mode::Normal);
+    }
+
+    #[test]
+    fn ctrl_l_clears_buffers_in_hdc_loglist() {
+        use crate::export::ExportSource;
+        use std::sync::mpsc;
+
+        let mut app = App::new(100);
+        app.export_source = ExportSource::Hdc { device: None };
+        app.focus = app::Focus::LogList;
+        app.mode = app::Mode::Normal;
+        let (tx, rx) = mpsc::channel();
+        tx.send(
+            model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.rows.len(), 1);
+
+        try_handle_ctrl_l(&mut app);
+        assert!(app.rows.is_empty());
+        assert!(app.following);
+        assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
+    }
+
+    #[test]
+    fn ctrl_l_noop_in_file_mode() {
+        use crate::export::ExportSource;
+        use std::sync::mpsc;
+
+        let mut app = App::new(100);
+        app.export_source = ExportSource::File("app.log".into());
+        let (tx, rx) = mpsc::channel();
+        tx.send(
+            model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        try_handle_ctrl_l(&mut app);
+        assert_eq!(app.rows.len(), 1);
+        assert_ne!(app.status_msg.as_deref(), Some("CLEARED"));
+    }
+
+    #[test]
+    fn ctrl_l_noop_when_detail_open() {
+        use crate::export::ExportSource;
+        use std::sync::mpsc;
+
+        let mut app = App::new(100);
+        app.export_source = ExportSource::Hdc { device: None };
+        let (tx, rx) = mpsc::channel();
+        tx.send(
+            model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.toggle_detail_fields();
+        assert!(app.detail_open());
+
+        try_handle_ctrl_l(&mut app);
+        assert_eq!(app.rows.len(), 1);
+        assert_ne!(app.status_msg.as_deref(), Some("CLEARED"));
     }
 
     #[test]

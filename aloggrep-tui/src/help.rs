@@ -10,6 +10,9 @@ pub const MIN_HELP_WIDTH: usize = 8;
 
 const L1_LOGLIST: &str =
     "j/k:移 Esc:随 Space:管 ;滤 /亮 `排 mm签 n/N:跳 e/E:错 m:书签 f:锁 c:滤 C:排 y:拷 p/P:详";
+/// LogList L1 when session is `--hdc` (adds Ctrl-L clear).
+const L1_LOGLIST_HDC: &str =
+    "j/k:移 Esc:随 Space:管 ;滤 /亮 `排 mm签 n/N:跳 e/E:错 m:书签 f:锁 c:滤 C:排 y:拷 p/P:详 ^L:清屏";
 const L1_CHIP_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
 const L1_EXCLUDE_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
 const L1_HIGHLIGHT_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
@@ -70,7 +73,16 @@ pub fn context_help(app: &App) -> &'static str {
         Focus::ChipStrip => L1_CHIP_STRIP,
         Focus::ExcludeStrip => L1_EXCLUDE_STRIP,
         Focus::HighlightStrip => L1_HIGHLIGHT_STRIP,
-        Focus::LogList => L1_LOGLIST,
+        Focus::LogList => {
+            if matches!(
+                app.export_source,
+                crate::export::ExportSource::Hdc { .. }
+            ) {
+                L1_LOGLIST_HDC
+            } else {
+                L1_LOGLIST
+            }
+        }
     }
 }
 
@@ -121,6 +133,18 @@ mod tests {
             L1_HIGHLIGHT_STRIP
         );
         assert_eq!(context_help(&app_with_focus(Focus::Input)), L1_INPUT);
+    }
+
+    #[test]
+    fn context_help_loglist_hdc_appends_clear_hint() {
+        let mut app = app_with_focus(Focus::LogList);
+        assert_eq!(context_help(&app), L1_LOGLIST);
+        app.export_source = crate::export::ExportSource::Hdc { device: None };
+        assert_eq!(context_help(&app), L1_LOGLIST_HDC);
+        assert!(
+            L1_LOGLIST_HDC.contains("^L:清屏"),
+            "hdc LogList hint must expose Ctrl-L clear"
+        );
     }
 
     #[test]

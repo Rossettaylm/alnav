@@ -538,6 +538,29 @@ impl App {
         self.jump_bottom();
     }
 
+    /// Clear buffered log rows for `--hdc` Ctrl-L: drops `rows` / `matched` /
+    /// `visible` and bookmarks, keeps filter/highlight/exclude/lock, resumes
+    /// following, and flashes `CLEARED`.
+    pub fn clear_buffered_logs(&mut self) {
+        self.rows.clear();
+        self.matched.clear();
+        self.visible.clear();
+        self.clear_bookmarks();
+        self.clear_visual();
+        self.pending_d = false;
+        self.pending_yank = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.pending_m = false;
+        self.pending_leader = false;
+        self.cursor = 0;
+        self.list_offset = 0;
+        self.match_stats_stale = true;
+        self.resume_following();
+        self.set_flash("CLEARED");
+    }
+
     pub fn visible_rows(&self) -> impl Iterator<Item = &EntryRow> {
         let source = self.view_source();
         self.visible.iter().map(move |&i| &source[i])
@@ -1627,6 +1650,66 @@ mod tests {
         assert!(!app.following, "negative delta should pause following");
         app.move_cursor_manual(10); // simulates Ctrl-d paging past the bottom
         assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn clear_buffered_logs_drops_buffers_keeps_filters_and_resumes() {
+        use crate::bookmark::Bookmark;
+        use crate::highlight_model::HighlightGroup;
+
+        let mut app = App::new(100);
+        app.groups = GroupList {
+            groups: vec![filter_group(
+                "keep-A",
+                Some(Expr::parse("tag~A", false).unwrap()),
+            )],
+            excludes: Vec::new(),
+        };
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("err").unwrap());
+        app.lock_pid = Some("1".into());
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert!(!app.rows.is_empty());
+        assert!(!app.matched.is_empty());
+        assert!(!app.visible.is_empty());
+
+        let row_id = app.matched[0].row_id;
+        app.bookmarks
+            .try_add(Bookmark {
+                row_id,
+                label: "bm".into(),
+            })
+            .unwrap();
+        app.bookmark_row_ids.insert(row_id);
+
+        app.following = false;
+        app.cursor = 0;
+        app.list_offset = 0;
+        app.pending_yank = true;
+        app.pending_chip = true;
+        app.visual_anchor = Some(0);
+
+        app.clear_buffered_logs();
+
+        assert!(app.rows.is_empty());
+        assert!(app.matched.is_empty());
+        assert!(app.visible.is_empty());
+        assert!(app.bookmarks.is_empty());
+        assert!(app.bookmark_row_ids.is_empty());
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.highlight_groups.groups.len(), 1);
+        assert_eq!(app.lock_pid.as_deref(), Some("1"));
+        assert!(app.following);
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.list_offset, 0);
+        assert!(!app.pending_yank);
+        assert!(!app.pending_chip);
+        assert!(app.visual_anchor.is_none());
+        assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
     }
 
     #[test]
