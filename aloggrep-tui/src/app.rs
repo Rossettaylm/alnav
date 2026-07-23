@@ -1062,12 +1062,12 @@ impl App {
                 return None;
             };
             let visible =
-                crate::picker::PickerSession::filtered_indices(&picker.choices, &picker.draft);
+                crate::picker::PickerSession::filtered_indices(&picker.choices, picker.draft.as_str());
             let value = visible
                 .get(picker.selected)
                 .and_then(|&index| picker.choices.get(index))
                 .cloned()
-                .or_else(|| (!picker.draft.is_empty()).then(|| picker.draft.clone()))?;
+                .or_else(|| (!picker.draft.is_empty()).then(|| picker.draft.to_string()))?;
             Some((exclude, value))
         }) else {
             self.set_flash("无可选片段");

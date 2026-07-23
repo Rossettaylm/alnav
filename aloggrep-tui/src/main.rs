@@ -10,6 +10,7 @@ mod input;
 mod model;
 mod picker;
 mod preview;
+mod text_field;
 mod theme;
 mod ui;
 mod vocab;
@@ -461,6 +462,7 @@ fn run<B: ratatui::backend::Backend>(
                             &data.title,
                             &data.mode,
                             &data.text,
+                            data.caret,
                             &data.match_query,
                             &data.chips,
                             data.exclude_chips,
@@ -634,6 +636,8 @@ struct PickerRenderData {
     title: String,
     mode: crate::picker::PickerMode,
     text: String,
+    /// Char-index caret into `text` for the search prompt.
+    caret: usize,
     /// Query used to color substring matches in the candidate list.
     match_query: String,
     chips: Vec<input::Chip>,
@@ -671,17 +675,28 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
     let title = format!("{base_title} · {mode_name}");
     let mode = session.mode.clone();
     let text = match session.mode {
-        PickerMode::Manage => session.query.clone(),
+        PickerMode::Manage => session.query.to_string(),
         PickerMode::New | PickerMode::Edit { .. } => match session.kind {
             PickerKind::Filter | PickerKind::Exclude => session
                 .input
                 .as_ref()
-                .map(|input| input.draft.clone())
+                .map(|input| input.draft.to_string())
                 .unwrap_or_default(),
-            _ => session.draft.clone(),
+            _ => session.draft.to_string(),
         },
     };
     let match_query = text.clone();
+    let caret = match session.mode {
+        PickerMode::Manage => session.query.cursor(),
+        PickerMode::New | PickerMode::Edit { .. } => match session.kind {
+            PickerKind::Filter | PickerKind::Exclude => session
+                .input
+                .as_ref()
+                .map(|input| input.draft.cursor())
+                .unwrap_or(0),
+            _ => session.draft.cursor(),
+        },
+    };
     let mut show_preview =
         app.config.picker_preview_enabled && !matches!(session.kind, PickerKind::Unified);
     let mut selected = session.selected;
@@ -716,7 +731,7 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                 // Unified panel: Filter/Highlight/Exclude only (bookmark arm removed).
                 let all = unified_picker_items(app);
                 let all_labels: Vec<String> = all.iter().map(|item| item.label.clone()).collect();
-                let visible = PickerSession::filtered_indices(&all_labels, &session.query);
+                let visible = PickerSession::filtered_indices(&all_labels, session.query.as_str());
                 labels = visible
                     .iter()
                     .map(|&index| all[index].label.clone())
@@ -779,7 +794,7 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
         PickerMode::New | PickerMode::Edit { .. } => match session.kind {
             PickerKind::Highlight => {
                 if !session.draft.is_empty() {
-                    labels = app.vocab.all_candidates(&session.draft);
+                    labels = app.vocab.all_candidates(session.draft.as_str());
                     styles = vec![theme::muted(); labels.len()];
                 } else {
                     let highlight_box = crate::highlight_model::HighlightBox {
@@ -794,7 +809,7 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                         .collect();
                     styles = vec![theme::muted(); labels.len()];
                 }
-                preview_lines = preview::preview_highlight_pattern_lines(app, &session.draft)
+                preview_lines = preview::preview_highlight_pattern_lines(app, session.draft.as_str())
                     .unwrap_or_default();
                 empty_msg = "输入高亮词".to_string();
             }
@@ -817,7 +832,7 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                         }
                         Some(field) => {
                             use crate::input::ChipField;
-                            let q = &input.draft;
+                            let q = input.draft.as_str();
                             labels = match field {
                                 ChipField::Tag => app.vocab.tag_candidates(q),
                                 ChipField::Pkg => app.vocab.pkg_candidates(q),
@@ -849,7 +864,8 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
             }
             PickerKind::Bookmark => {}
             PickerKind::MsgChip { .. } => {
-                let visible = PickerSession::filtered_indices(&session.choices, &session.draft);
+                let visible =
+                    PickerSession::filtered_indices(&session.choices, session.draft.as_str());
                 labels = visible
                     .iter()
                     .map(|&index| session.choices[index].clone())
@@ -869,6 +885,7 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
         title,
         mode,
         text,
+        caret,
         match_query,
         chips,
         exclude_chips,
@@ -935,7 +952,7 @@ fn unified_visible_ids(app: &App) -> Vec<crate::picker::UnifiedId> {
     }
     let all = unified_picker_items(app);
     let labels: Vec<String> = all.iter().map(|item| item.label.clone()).collect();
-    let visible = PickerSession::filtered_indices(&labels, &session.query);
+    let visible = PickerSession::filtered_indices(&labels, session.query.as_str());
     visible.iter().map(|&i| all[i].id).collect()
 }
 
@@ -965,7 +982,7 @@ fn bookmark_visible_indices(app: &App) -> Vec<usize> {
         .rev()
         .map(|b| b.label.clone())
         .collect();
-    let vis = PickerSession::filtered_indices(&labels, &session.query);
+    let vis = PickerSession::filtered_indices(&labels, session.query.as_str());
     vis.iter().map(|&i| len - 1 - i).collect()
 }
 
@@ -1187,6 +1204,111 @@ fn submit_filter_picker(app: &mut App) {
     app.close_picker();
 }
 
+/// Shared readline-subset keys for a [`text_field::TextField`].
+/// Does not handle Ctrl-Backspace or Delete (mode-specific).
+fn apply_text_field_key(
+    field: &mut crate::text_field::TextField,
+    code: KeyCode,
+    ctrl: bool,
+) -> bool {
+    match code {
+        KeyCode::Left => {
+            field.move_left();
+            true
+        }
+        KeyCode::Right => {
+            field.move_right();
+            true
+        }
+        KeyCode::Home => {
+            field.home();
+            true
+        }
+        KeyCode::End => {
+            field.end();
+            true
+        }
+        KeyCode::Char('a') if ctrl => {
+            field.home();
+            true
+        }
+        KeyCode::Char('e') if ctrl => {
+            field.end();
+            true
+        }
+        KeyCode::Char('u') if ctrl => {
+            field.kill_to_start();
+            true
+        }
+        KeyCode::Backspace if !ctrl => {
+            let _ = field.backspace();
+            true
+        }
+        KeyCode::Char(c) if !ctrl => {
+            field.insert(c);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn manage_request_delete_selected(app: &mut App) {
+    let session = app.picker.as_ref().unwrap();
+    let items: Vec<crate::picker::UnifiedId> = if session.checked.is_empty() {
+        unified_selected_id(app).into_iter().collect()
+    } else {
+        session.checked.iter().copied().collect()
+    };
+    if !items.is_empty() {
+        app.picker.as_mut().unwrap().request_delete_many(items);
+    }
+}
+
+fn manage_enter_edit_selected(app: &mut App) {
+    if app.picker.as_ref().is_some_and(|s| s.checked.len() > 1) {
+        app.set_flash("不支持批量编辑");
+        return;
+    }
+    let Some(id) = (|| {
+        let session = app.picker.as_ref()?;
+        if session.checked.len() == 1 {
+            session.checked.iter().next().copied()
+        } else {
+            unified_selected_id(app)
+        }
+    })() else {
+        return;
+    };
+    use crate::picker::UnifiedKind;
+    match id.kind {
+        UnifiedKind::Highlight => {
+            let pattern = app.highlight_groups.groups[id.source_index].pattern.clone();
+            let session = app.picker.as_mut().unwrap();
+            session.kind = id.kind.as_picker_kind();
+            session.enter_edit(id.source_index, pattern);
+        }
+        UnifiedKind::Filter => {
+            let input = crate::input::InputBox {
+                chips: app.groups.groups[id.source_index].chips.clone(),
+                ..crate::input::InputBox::default()
+            };
+            let session = app.picker.as_mut().unwrap();
+            session.kind = id.kind.as_picker_kind();
+            session.enter_edit_input(id.source_index, input);
+        }
+        UnifiedKind::Exclude => {
+            let input = crate::input::InputBox {
+                chips: vec![app.groups.excludes[id.source_index].chip.clone()],
+                exclude_mode: true,
+                ..crate::input::InputBox::default()
+            };
+            let session = app.picker.as_mut().unwrap();
+            session.kind = id.kind.as_picker_kind();
+            session.enter_edit_input(id.source_index, input);
+        }
+    }
+}
+
 fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
     use crate::picker::{PickerKind, PickerMode, PickerSession};
 
@@ -1226,9 +1348,11 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
     if matches!(mode, PickerMode::Manage) {
         match kind {
             PickerKind::Bookmark => {
-                // Bookmark panel (F2): Tab no-op, Ctrl-E no-op, Ctrl-D delete,
+                // Bookmark panel (F2): Tab no-op, Ctrl-X flash, Delete/Ctrl-Backspace delete,
                 // Enter jump-to-row + close + focus LogList.
                 let vis = bookmark_visible_indices(app);
+                let is_delete = matches!(key.code, KeyCode::Delete)
+                    || (matches!(key.code, KeyCode::Backspace) && ctrl);
                 match key.code {
                     KeyCode::Up => {
                         app.picker.as_mut().unwrap().selected =
@@ -1238,16 +1362,11 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         let session = app.picker.as_mut().unwrap();
                         session.selected = (session.selected + 1).min(vis.len().saturating_sub(1));
                     }
-                    KeyCode::Backspace => {
-                        let session = app.picker.as_mut().unwrap();
-                        session.query.pop();
-                        session.selected = 0;
-                    }
                     KeyCode::Tab => { /* no-op: bookmark panel has no multi-select */ }
-                    KeyCode::Char('e') if ctrl => {
+                    KeyCode::Char('x') if ctrl => {
                         app.set_flash("书签不支持编辑");
                     }
-                    KeyCode::Char('d') if ctrl => {
+                    _ if is_delete => {
                         if let Some(&idx) = vis.get(app.picker.as_ref().unwrap().selected) {
                             app.picker.as_mut().unwrap().confirm =
                                 Some(crate::picker::ConfirmKind::DeleteBookmark { index: idx });
@@ -1269,18 +1388,20 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                             }
                         }
                     }
-                    KeyCode::Char(c) if !ctrl => {
+                    code => {
                         let session = app.picker.as_mut().unwrap();
-                        session.query.push(c);
-                        session.selected = 0;
+                        if apply_text_field_key(&mut session.query, code, ctrl) {
+                            session.selected = 0;
+                        }
                     }
-                    _ => {}
                 }
                 return;
             }
             _ => {
-                // Unified panel (Filter/Highlight/Exclude; bookmark arm removed).
+                // Unified panel (Filter/Highlight/Exclude).
                 let ids = unified_visible_ids(app);
+                let is_delete = matches!(key.code, KeyCode::Delete)
+                    || (matches!(key.code, KeyCode::Backspace) && ctrl);
                 match key.code {
                     KeyCode::Up => {
                         app.picker.as_mut().unwrap().selected =
@@ -1289,11 +1410,6 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                     KeyCode::Down => {
                         let session = app.picker.as_mut().unwrap();
                         session.selected = (session.selected + 1).min(ids.len().saturating_sub(1));
-                    }
-                    KeyCode::Backspace => {
-                        let session = app.picker.as_mut().unwrap();
-                        session.query.pop();
-                        session.selected = 0;
                     }
                     KeyCode::Tab => {
                         let Some(id) = unified_selected_id(app) else {
@@ -1308,62 +1424,8 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         let count = ids.len();
                         session.selected = (session.selected + 1).min(count.saturating_sub(1));
                     }
-                    KeyCode::Char('e') if ctrl => {
-                        if app.picker.as_ref().is_some_and(|s| s.checked.len() > 1) {
-                            app.set_flash("不支持批量编辑");
-                            return;
-                        }
-                        let Some(id) = (|| {
-                            let session = app.picker.as_ref()?;
-                            if session.checked.len() == 1 {
-                                session.checked.iter().next().copied()
-                            } else {
-                                unified_selected_id(app)
-                            }
-                        })() else {
-                            return;
-                        };
-                        use crate::picker::UnifiedKind;
-                        match id.kind {
-                            UnifiedKind::Highlight => {
-                                let pattern =
-                                    app.highlight_groups.groups[id.source_index].pattern.clone();
-                                let session = app.picker.as_mut().unwrap();
-                                session.kind = id.kind.as_picker_kind();
-                                session.enter_edit(id.source_index, pattern);
-                            }
-                            UnifiedKind::Filter => {
-                                let input = crate::input::InputBox {
-                                    chips: app.groups.groups[id.source_index].chips.clone(),
-                                    ..crate::input::InputBox::default()
-                                };
-                                let session = app.picker.as_mut().unwrap();
-                                session.kind = id.kind.as_picker_kind();
-                                session.enter_edit_input(id.source_index, input);
-                            }
-                            UnifiedKind::Exclude => {
-                                let input = crate::input::InputBox {
-                                    chips: vec![app.groups.excludes[id.source_index].chip.clone()],
-                                    exclude_mode: true,
-                                    ..crate::input::InputBox::default()
-                                };
-                                let session = app.picker.as_mut().unwrap();
-                                session.kind = id.kind.as_picker_kind();
-                                session.enter_edit_input(id.source_index, input);
-                            }
-                        }
-                    }
-                    KeyCode::Char('d') if ctrl => {
-                        let session = app.picker.as_ref().unwrap();
-                        let items: Vec<crate::picker::UnifiedId> = if session.checked.is_empty() {
-                            unified_selected_id(app).into_iter().collect()
-                        } else {
-                            session.checked.iter().copied().collect()
-                        };
-                        if !items.is_empty() {
-                            app.picker.as_mut().unwrap().request_delete_many(items);
-                        }
-                    }
+                    KeyCode::Char('x') if ctrl => manage_enter_edit_selected(app),
+                    _ if is_delete => manage_request_delete_selected(app),
                     KeyCode::Enter => {
                         let session = app.picker.as_ref().unwrap();
                         if !session.checked.is_empty() {
@@ -1378,18 +1440,19 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         };
                         app.toggle_unified_enabled(id.kind, id.source_index);
                     }
-                    KeyCode::Char(c) if !ctrl => {
+                    code => {
                         let session = app.picker.as_mut().unwrap();
-                        session.query.push(c);
-                        session.selected = 0;
+                        if apply_text_field_key(&mut session.query, code, ctrl) {
+                            session.selected = 0;
+                        }
                     }
-                    _ => {}
                 }
             }
         }
         return;
     }
 
+    // New / Edit modes
     match kind {
         PickerKind::Highlight => match key.code {
             KeyCode::Enter => submit_highlight_picker(app),
@@ -1400,14 +1463,14 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             KeyCode::Down => {
                 let (draft, sel) = {
                     let s = app.picker.as_ref().unwrap();
-                    (s.draft.clone(), s.selected)
+                    (s.draft.to_string(), s.selected)
                 };
                 if !draft.is_empty() {
                     let n = app.vocab.all_candidates(&draft).len();
                     app.picker.as_mut().unwrap().selected = (sel + 1).min(n.saturating_sub(1));
                 } else {
                     let mut highlight_box = crate::highlight_model::HighlightBox {
-                        draft,
+                        draft: crate::text_field::TextField::from_text(draft),
                         editing: true,
                         selected: sel,
                     };
@@ -1418,29 +1481,30 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             KeyCode::Tab => {
                 let (draft, selected) = {
                     let session = app.picker.as_ref().unwrap();
-                    (session.draft.clone(), session.selected)
+                    (session.draft.to_string(), session.selected)
                 };
                 if !draft.is_empty() {
                     let cands = app.vocab.all_candidates(&draft);
                     if let Some(replacement) = cands.into_iter().nth(selected) {
                         let new_draft = replace_last_token(&draft, &replacement);
                         let session = app.picker.as_mut().unwrap();
-                        session.draft = new_draft;
+                        session.draft = crate::text_field::TextField::from_text(new_draft);
                         session.selected = 0;
                     }
                 }
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if ctrl => {
                 let session = app.picker.as_mut().unwrap();
-                session.draft.pop();
+                session.draft.kill_word_back();
                 session.selected = 0;
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Delete => {}
+            code => {
                 let session = app.picker.as_mut().unwrap();
-                session.draft.push(c);
-                session.selected = 0;
+                if apply_text_field_key(&mut session.draft, code, ctrl) {
+                    session.selected = 0;
+                }
             }
-            _ => {}
         },
         PickerKind::Filter | PickerKind::Exclude => match key.code {
             KeyCode::Enter => submit_filter_picker(app),
@@ -1461,9 +1525,9 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         let input = session.input.as_ref().unwrap();
                         use crate::input::ChipField;
                         match input.draft_field.unwrap() {
-                            ChipField::Tag => app.vocab.tag_candidates(&input.draft),
-                            ChipField::Pkg => app.vocab.pkg_candidates(&input.draft),
-                            ChipField::Msg => app.vocab.msg_candidates(&input.draft),
+                            ChipField::Tag => app.vocab.tag_candidates(input.draft.as_str()),
+                            ChipField::Pkg => app.vocab.pkg_candidates(input.draft.as_str()),
+                            ChipField::Msg => app.vocab.msg_candidates(input.draft.as_str()),
                             ChipField::Level => {
                                 let ql = input.draft.to_lowercase();
                                 LEVEL_CANDIDATES
@@ -1477,7 +1541,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                     };
                     if let Some(value) = labels.into_iter().nth(selected) {
                         if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
-                            input.draft = value;
+                            input.draft = crate::text_field::TextField::from_text(value);
                         }
                         app.picker.as_mut().unwrap().selected = 0;
                     }
@@ -1526,9 +1590,9 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         let input = session.input.as_ref().unwrap();
                         use crate::input::ChipField;
                         match input.draft_field.unwrap() {
-                            ChipField::Tag => app.vocab.tag_candidates(&input.draft).len(),
-                            ChipField::Pkg => app.vocab.pkg_candidates(&input.draft).len(),
-                            ChipField::Msg => app.vocab.msg_candidates(&input.draft).len(),
+                            ChipField::Tag => app.vocab.tag_candidates(input.draft.as_str()).len(),
+                            ChipField::Pkg => app.vocab.pkg_candidates(input.draft.as_str()).len(),
+                            ChipField::Msg => app.vocab.msg_candidates(input.draft.as_str()).len(),
                             ChipField::Level => LEVEL_CANDIDATES.len(),
                             ChipField::Pid | ChipField::Tid => 0,
                         }
@@ -1540,6 +1604,13 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                     input.move_field_selection(1);
                 }
             }
+            KeyCode::Backspace if ctrl => {
+                if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
+                    input.draft.kill_word_back();
+                    input.field_selected = 0;
+                }
+            }
+            KeyCode::Delete => {}
             KeyCode::Backspace => {
                 if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
                     input.backspace();
@@ -1558,7 +1629,11 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                     input.push_char(c);
                 }
             }
-            _ => {}
+            code => {
+                if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
+                    let _ = apply_text_field_key(&mut input.draft, code, ctrl);
+                }
+            }
         },
         PickerKind::MsgChip { .. } => match key.code {
             KeyCode::Enter | KeyCode::Tab => {
@@ -1570,21 +1645,23 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             }
             KeyCode::Down => {
                 let session = app.picker.as_ref().unwrap();
-                let count = PickerSession::filtered_indices(&session.choices, &session.draft).len();
+                let count =
+                    PickerSession::filtered_indices(&session.choices, session.draft.as_str()).len();
                 app.picker.as_mut().unwrap().selected =
                     (session.selected + 1).min(count.saturating_sub(1));
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if ctrl => {
                 let session = app.picker.as_mut().unwrap();
-                session.draft.pop();
+                session.draft.kill_word_back();
                 session.selected = 0;
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Delete => {}
+            code => {
                 let session = app.picker.as_mut().unwrap();
-                session.draft.push(c);
-                session.selected = 0;
+                if apply_text_field_key(&mut session.draft, code, ctrl) {
+                    session.selected = 0;
+                }
             }
-            _ => {}
         },
         PickerKind::Unified => {}
         PickerKind::Bookmark => {}
@@ -1676,8 +1753,8 @@ fn handle_mouse_event(app: &mut App, mouse: event::MouseEvent) {
 /// silently ignored so a typo can't end the session or drop existing groups.
 /// Enter/Tab with history candidates mirrors Input field-popup confirm.
 fn handle_highlight_box_key(app: &mut App, key: event::KeyEvent) {
-    let is_ctrl_c =
-        key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
+    let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
+    let is_ctrl_c = key.code == KeyCode::Char('c') && ctrl;
     match key.code {
         KeyCode::Up => app
             .highlight_box
@@ -1714,9 +1791,16 @@ fn handle_highlight_box_key(app: &mut App, key: event::KeyEvent) {
             app.highlight_box.clear();
             focus_loglist(app);
         }
-        KeyCode::Backspace => app.highlight_box.backspace(),
-        KeyCode::Char(c) => app.highlight_box.push_char(c),
-        _ => {}
+        KeyCode::Backspace if ctrl => {
+            app.highlight_box.draft.kill_word_back();
+            app.highlight_box.selected = 0;
+        }
+        KeyCode::Delete => {}
+        code => {
+            if apply_text_field_key(&mut app.highlight_box.draft, code, ctrl) {
+                app.highlight_box.selected = 0;
+            }
+        }
     }
 }
 
@@ -2121,6 +2205,8 @@ fn handle_insert_key(
     // Enter two-step (no candidates): pending draft → commit pill; chips ready
     // → submit group; empty input → jump focus to LogList.
     // `/` and Space are literal draft chars. Filter chips always ignore-case.
+    // Note: legacy Insert modal has no KeyEvent modifiers here — Ctrl chords
+    // are unavailable; arrows/Home/End still edit the draft caret.
     match code {
         KeyCode::Esc => {
             *input = input::InputBox::default();
@@ -2187,6 +2273,10 @@ fn handle_insert_key(
             }
         }
         KeyCode::Backspace => input.backspace(),
+        KeyCode::Left => input.draft.move_left(),
+        KeyCode::Right => input.draft.move_right(),
+        KeyCode::Home => input.draft.home(),
+        KeyCode::End => input.draft.end(),
         KeyCode::Char('!') if input.is_empty() => {
             if !input.toggle_exclude_mode() {
                 input.push_char('!');
@@ -2428,7 +2518,7 @@ mod dispatch_tests {
 
         handle_picker_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
         );
         assert!(app.picker.as_ref().unwrap().confirm.is_some());
         handle_picker_key(
@@ -2446,7 +2536,7 @@ mod dispatch_tests {
 
         handle_picker_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
         );
         handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.highlight_groups.groups.is_empty());
@@ -2544,6 +2634,113 @@ mod dispatch_tests {
     }
 
     #[test]
+    fn picker_query_mid_cursor_backspace_and_ctrl_u() {
+        let mut app = App::new(100);
+        app.open_unified_picker();
+        for c in "abcdef".chars() {
+            handle_picker_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert_eq!(app.picker.as_ref().unwrap().query.as_str(), "abcef");
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.picker.as_ref().unwrap().query.as_str(), "ef");
+        assert_eq!(app.picker.as_ref().unwrap().query.cursor(), 0);
+    }
+
+    #[test]
+    fn picker_new_ctrl_backspace_kills_word() {
+        use crate::picker::PickerMode;
+
+        let mut app = App::new(100);
+        app.open_picker_new(crate::picker::PickerKind::Highlight);
+        assert!(matches!(
+            app.picker.as_ref().unwrap().mode,
+            PickerMode::New
+        ));
+        for c in "foo bar".chars() {
+            handle_picker_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.picker.as_ref().unwrap().draft.as_str(), "foo ");
+    }
+
+    #[test]
+    fn picker_ctrl_a_homes_without_mutating_text() {
+        let mut app = App::new(100);
+        app.open_unified_picker();
+        for c in "abc".chars() {
+            handle_picker_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+        let q = &app.picker.as_ref().unwrap().query;
+        assert_eq!(q.as_str(), "abc", "Ctrl-A must not insert characters");
+        assert_eq!(q.cursor(), 0);
+    }
+
+    #[test]
+    fn picker_arrows_move_caret_without_mutating_text() {
+        let mut app = App::new(100);
+        app.open_unified_picker();
+        for c in "abc".chars() {
+            handle_picker_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let q = &app.picker.as_ref().unwrap().query;
+        assert_eq!(q.as_str(), "abc");
+        assert_eq!(q.cursor(), 1);
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.picker.as_ref().unwrap().query.as_str(), "abc");
+        assert_eq!(app.picker.as_ref().unwrap().query.cursor(), 2);
+    }
+
+    #[test]
+    fn manage_ctrl_e_no_longer_edits() {
+        use crate::highlight_model::HighlightGroup;
+        use crate::picker::PickerMode;
+
+        let mut app = App::new(100);
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("error").unwrap());
+        app.open_unified_picker();
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        );
+        // Ctrl-E is end-of-line on the (empty) query, not edit.
+        assert!(matches!(
+            app.picker.as_ref().unwrap().mode,
+            PickerMode::Manage
+        ));
+        assert_eq!(app.picker.as_ref().unwrap().query.cursor(), 0);
+    }
+
+    #[test]
     fn filtered_highlight_edit_submit_closes_and_updates_pattern() {
         use crate::highlight_model::HighlightGroup;
         use crate::picker::PickerMode;
@@ -2561,7 +2758,7 @@ mod dispatch_tests {
         }
         handle_picker_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
         );
         assert_eq!(
             app.picker.as_ref().unwrap().mode,
@@ -4363,8 +4560,8 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn bookmark_panel_ctrl_d_confirms_and_deletes() {
-        // Ctrl-D arms a DeleteBookmark confirm; confirming removes the bookmark.
+    fn bookmark_panel_delete_confirms_and_deletes() {
+        // Delete / Ctrl-Backspace arms a DeleteBookmark confirm; confirming removes it.
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
@@ -4374,7 +4571,7 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         handle_picker_key(
             &mut app,
-            event::KeyEvent::new(KeyCode::Char('d'), event::KeyModifiers::CONTROL),
+            event::KeyEvent::new(KeyCode::Delete, event::KeyModifiers::NONE),
         );
         assert!(app.picker.as_ref().unwrap().confirm.is_some());
         // Confirm with Enter.
@@ -4387,8 +4584,8 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn bookmark_panel_ctrl_e_is_noop() {
-        // The bookmark panel does not support edit (F2).
+    fn bookmark_panel_ctrl_x_stays_manage() {
+        // The bookmark panel does not support edit (F2); Ctrl-X flashes and stays.
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
@@ -4398,10 +4595,11 @@ mod dispatch_tests {
         let mode_before = app.picker.as_ref().unwrap().mode.clone();
         handle_picker_key(
             &mut app,
-            event::KeyEvent::new(KeyCode::Char('e'), event::KeyModifiers::CONTROL),
+            event::KeyEvent::new(KeyCode::Char('x'), event::KeyModifiers::CONTROL),
         );
         // Still Manage (no Edit transition).
         assert_eq!(app.picker.as_ref().unwrap().mode, mode_before);
+        assert_eq!(app.status_msg.as_deref(), Some("书签不支持编辑"));
     }
 
     #[test]

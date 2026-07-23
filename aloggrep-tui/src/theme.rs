@@ -415,7 +415,7 @@ pub fn highlight_pill_style(
     (text, style)
 }
 
-/// Thin editing caret (Insert / search editing). Idle block caret is unused.
+/// Thin editing caret at end-of-line (no character under the caret).
 ///
 /// Uses [`Style::reset`] so a preceding filled pill cannot leave its `bg` on
 /// the caret cell (`Cell::set_style` only applies `Some(_)` fields).
@@ -424,6 +424,15 @@ pub fn caret_bar() -> Span<'static> {
         "▏",
         Style::reset().fg(accent()).add_modifier(Modifier::BOLD),
     )
+}
+
+/// Block caret painted *on* the character under the cursor (mid-string).
+/// Does not insert an extra glyph, so moving the caret never shifts text.
+pub fn caret_block_style() -> Style {
+    Style::reset()
+        .fg(Color::Black)
+        .bg(accent())
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Border color for a bordered region: dimmed accent when it currently has

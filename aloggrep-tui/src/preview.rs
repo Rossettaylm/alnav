@@ -27,7 +27,7 @@ pub fn input_estimated_chips(input: &InputBox) -> Vec<Chip> {
         let field = input.draft_field.unwrap_or(ChipField::Msg);
         chips.push(Chip {
             field,
-            value: input.draft.clone(),
+            value: input.draft.to_string(),
         });
     }
     chips
@@ -226,7 +226,7 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
 /// Search draft preview: matching rows with faint highlight ranges.
 /// Empty draft → empty vec (caller shows placeholder / folds).
 pub fn preview_search_lines(app: &App) -> Result<Vec<PreviewLine>, ()> {
-    preview_highlight_pattern_lines(app, &app.highlight_box.draft)
+    preview_highlight_pattern_lines(app, app.highlight_box.draft.as_str())
 }
 
 /// Search preview for a caller-owned draft (for example the unified picker).

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::input::InputBox;
+use crate::text_field::TextField;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnifiedKind {
@@ -74,9 +75,9 @@ pub struct PickerSession {
     pub kind: PickerKind,
     pub mode: PickerMode,
     /// Manage 过滤串（不含前缀 `/`）
-    pub query: String,
+    pub query: TextField,
     /// New/Edit draft（不含前缀 `:`）
-    pub draft: String,
+    pub draft: TextField,
     pub selected: usize,
     pub confirm: Option<ConfirmKind>,
     /// Filter/Exclude New|Edit 时复用
@@ -92,8 +93,8 @@ impl PickerSession {
         Self {
             kind,
             mode: PickerMode::Manage,
-            query: String::new(),
-            draft: String::new(),
+            query: TextField::new(),
+            draft: TextField::new(),
             selected: 0,
             confirm: None,
             input: None,
@@ -121,7 +122,7 @@ impl PickerSession {
 
     pub fn enter_edit(&mut self, index: usize, prefill: String) {
         self.mode = PickerMode::Edit { index };
-        self.draft = prefill;
+        self.draft = TextField::from_text(prefill);
         self.selected = 0;
         self.confirm = None;
         self.checked.clear();

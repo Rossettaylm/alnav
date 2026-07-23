@@ -1,5 +1,6 @@
 use aloggrep::expr::{Expr, SameFieldOp};
 use crate::filter_model::Group;
+use crate::text_field::TextField;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChipField {
@@ -37,7 +38,7 @@ pub struct Chip {
 #[derive(Default)]
 pub struct InputBox {
     pub chips: Vec<Chip>,
-    pub draft: String,
+    pub draft: TextField,
     pub draft_field: Option<ChipField>,
     /// Highlighted index into [`Self::field_candidates`] (not into `CHIP_FIELDS`).
     pub field_selected: usize,
@@ -53,7 +54,7 @@ impl InputBox {
             return;
         }
         let field = self.draft_field.take().unwrap_or(ChipField::Msg);
-        let value = std::mem::take(&mut self.draft);
+        let value = self.draft.take();
         self.field_selected = 0;
         if !value.is_empty() {
             self.chips.push(Chip { field, value });
@@ -61,16 +62,19 @@ impl InputBox {
     }
 
     pub fn push_char(&mut self, c: char) {
-        self.draft.push(c);
+        self.draft.insert(c);
         self.field_selected = 0;
     }
 
     /// Backspace cascade: draft text -> un-pick the draft's field -> pop the
     /// last committed chip. Matches design doc's "iterative editing" note.
+    /// Mid-string: only deletes left of caret; non-empty draft at cursor 0 is a no-op
+    /// (does not cascade).
     pub fn backspace(&mut self) {
         if !self.draft.is_empty() {
-            self.draft.pop();
-            self.field_selected = 0;
+            if self.draft.backspace() {
+                self.field_selected = 0;
+            }
         } else if self.draft_field.is_some() {
             self.draft_field = None;
         } else {
@@ -324,6 +328,17 @@ mod tests {
     fn test_commit_empty_draft_is_noop() {
         let mut input = InputBox::default();
         input.commit_draft_as_chip();
+        assert!(input.chips.is_empty());
+    }
+
+    #[test]
+    fn test_backspace_mid_cursor_does_not_cascade() {
+        let mut input = InputBox::default();
+        input.push_char('a');
+        input.push_char('b');
+        input.draft.home();
+        input.backspace(); // cursor at start, non-empty → no-op
+        assert_eq!(input.draft.as_str(), "ab");
         assert!(input.chips.is_empty());
     }
 

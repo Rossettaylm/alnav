@@ -88,7 +88,7 @@ impl HighlightGroupList {
 /// Centered highlight modal draft: free-text + history-chip prefix completion.
 #[derive(Default)]
 pub struct HighlightBox {
-    pub draft: String,
+    pub draft: crate::text_field::TextField,
     /// When true, key events are routed here (entered via highlight compose).
     pub editing: bool,
     /// Highlighted index into the current candidate list (not into `groups`).
@@ -101,12 +101,12 @@ impl HighlightBox {
     }
 
     pub fn push_char(&mut self, c: char) {
-        self.draft.push(c);
+        self.draft.insert(c);
         self.selected = 0;
     }
 
     pub fn backspace(&mut self) {
-        self.draft.pop();
+        let _ = self.draft.backspace();
         self.selected = 0;
     }
 
@@ -165,11 +165,11 @@ impl HighlightBox {
         if self.draft.is_empty() {
             return Ok(None);
         }
-        let draft = std::mem::take(&mut self.draft);
+        let draft = self.draft.take();
         match HighlightGroup::from_pattern(&draft) {
             Some(g) => Ok(Some(g)),
             None => {
-                self.draft = draft;
+                self.draft = crate::text_field::TextField::from_text(draft);
                 Err(())
             }
         }

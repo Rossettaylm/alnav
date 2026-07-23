@@ -18,7 +18,7 @@ const L1_EXCLUDE_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
 const L1_HIGHLIGHT_STRIP: &str = "h/l:组 d:删… Tab:切 Esc:随";
 const L1_INPUT: &str = "Space:草稿 Enter:收/交 !:排除 Esc:取消";
 const L1_HIGHLIGHT_MODAL: &str = "Space:草稿 Enter/Tab:确认 Esc:取消";
-const L1_PICKER: &str = "输入:过滤 ↑/↓:选择 Tab:多选 Enter:启停 Ctrl-E:改 Ctrl-D:删 Esc:关闭";
+const L1_PICKER: &str = "输入:过滤 ↑/↓:选择 Tab:多选 Enter:启停 ^X:改 Del/^⌫:删 Esc:关闭";
 const L1_CONFIRM: &str = "y/Enter:确认 n/Esc:取消";
 const L1_DETAIL: &str = "p:关 P:切 c/C:滤 j/k:行 Esc:关";
 

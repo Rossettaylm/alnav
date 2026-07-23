@@ -47,9 +47,9 @@ Manage mode is dispatched **by `session.kind`** in two places:
   bookmark-only list (no `[Bookmark]:` prefix). Future per-kind Manage
   panels branch here.
 - `handle_picker_key` Manage branch (`main.rs`): routes keys per kind.
-  `Unified` supports Tab multi-select + Ctrl-E edit; `Bookmark` disables
-  both (Tab = no-op, Ctrl-E = no-op) and binds Enter = jump, Ctrl-D =
-  delete-via-`ConfirmKind::DeleteBookmark`.
+  `Unified` supports Tab multi-select + Ctrl-X edit; `Bookmark` disables
+  edit (Tab = no-op, Ctrl-X = flash) and binds Enter = jump, Delete /
+  Ctrl-Backspace = delete-via-`ConfirmKind::DeleteBookmark`.
 
 **Convention**: to add a new per-kind Manage panel, add a `PickerKind`
 variant, branch in both `picker_render_data` and `handle_picker_key`, and

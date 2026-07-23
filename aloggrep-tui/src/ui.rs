@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 use regex::Regex;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Mode};
 use crate::filter_model::Group;
@@ -1195,7 +1196,119 @@ fn committed_chip_spans(chips: &[crate::input::Chip], exclude_mode: bool) -> Vec
     spans
 }
 
-fn input_content_spans(input: &InputBox, show_caret: bool) -> Vec<Span<'static>> {
+/// Display-column width of styled spans (sum of content widths).
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.content.width()).sum()
+}
+
+/// Window `text` around `caret` (char index) so the caret stays visible within
+/// `max_cols` display columns.
+///
+/// Mid-string caret is a block style on the character under the cursor (no extra
+/// glyph). End-of-line still needs one column for [`theme::caret_bar`], so the
+/// caller passes a budget that already reserves that column when `caret == len`.
+fn window_around_caret(text: &str, caret: usize, max_cols: usize) -> (String, String) {
+    let caret = caret.min(text.chars().count());
+    let chars: Vec<char> = text.chars().collect();
+    let before: String = chars[..caret].iter().collect();
+    let after: String = chars[caret..].iter().collect();
+    if max_cols == 0 {
+        return (String::new(), String::new());
+    }
+    let bw = before.width();
+    let aw = after.width();
+    if bw + aw <= max_cols {
+        return (before, after);
+    }
+    if bw <= max_cols {
+        let room = max_cols - bw;
+        let mut out_after = String::new();
+        let mut w = 0;
+        for ch in after.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w + cw > room {
+                break;
+            }
+            out_after.push(ch);
+            w += cw;
+        }
+        return (before, out_after);
+    }
+    // before too long: keep a suffix ending at the caret.
+    let mut w = 0;
+    let mut start = caret;
+    while start > 0 {
+        let ch = chars[start - 1];
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > max_cols {
+            break;
+        }
+        w += cw;
+        start -= 1;
+    }
+    let before_win: String = chars[start..caret].iter().collect();
+    let room = max_cols.saturating_sub(w);
+    let mut out_after = String::new();
+    let mut aw = 0;
+    for ch in chars[caret..].iter().copied() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if aw + cw > room {
+            break;
+        }
+        out_after.push(ch);
+        aw += cw;
+    }
+    (before_win, out_after)
+}
+
+/// Draft text with mid-string caret; optionally windowed to `max_width` columns.
+///
+/// - Mid-string / start: block-highlight the character under the caret (no extra
+///   cell — moving the caret must not insert a gap or overwrite neighbors).
+/// - End-of-line: append [`theme::caret_bar`] after the text.
+pub fn editable_text_spans(text: &str, caret: usize, max_width: Option<u16>) -> Vec<Span<'static>> {
+    let caret = caret.min(text.chars().count());
+    let at_end = caret == text.chars().count();
+    // End-of-line bar needs one column; mid-string block reuses the char cell.
+    let text_budget = match max_width {
+        Some(w) if at_end => Some((w as usize).saturating_sub(1)),
+        Some(w) => Some(w as usize),
+        None => None,
+    };
+    let (before, after) = match text_budget {
+        Some(budget) => window_around_caret(text, caret, budget),
+        None => {
+            let byte = text
+                .char_indices()
+                .nth(caret)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            (text[..byte].to_string(), text[byte..].to_string())
+        }
+    };
+    let mut spans = Vec::new();
+    if !before.is_empty() {
+        spans.push(Span::styled(before, Style::reset()));
+    }
+    if at_end {
+        spans.push(theme::caret_bar());
+    } else {
+        let mut chars = after.chars();
+        if let Some(under) = chars.next() {
+            spans.push(Span::styled(under.to_string(), theme::caret_block_style()));
+            let rest: String = chars.collect();
+            if !rest.is_empty() {
+                spans.push(Span::styled(rest, Style::reset()));
+            }
+        } else {
+            // Windowing dropped the under-caret char; still show an end bar.
+            spans.push(theme::caret_bar());
+        }
+    }
+    spans
+}
+
+fn input_content_spans(input: &InputBox, show_caret: bool, max_width: Option<u16>) -> Vec<Span<'static>> {
     let mut spans = committed_chip_spans(&input.chips, input.exclude_mode);
     // Gap + reset after pills so draft/caret never sit inside the pill fill.
     if !input.chips.is_empty() {
@@ -1207,9 +1320,16 @@ fn input_content_spans(input: &InputBox, show_caret: bool) -> Vec<Span<'static>>
             Style::reset().fg(theme::field_color(field)),
         ));
     }
-    spans.push(Span::styled(input.draft.clone(), Style::reset()));
     if show_caret {
-        spans.push(theme::caret_bar());
+        let prefix_w = spans_display_width(&spans);
+        let draft_max = max_width.map(|w| (w as usize).saturating_sub(prefix_w) as u16);
+        spans.extend(editable_text_spans(
+            input.draft.as_str(),
+            input.draft.cursor(),
+            draft_max,
+        ));
+    } else {
+        spans.push(Span::styled(input.draft.to_string(), Style::reset()));
     }
     spans
 }
@@ -1223,7 +1343,11 @@ pub fn render_input_modal(input: &InputBox, mode: Mode, frame: &mut Frame, area:
     };
     let inner = render_modal_shell(title, frame, area);
     frame.render_widget(
-        Paragraph::new(Line::from(input_content_spans(input, mode == Mode::Insert))),
+        Paragraph::new(Line::from(input_content_spans(
+            input,
+            mode == Mode::Insert,
+            Some(inner.width),
+        ))),
         inner,
     );
 }
@@ -1241,7 +1365,11 @@ pub fn render_input_box(
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
     frame.render_widget(
-        Paragraph::new(Line::from(input_content_spans(input, mode == Mode::Insert))),
+        Paragraph::new(Line::from(input_content_spans(
+            input,
+            mode == Mode::Insert,
+            Some(inner.width),
+        ))),
         inner,
     );
 }
@@ -1249,10 +1377,11 @@ pub fn render_input_box(
 /// Centered Highlight modal: draft row only (history candidates float below).
 pub fn render_highlight_modal(search: &HighlightBox, frame: &mut Frame, area: Rect) {
     let inner = render_modal_shell("Highlight", frame, area);
-    let spans = vec![
-        Span::styled(search.draft.clone(), Style::reset()),
-        theme::caret_bar(),
-    ];
+    let spans = editable_text_spans(
+        search.draft.as_str(),
+        search.draft.cursor(),
+        Some(inner.width),
+    );
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
@@ -1484,6 +1613,7 @@ pub fn render_preview(
 pub fn render_picker_search_line(
     mode: &crate::picker::PickerMode,
     text: &str,
+    caret: usize,
     chips: &[crate::input::Chip],
     exclude_chips: bool,
     draft_field: Option<ChipField>,
@@ -1500,8 +1630,9 @@ pub fn render_picker_search_line(
             Style::reset().fg(theme::field_color(field)),
         ));
     }
-    prompt_spans.push(Span::styled(text.to_string(), Style::reset()));
-    prompt_spans.push(theme::caret_bar());
+    let prefix_w = spans_display_width(&prompt_spans);
+    let draft_max = (area.width as usize).saturating_sub(prefix_w) as u16;
+    prompt_spans.extend(editable_text_spans(text, caret, Some(draft_max)));
     let prompt = Line::from(prompt_spans);
     let lines = if chips.is_empty() {
         vec![prompt]
@@ -1519,6 +1650,7 @@ pub fn render_picker(
     title: &str,
     mode: &crate::picker::PickerMode,
     search_text: &str,
+    caret: usize,
     match_query: &str,
     chips: &[crate::input::Chip],
     exclude_chips: bool,
@@ -1564,6 +1696,7 @@ pub fn render_picker(
     render_picker_search_line(
         mode,
         search_text,
+        caret,
         chips,
         exclude_chips,
         draft_field,
@@ -2614,6 +2747,42 @@ mod tests {
     }
 
     #[test]
+    fn editable_text_spans_follow_caret_when_truncated() {
+        let spans = editable_text_spans("abcdefghij", 10, Some(5));
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        // caret at end → window shows a suffix ending at caret + caret glyph
+        assert!(joined.contains('▏'), "end caret bar: {joined:?}");
+        assert!(joined.contains('j'), "end char must remain visible: {joined:?}");
+        assert!(
+            !joined.contains('a'),
+            "start char should scroll off: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn editable_text_spans_mid_caret_does_not_insert_glyph() {
+        let spans = editable_text_spans("abcdef", 2, None);
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            joined, "abcdef",
+            "mid caret must overlay a char, not insert ▏/space: {joined:?}"
+        );
+        assert_eq!(spans.len(), 3, "before + under-caret char + after");
+        assert_eq!(spans[1].content.as_ref(), "c");
+        assert_eq!(spans[1].style.bg, Some(theme::accent()));
+    }
+
+    #[test]
+    fn editable_text_spans_start_caret_overlays_first_char() {
+        let spans = editable_text_spans("ab", 0, None);
+        let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "ab");
+        assert!(!joined.contains('▏'));
+        assert_eq!(spans[0].content.as_ref(), "a");
+        assert_eq!(spans[0].style.bg, Some(theme::accent()));
+    }
+
+    #[test]
     fn picker_search_area_shows_committed_chip() {
         use crate::input::{Chip, ChipField};
 
@@ -2629,6 +2798,7 @@ mod tests {
                     "Filter · Edit",
                     &crate::picker::PickerMode::Edit { index: 0 },
                     "",
+                    0,
                     "",
                     &chips,
                     false,
@@ -2664,6 +2834,7 @@ mod tests {
                     "Filter · New",
                     &crate::picker::PickerMode::New,
                     "",
+                    0,
                     "",
                     &[],
                     false,
@@ -2708,6 +2879,7 @@ mod tests {
                     "Manage",
                     &crate::picker::PickerMode::Manage,
                     "",
+                    0,
                     "",
                     &[],
                     false,
