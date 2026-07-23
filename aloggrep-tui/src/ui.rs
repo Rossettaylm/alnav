@@ -1,4 +1,4 @@
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
@@ -1202,11 +1202,7 @@ fn spans_display_width(spans: &[Span<'_>]) -> usize {
 }
 
 /// Window `text` around `caret` (char index) so the caret stays visible within
-/// `max_cols` display columns.
-///
-/// Mid-string caret is a block style on the character under the cursor (no extra
-/// glyph). End-of-line still needs one column for [`theme::caret_bar`], so the
-/// caller passes a budget that already reserves that column when `caret == len`.
+/// `max_cols` display columns. Hardware cursor needs no reserved glyph column.
 fn window_around_caret(text: &str, caret: usize, max_cols: usize) -> (String, String) {
     let caret = caret.min(text.chars().count());
     let chars: Vec<char> = text.chars().collect();
@@ -1261,20 +1257,17 @@ fn window_around_caret(text: &str, caret: usize, max_cols: usize) -> (String, St
     (before_win, out_after)
 }
 
-/// Draft text with mid-string caret; optionally windowed to `max_width` columns.
+/// Windowed draft text for hardware-cursor editing.
 ///
-/// - Mid-string / start: block-highlight the character under the caret (no extra
-///   cell — moving the caret must not insert a gap or overwrite neighbors).
-/// - End-of-line: append [`theme::caret_bar`] after the text.
-pub fn editable_text_spans(text: &str, caret: usize, max_width: Option<u16>) -> Vec<Span<'static>> {
+/// Returns `(spans, caret_col)` where `caret_col` is the display-column offset
+/// of the caret within the returned draft spans (end of the visible `before`).
+pub fn editable_text_spans(
+    text: &str,
+    caret: usize,
+    max_width: Option<u16>,
+) -> (Vec<Span<'static>>, u16) {
     let caret = caret.min(text.chars().count());
-    let at_end = caret == text.chars().count();
-    // End-of-line bar needs one column; mid-string block reuses the char cell.
-    let text_budget = match max_width {
-        Some(w) if at_end => Some((w as usize).saturating_sub(1)),
-        Some(w) => Some(w as usize),
-        None => None,
-    };
+    let text_budget = max_width.map(|w| w as usize);
     let (before, after) = match text_budget {
         Some(budget) => window_around_caret(text, caret, budget),
         None => {
@@ -1286,31 +1279,25 @@ pub fn editable_text_spans(text: &str, caret: usize, max_width: Option<u16>) -> 
             (text[..byte].to_string(), text[byte..].to_string())
         }
     };
+    let caret_col = before.width().min(usize::from(u16::MAX)) as u16;
     let mut spans = Vec::new();
     if !before.is_empty() {
         spans.push(Span::styled(before, Style::reset()));
     }
-    if at_end {
-        spans.push(theme::caret_bar());
-    } else {
-        let mut chars = after.chars();
-        if let Some(under) = chars.next() {
-            spans.push(Span::styled(under.to_string(), theme::caret_block_style()));
-            let rest: String = chars.collect();
-            if !rest.is_empty() {
-                spans.push(Span::styled(rest, Style::reset()));
-            }
-        } else {
-            // Windowing dropped the under-caret char; still show an end bar.
-            spans.push(theme::caret_bar());
-        }
+    if !after.is_empty() {
+        spans.push(Span::styled(after, Style::reset()));
     }
-    spans
+    (spans, caret_col)
 }
 
-fn input_content_spans(input: &InputBox, show_caret: bool, max_width: Option<u16>) -> Vec<Span<'static>> {
+/// Build Input draft line spans; returns caret column within `inner` when editing.
+fn input_content_spans(
+    input: &InputBox,
+    show_caret: bool,
+    max_width: Option<u16>,
+) -> (Vec<Span<'static>>, Option<u16>) {
     let mut spans = committed_chip_spans(&input.chips, input.exclude_mode);
-    // Gap + reset after pills so draft/caret never sit inside the pill fill.
+    // Gap + reset after pills so draft never sits inside the pill fill.
     if !input.chips.is_empty() {
         spans.push(Span::styled(" ".repeat(PILL_GAP as usize), Style::reset()));
     }
@@ -1323,33 +1310,38 @@ fn input_content_spans(input: &InputBox, show_caret: bool, max_width: Option<u16
     if show_caret {
         let prefix_w = spans_display_width(&spans);
         let draft_max = max_width.map(|w| (w as usize).saturating_sub(prefix_w) as u16);
-        spans.extend(editable_text_spans(
-            input.draft.as_str(),
-            input.draft.cursor(),
-            draft_max,
-        ));
+        let (draft_spans, caret_col) =
+            editable_text_spans(input.draft.as_str(), input.draft.cursor(), draft_max);
+        spans.extend(draft_spans);
+        let col = (prefix_w as u16).saturating_add(caret_col);
+        (spans, Some(col))
     } else {
         spans.push(Span::styled(input.draft.to_string(), Style::reset()));
+        (spans, None)
     }
-    spans
 }
 
 /// Centered Input modal (visible while `Focus::Input`).
-pub fn render_input_modal(input: &InputBox, mode: Mode, frame: &mut Frame, area: Rect) {
+/// Returns hardware cursor position when in Insert mode.
+pub fn render_input_modal(
+    input: &InputBox,
+    mode: Mode,
+    frame: &mut Frame,
+    area: Rect,
+) -> Option<Position> {
     let title = if input.exclude_mode {
         "Input ! (排除)"
     } else {
         "Input"
     };
     let inner = render_modal_shell(title, frame, area);
-    frame.render_widget(
-        Paragraph::new(Line::from(input_content_spans(
-            input,
-            mode == Mode::Insert,
-            Some(inner.width),
-        ))),
-        inner,
-    );
+    let (spans, caret_col) =
+        input_content_spans(input, mode == Mode::Insert, Some(inner.width));
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    caret_col.map(|col| Position {
+        x: inner.x.saturating_add(col.min(inner.width.saturating_sub(1))),
+        y: inner.y,
+    })
 }
 
 /// Legacy single-row Input render kept for unit tests that draw into a fixed area.
@@ -1359,30 +1351,38 @@ pub fn render_input_box(
     focused: bool,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> Option<Position> {
     let block = divider_block(theme::numbered_title(5, "Input", focused), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
-    frame.render_widget(
-        Paragraph::new(Line::from(input_content_spans(
-            input,
-            mode == Mode::Insert,
-            Some(inner.width),
-        ))),
-        inner,
-    );
+    let (spans, caret_col) =
+        input_content_spans(input, mode == Mode::Insert, Some(inner.width));
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    caret_col.map(|col| Position {
+        x: inner.x.saturating_add(col.min(inner.width.saturating_sub(1))),
+        y: inner.y,
+    })
 }
 
 /// Centered Highlight modal: draft row only (history candidates float below).
-pub fn render_highlight_modal(search: &HighlightBox, frame: &mut Frame, area: Rect) {
+/// Returns hardware cursor position for the draft caret.
+pub fn render_highlight_modal(
+    search: &HighlightBox,
+    frame: &mut Frame,
+    area: Rect,
+) -> Option<Position> {
     let inner = render_modal_shell("Highlight", frame, area);
-    let spans = editable_text_spans(
+    let (spans, caret_col) = editable_text_spans(
         search.draft.as_str(),
         search.draft.cursor(),
         Some(inner.width),
     );
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    Some(Position {
+        x: inner.x.saturating_add(caret_col.min(inner.width.saturating_sub(1))),
+        y: inner.y,
+    })
 }
 
 /// Outer height for H4 Detail modal (border + content), clamped to `frame`.
@@ -1609,7 +1609,8 @@ pub fn render_preview(
 }
 
 /// fzf left-pane committed pills plus search prompt:
-/// mode icon (`>` / `＋` / `✎`) + optional `field:` + draft + caret.
+/// mode icon (`>` / `＋` / `✎`) + optional `field:` + draft.
+/// Returns hardware cursor position for the draft caret.
 pub fn render_picker_search_line(
     mode: &crate::picker::PickerMode,
     text: &str,
@@ -1619,9 +1620,9 @@ pub fn render_picker_search_line(
     draft_field: Option<ChipField>,
     frame: &mut Frame,
     area: Rect,
-) {
+) -> Option<Position> {
     if area.height == 0 {
-        return;
+        return None;
     }
     let mut prompt_spans = vec![theme::picker_mode_prefix(mode)];
     if let Some(field) = draft_field {
@@ -1632,8 +1633,10 @@ pub fn render_picker_search_line(
     }
     let prefix_w = spans_display_width(&prompt_spans);
     let draft_max = (area.width as usize).saturating_sub(prefix_w) as u16;
-    prompt_spans.extend(editable_text_spans(text, caret, Some(draft_max)));
+    let (draft_spans, caret_col) = editable_text_spans(text, caret, Some(draft_max));
+    prompt_spans.extend(draft_spans);
     let prompt = Line::from(prompt_spans);
+    let prompt_row = if chips.is_empty() { 0u16 } else { 1 };
     let lines = if chips.is_empty() {
         vec![prompt]
     } else {
@@ -1643,9 +1646,15 @@ pub fn render_picker_search_line(
         ]
     };
     frame.render_widget(Paragraph::new(lines), area);
+    let x_off = (prefix_w as u16).saturating_add(caret_col);
+    Some(Position {
+        x: area.x.saturating_add(x_off.min(area.width.saturating_sub(1))),
+        y: area.y.saturating_add(prompt_row.min(area.height.saturating_sub(1))),
+    })
 }
 
 /// fzf-style picker shell: left candidates + bottom search, right Preview.
+/// Returns hardware cursor position for the search-line caret.
 pub fn render_picker(
     title: &str,
     mode: &crate::picker::PickerMode,
@@ -1666,7 +1675,7 @@ pub fn render_picker(
     show_preview: bool,
     frame: &mut Frame,
     frame_area: Rect,
-) {
+) -> Option<Position> {
     let picker_area = picker_frame_rect(frame_area);
     frame.render_widget(Clear, picker_area);
 
@@ -1693,7 +1702,7 @@ pub fn render_picker(
             candidates_area,
         );
     }
-    render_picker_search_line(
+    let cursor = render_picker_search_line(
         mode,
         search_text,
         caret,
@@ -1706,6 +1715,7 @@ pub fn render_picker(
     if let Some(right) = right {
         render_preview("Preview", preview_lines, "无预览", frame, right);
     }
+    cursor
 }
 
 /// Destructive picker action confirmation, overlaid at the picker center.
@@ -2399,7 +2409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_input_box_shows_caret_after_committed_pill() {
+    fn test_render_input_box_hw_cursor_after_committed_pill() {
         use crate::input::{Chip, ChipField};
 
         let mut input = InputBox::default();
@@ -2413,33 +2423,23 @@ mod tests {
 
         let backend = TestBackend::new(40, 3);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut cursor = None;
         terminal
-            .draw(|frame| render_input_box(&input, Mode::Insert, true, frame, frame.area()))
+            .draw(|frame| {
+                cursor = render_input_box(&input, Mode::Insert, true, frame, frame.area());
+                if let Some(pos) = cursor {
+                    frame.set_cursor_position(pos);
+                }
+            })
             .unwrap();
         let buf = terminal.backend().buffer();
         let content = cell_text(buf);
-        assert!(
-            content.contains('▏'),
-            "Insert caret must remain visible after a committed pill, got: {content:?}"
-        );
         assert!(content.contains("MyTag"));
         assert!(content.contains('x'));
-
-        // Caret cell must not inherit the pill's filled background.
-        let mut found_caret = false;
-        for x in 0..buf.area.width {
-            let cell = &buf[(x, 1)];
-            if cell.symbol() == "▏" {
-                found_caret = true;
-                assert_eq!(cell.fg, theme::accent());
-                assert_ne!(
-                    cell.bg,
-                    theme::accent(),
-                    "caret must not sit on the Tag pill's cyan fill"
-                );
-            }
-        }
-        assert!(found_caret, "caret glyph missing from content row");
+        let pos = cursor.expect("Insert mode must report a hardware cursor");
+        // Cursor sits after draft char 'x' on the content row.
+        assert!(pos.x > 0, "cursor x={pos:?}");
+        assert_eq!(pos.y, 1);
     }
 
     #[test]
@@ -2748,38 +2748,31 @@ mod tests {
 
     #[test]
     fn editable_text_spans_follow_caret_when_truncated() {
-        let spans = editable_text_spans("abcdefghij", 10, Some(5));
+        let (spans, caret_col) = editable_text_spans("abcdefghij", 10, Some(5));
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        // caret at end → window shows a suffix ending at caret + caret glyph
-        assert!(joined.contains('▏'), "end caret bar: {joined:?}");
         assert!(joined.contains('j'), "end char must remain visible: {joined:?}");
         assert!(
             !joined.contains('a'),
             "start char should scroll off: {joined:?}"
         );
+        assert_eq!(caret_col as usize, UnicodeWidthStr::width(joined.as_str()));
     }
 
     #[test]
-    fn editable_text_spans_mid_caret_does_not_insert_glyph() {
-        let spans = editable_text_spans("abcdef", 2, None);
+    fn editable_text_spans_mid_caret_is_plain_text() {
+        let (spans, caret_col) = editable_text_spans("abcdef", 2, None);
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(
-            joined, "abcdef",
-            "mid caret must overlay a char, not insert ▏/space: {joined:?}"
-        );
-        assert_eq!(spans.len(), 3, "before + under-caret char + after");
-        assert_eq!(spans[1].content.as_ref(), "c");
-        assert_eq!(spans[1].style.bg, Some(theme::accent()));
+        assert_eq!(joined, "abcdef");
+        assert_eq!(caret_col, 2);
+        assert!(!joined.contains('▏'));
     }
 
     #[test]
-    fn editable_text_spans_start_caret_overlays_first_char() {
-        let spans = editable_text_spans("ab", 0, None);
+    fn editable_text_spans_start_caret_col_is_zero() {
+        let (spans, caret_col) = editable_text_spans("ab", 0, None);
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "ab");
-        assert!(!joined.contains('▏'));
-        assert_eq!(spans[0].content.as_ref(), "a");
-        assert_eq!(spans[0].style.bg, Some(theme::accent()));
+        assert_eq!(caret_col, 0);
     }
 
     #[test]
@@ -2794,7 +2787,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_picker(
+                let _ = render_picker(
                     "Filter · Edit",
                     &crate::picker::PickerMode::Edit { index: 0 },
                     "",
@@ -2814,7 +2807,7 @@ mod tests {
                     true,
                     frame,
                     frame.area(),
-                )
+                );
             })
             .unwrap();
 
@@ -2830,7 +2823,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_picker(
+                let _ = render_picker(
                     "Filter · New",
                     &crate::picker::PickerMode::New,
                     "",
@@ -2850,7 +2843,7 @@ mod tests {
                     true,
                     frame,
                     frame.area(),
-                )
+                );
             })
             .unwrap();
 

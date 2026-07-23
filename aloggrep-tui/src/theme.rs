@@ -415,26 +415,6 @@ pub fn highlight_pill_style(
     (text, style)
 }
 
-/// Thin editing caret at end-of-line (no character under the caret).
-///
-/// Uses [`Style::reset`] so a preceding filled pill cannot leave its `bg` on
-/// the caret cell (`Cell::set_style` only applies `Some(_)` fields).
-pub fn caret_bar() -> Span<'static> {
-    Span::styled(
-        "▏",
-        Style::reset().fg(accent()).add_modifier(Modifier::BOLD),
-    )
-}
-
-/// Block caret painted *on* the character under the cursor (mid-string).
-/// Does not insert an extra glyph, so moving the caret never shifts text.
-pub fn caret_block_style() -> Style {
-    Style::reset()
-        .fg(Color::Black)
-        .bg(accent())
-        .add_modifier(Modifier::BOLD)
-}
-
 /// Border color for a bordered region: dimmed accent when it currently has
 /// keyboard focus (reduced from full-saturation accent per Q3 border-weakening),
 /// dim gray otherwise.
@@ -818,19 +798,6 @@ mod tests {
         let (text, body) = chip_pill_style(ChipField::Tag, "MyTag", false);
         assert_eq!(text, format!(" {} MyTag ", GLYPH_FIELD_TAG));
         assert_eq!(body.bg, Some(accent()));
-    }
-
-    #[test]
-    fn test_caret_bar_resets_background() {
-        install(UiTokens::builtin());
-        let caret = caret_bar();
-        assert_eq!(caret.style.fg, Some(accent()));
-        // Style::reset() clears inherited pill bg (Color::Reset), not Option::None.
-        assert!(
-            caret.style.bg.is_none() || caret.style.bg == Some(Color::Reset),
-            "caret must not keep a filled bg, got {:?}",
-            caret.style.bg
-        );
     }
 
     #[test]

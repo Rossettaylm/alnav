@@ -26,6 +26,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use ratatui::layout::Position;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::Terminal;
@@ -349,7 +350,11 @@ fn main() -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
         let backend = CrosstermBackend::new(io::stdout());
-        Terminal::new(backend).map_err(|e| e.to_string())
+        let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+        // Hide until a draft surface requests a hardware caret via
+        // `Frame::set_cursor_position` (ratatui shows only when set).
+        terminal.hide_cursor().map_err(|e| e.to_string())?;
+        Ok(terminal)
     })();
     let mut terminal = match setup {
         Ok(t) => t,
@@ -457,8 +462,9 @@ fn run<B: ratatui::backend::Backend>(
                     ui::render_status_bar(app, frame, status_area);
 
                     let modal_w = ui::modal_width(frame_area.width);
+                    let mut hw_cursor: Option<Position> = None;
                     if let Some(data) = picker_render_data(app) {
-                        ui::render_picker(
+                        hw_cursor = ui::render_picker(
                             &data.title,
                             &data.mode,
                             &data.text,
@@ -485,12 +491,14 @@ fn run<B: ratatui::backend::Backend>(
                             .and_then(|session| session.confirm.as_ref())
                         {
                             ui::render_confirm_dialog(confirm, frame, frame_area);
+                            // Don't let the search caret poke through the dialog.
+                            hw_cursor = None;
                         }
                     // Search / Input use top stack: modal → candidates → Preview (H1).
                     } else if app.highlight_box.editing {
                         let area =
                             ui::top_modal_rect(frame_area, modal_w, ui::search_modal_height());
-                        ui::render_highlight_modal(&app.highlight_box, frame, area);
+                        hw_cursor = ui::render_highlight_modal(&app.highlight_box, frame, area);
                         let cand = app
                             .highlight_box
                             .candidate_indices(&app.highlight_groups.groups)
@@ -524,7 +532,7 @@ fn run<B: ratatui::backend::Backend>(
                         }
                     } else if app.focus == app::Focus::Input {
                         let input_area = ui::top_modal_rect(frame_area, modal_w, 3);
-                        ui::render_input_modal(input, app.mode, frame, input_area);
+                        hw_cursor = ui::render_input_modal(input, app.mode, frame, input_area);
                         let mut stack_bottom = input_area;
                         if input.field_popup_visible() {
                             // `.max(1)` so empty-match state still gets a row for「无匹配字段」.
@@ -549,6 +557,9 @@ fn run<B: ratatui::backend::Backend>(
                         let h = ui::detail_modal_height(frame_area, content_rows);
                         let area = ui::top_modal_rect(frame_area, modal_w, h);
                         ui::render_detail(app, frame, area);
+                    }
+                    if let Some(pos) = hw_cursor {
+                        frame.set_cursor_position(pos);
                     }
                 })
                 .map_err(|e| e.to_string())?;
