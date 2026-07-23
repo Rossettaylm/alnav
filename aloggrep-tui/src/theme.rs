@@ -17,6 +17,50 @@ use aloggrep::parser::Level;
 
 use crate::input::ChipField;
 
+// ---------------------------------------------------------------------------
+// Nerdfont semantic glyphs (hard dependency — no runtime fallback).
+// All UI iconography must reference these constants; `ui.rs` MUST NOT inline
+// glyph literals. See prd.md R4 / design.md D1 for the rationale and table.
+// ---------------------------------------------------------------------------
+
+pub const GLYPH_MODE_MANAGE: &str = "\u{f0b7}"; // 
+pub const GLYPH_MODE_NEW: &str = "\u{f0fe}"; // 
+pub const GLYPH_MODE_EDIT: &str = "\u{f044}"; // 
+pub const GLYPH_CARET_SEL: &str = "\u{f0da}"; // 
+pub const GLYPH_TITLE_PICKER: &str = "\u{f002}"; // 
+pub const GLYPH_TITLE_LOG: &str = "\u{f0c5}"; // 
+pub const GLYPH_TITLE_FILTER: &str = "\u{f0b0}"; // 
+pub const GLYPH_TITLE_EXCLUDE: &str = "\u{f056}"; // 
+pub const GLYPH_TITLE_HIGHLIGHT: &str = "\u{f0e0}"; // 
+pub const GLYPH_GROUP_ON: &str = "\u{f192}"; // 
+pub const GLYPH_GROUP_OFF: &str = "\u{f10c}"; // 
+pub const GLYPH_BOOKMARK: &str = "\u{f02e}"; // 
+pub const GLYPH_LOCK: &str = "\u{f023}"; // 
+pub const GLYPH_FOLLOWING: &str = "\u{f062}"; // 
+pub const GLYPH_VISUAL: &str = "\u{f245}"; // 
+pub const GLYPH_SEARCH: &str = "\u{f002}"; // 
+pub const GLYPH_CRASH: &str = "\u{f071}"; // 
+pub const GLYPH_SEP: &str = "\u{e0bf}"; // 
+pub const GLYPH_FIELD_TAG: &str = "\u{f02b}"; // 
+pub const GLYPH_FIELD_MSG: &str = "\u{f075}"; // 
+pub const GLYPH_FIELD_PKG: &str = "\u{f187}"; // 
+pub const GLYPH_FIELD_PID: &str = "\u{f292}"; // 
+pub const GLYPH_FIELD_TID: &str = "\u{f2bd}"; // 
+pub const GLYPH_FIELD_LEVEL: &str = "\u{f0d0}"; // 
+pub const GLYPH_HR: &str = "\u{2500}"; // ─
+
+/// Map a chip field to its nerdfont icon glyph.
+pub fn field_icon(field: ChipField) -> &'static str {
+    match field {
+        ChipField::Tag => GLYPH_FIELD_TAG,
+        ChipField::Msg => GLYPH_FIELD_MSG,
+        ChipField::Pkg => GLYPH_FIELD_PKG,
+        ChipField::Pid => GLYPH_FIELD_PID,
+        ChipField::Tid => GLYPH_FIELD_TID,
+        ChipField::Level => GLYPH_FIELD_LEVEL,
+    }
+}
+
 /// Overridable UI chrome tokens (not log severity / USER_HIGHLIGHT).
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiTokens {
@@ -170,17 +214,6 @@ pub fn field_color(field: ChipField) -> Color {
     }
 }
 
-/// Reverse-color block used for numbered title badges and other high-emphasis
-/// focus chrome. Candidate list selection uses [`candidate_selection_style`]
-/// instead (softer). Not used for Filter/Search chip selection — those tint
-/// the group `●`/`○` via [`chip_group_border_style`].
-pub fn focus_style() -> Style {
-    Style::default()
-        .fg(Color::Black)
-        .bg(accent())
-        .add_modifier(Modifier::BOLD)
-}
-
 /// Selected candidate row (picker / field popup).
 pub fn candidate_selected_style() -> Style {
     Style::default()
@@ -205,9 +238,9 @@ pub fn candidate_match_style(selected: bool) -> Style {
     Style::default().fg(t().candidate_match_fg).bg(bg)
 }
 
-/// Prefix string for the selected candidate row.
+/// Prefix string for the selected candidate row (nerdfont caret-right glyph).
 pub fn candidate_prefix() -> String {
-    t().candidate_prefix.clone()
+    format!("{} ", GLYPH_CARET_SEL)
 }
 
 /// Backward-compatible alias for selected candidate style.
@@ -222,14 +255,14 @@ pub fn picker_mode_style() -> Style {
         .add_modifier(Modifier::DIM)
 }
 
-/// Mode prefix icon: Manage `> `, New `＋ `, Edit `✎ `.
+/// Mode prefix icon (nerdfont): Manage ``, New ``, Edit ``.
 pub fn picker_mode_prefix(mode: &crate::picker::PickerMode) -> Span<'static> {
     let icon = match mode {
-        crate::picker::PickerMode::Manage => "> ",
-        crate::picker::PickerMode::New => "＋ ",
-        crate::picker::PickerMode::Edit { .. } => "✎ ",
+        crate::picker::PickerMode::Manage => GLYPH_MODE_MANAGE,
+        crate::picker::PickerMode::New => GLYPH_MODE_NEW,
+        crate::picker::PickerMode::Edit { .. } => GLYPH_MODE_EDIT,
     };
-    Span::styled(icon, picker_mode_style())
+    Span::styled(format!("{icon} "), picker_mode_style())
 }
 
 /// Style for the group `●`/`○` marker (selected = selection_frame, else dim).
@@ -244,14 +277,45 @@ pub fn chip_group_border_style(selected: bool) -> Style {
     }
 }
 
-/// Body style for a filter pill (text + fg/bg fill). Drawn as a single-row
-/// filled span inside the strip's rounded region border (per-chip `Block`
-/// chrome needs 3 rows and doubles strip height on typical cell aspect ratios).
-pub fn chip_pill_style(field: ChipField, value: &str, disabled: bool) -> (String, Style) {
-    let text = format!(" {value} ");
+/// Build a filter pill as a single space-filled span (field-colored bg) with
+/// the field icon prefixing the value. No powerline ends (Q3: weakened chrome).
+/// `disabled` collapses to a single dim span (same shape, dim style).
+pub fn chip_pill_spans(field: ChipField, value: &str, disabled: bool) -> Vec<Span<'static>> {
+    let icon = field_icon(field);
     if disabled {
-        return (text, disabled_chip_style());
+        let text = format!(" {icon} {value} ");
+        return vec![Span::styled(text, disabled_chip_style())];
     }
+    let body_text = format!(" {icon} {value} ");
+    let body_style = match field {
+        ChipField::Level => {
+            let level = match value.chars().next().unwrap_or('I').to_ascii_uppercase() {
+                'V' => Level::V,
+                'D' => Level::D,
+                'I' => Level::I,
+                'W' => Level::W,
+                'E' => Level::E,
+                'F' => Level::F,
+                _ => Level::I,
+            };
+            level_badge_style(level)
+        }
+        other => Style::default()
+            .fg(Color::Black)
+            .bg(field_color(other))
+            .add_modifier(Modifier::BOLD),
+    };
+    vec![Span::styled(body_text, body_style)]
+}
+
+/// Backward-compatible single-span pill (tests / callers that don't need
+/// powerline ends). Returns body text + style only.
+pub fn chip_pill_style(field: ChipField, value: &str, disabled: bool) -> (String, Style) {
+    if disabled {
+        return (format!(" {value} "), disabled_chip_style());
+    }
+    let icon = field_icon(field);
+    let text = format!(" {icon} {value} ");
     let style = match field {
         ChipField::Level => {
             let level = match value.chars().next().unwrap_or('I').to_ascii_uppercase() {
@@ -273,14 +337,62 @@ pub fn chip_pill_style(field: ChipField, value: &str, disabled: bool) -> (String
     (text, style)
 }
 
-/// Exclude pill (H9): same fill as [`chip_pill_style`] but with a `!` prefix.
+/// Exclude pill (H9): space-filled pill with a `!` prefix before the field icon.
+pub fn exclude_pill_spans(field: ChipField, value: &str, disabled: bool) -> Vec<Span<'static>> {
+    let icon = field_icon(field);
+    if disabled {
+        let text = format!(" !{icon} {value} ");
+        return vec![Span::styled(text, disabled_chip_style())];
+    }
+    let body_text = format!(" !{icon} {value} ");
+    let body_style = match field {
+        ChipField::Level => {
+            let level = match value.chars().next().unwrap_or('I').to_ascii_uppercase() {
+                'V' => Level::V,
+                'D' => Level::D,
+                'I' => Level::I,
+                'W' => Level::W,
+                'E' => Level::E,
+                'F' => Level::F,
+                _ => Level::I,
+            };
+            level_badge_style(level)
+        }
+        other => Style::default()
+            .fg(Color::Black)
+            .bg(field_color(other))
+            .add_modifier(Modifier::BOLD),
+    };
+    vec![Span::styled(body_text, body_style)]
+}
+
+/// Backward-compatible single-span exclude pill.
 pub fn exclude_pill_style(field: ChipField, value: &str, disabled: bool) -> (String, Style) {
     let (inner, style) = chip_pill_style(field, value, disabled);
     (format!("!{inner}"), style)
 }
 
-/// Body style for a search pill — same single-row fill model as [`chip_pill_style`].
+/// Search/highlight pill as a single space-filled span.
 /// `active_global` underlines the globally active (n/N) search chip.
+pub fn highlight_pill_spans(
+    pattern: &str,
+    color_idx: usize,
+    disabled: bool,
+    active_global: bool,
+) -> Vec<Span<'static>> {
+    if disabled {
+        let text = format!(" {pattern} ");
+        return vec![Span::styled(text, disabled_chip_style())];
+    }
+    let style = if active_global {
+        highlight_style_active(color_idx)
+    } else {
+        highlight_style(color_idx)
+    };
+    vec![Span::styled(format!(" {pattern} "), style)]
+}
+
+/// Backward-compatible single-span highlight pill.
 pub fn highlight_pill_style(
     pattern: &str,
     color_idx: usize,
@@ -310,12 +422,14 @@ pub fn caret_bar() -> Span<'static> {
     )
 }
 
-/// Border color for a bordered region: bright accent when it currently has
-/// keyboard focus, dim gray otherwise (terminals have no real alpha
-/// channel, so `DIM` stands in for "reduced opacity").
+/// Border color for a bordered region: dimmed accent when it currently has
+/// keyboard focus (reduced from full-saturation accent per Q3 border-weakening),
+/// dim gray otherwise.
 pub fn border_style(active: bool) -> Style {
     if active {
-        Style::default().fg(accent())
+        Style::default()
+            .fg(accent())
+            .add_modifier(Modifier::DIM)
     } else {
         Style::default()
             .fg(t().border_inactive)
@@ -323,12 +437,25 @@ pub fn border_style(active: bool) -> Style {
     }
 }
 
-/// Border title for a numbered, Tab-cyclable region (Filter/Search/Log/Input):
-/// a digit badge followed by a label, both styled by whether the region is
-/// currently focused.
+/// Glyph for a numbered region, chosen by its Tab-cycle digit.
+fn numbered_glyph(number: u8) -> &'static str {
+    match number {
+        1 => GLYPH_TITLE_FILTER,
+        2 => GLYPH_TITLE_EXCLUDE,
+        3 => GLYPH_TITLE_HIGHLIGHT,
+        4 => GLYPH_TITLE_LOG,
+        5 => GLYPH_TITLE_PICKER,
+        _ => GLYPH_TITLE_PICKER,
+    }
+}
+
+/// Border title for a numbered, Tab-cyclable region (Filter/Exclude/Highlight/Log/Input):
+/// a nerdfont glyph + digit badge + label, styled by whether the region is
+/// currently focused. No reverse-color block (Q3: weakened borders).
 pub fn numbered_title(number: u8, label: &str, active: bool) -> Line<'static> {
+    let glyph = numbered_glyph(number);
     let badge_style = if active {
-        focus_style()
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::DIM)
     };
@@ -338,20 +465,20 @@ pub fn numbered_title(number: u8, label: &str, active: bool) -> Line<'static> {
         Style::default().add_modifier(Modifier::DIM)
     };
     Line::from(vec![
-        Span::styled(format!(" {number} "), badge_style),
+        Span::styled(format!(" {glyph} {number} "), badge_style),
         Span::styled(format!(" {label} "), label_style),
     ])
 }
 
 /// Border title for a region that isn't part of the numbered Tab cycle
-/// (the search box, the field popup).
-pub fn plain_title(label: &str, active: bool) -> Line<'static> {
+/// (the search box, the field popup). Prepends a nerdfont glyph.
+pub fn plain_title(glyph: &str, label: &str, active: bool) -> Line<'static> {
     let label_style = if active {
         Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::DIM)
     };
-    Line::from(Span::styled(format!(" {label} "), label_style))
+    Line::from(Span::styled(format!(" {glyph} {label} "), label_style))
 }
 
 /// Selected-row background in the log list — a quiet, low-contrast gray
@@ -369,15 +496,16 @@ pub fn log_visual_style() -> Style {
     Style::default().bg(t().log_visual_bg)
 }
 
-/// Reverse badge used for status hints (FOLLOWING / LOCK / VISUAL / flash toasts).
-pub fn status_badge(label: &str, bg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {label} "),
-        Style::default()
-            .fg(Color::Black)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
-    )
+/// Status badge: nerdfont glyph + label in a semantic foreground color.
+/// No reverse-color block (Q3: weakened chrome). Pass `""` for `glyph` when
+/// no icon is appropriate (pending-state shorthand, flash toasts).
+pub fn status_badge(glyph: &str, label: &str, fg: Color) -> Span<'static> {
+    let text = if glyph.is_empty() {
+        format!(" {label} ")
+    } else {
+        format!(" {glyph} {label} ")
+    };
+    Span::styled(text, Style::default().fg(fg).add_modifier(Modifier::BOLD))
 }
 
 /// Dim trailing keybinding hint on the status bar (H6 context help).
@@ -635,13 +763,13 @@ mod tests {
     fn test_candidate_match_and_prefix_tokens() {
         install(UiTokens::builtin());
         assert_eq!(candidate_match_style(false).fg, Some(Color::Cyan));
-        assert_eq!(candidate_prefix(), "▌ ");
+        assert_eq!(candidate_prefix(), format!("{} ", GLYPH_CARET_SEL));
         use crate::picker::PickerMode;
-        assert_eq!(picker_mode_prefix(&PickerMode::Manage).content, "> ");
-        assert_eq!(picker_mode_prefix(&PickerMode::New).content, "＋ ");
+        assert_eq!(picker_mode_prefix(&PickerMode::Manage).content, format!("{} ", GLYPH_MODE_MANAGE));
+        assert_eq!(picker_mode_prefix(&PickerMode::New).content, format!("{} ", GLYPH_MODE_NEW));
         assert_eq!(
             picker_mode_prefix(&PickerMode::Edit { index: 0 }).content,
-            "✎ "
+            format!("{} ", GLYPH_MODE_EDIT)
         );
         let soft = picker_mode_style();
         assert_eq!(soft.fg, Some(Color::Cyan));
@@ -666,7 +794,7 @@ mod tests {
     fn test_chip_pill_style_fill() {
         install(UiTokens::builtin());
         let (text, body) = chip_pill_style(ChipField::Tag, "MyTag", false);
-        assert_eq!(text, " MyTag ");
+        assert_eq!(text, format!(" {} MyTag ", GLYPH_FIELD_TAG));
         assert_eq!(body.bg, Some(accent()));
     }
 

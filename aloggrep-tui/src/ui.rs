@@ -39,6 +39,17 @@ fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
         .title(title)
 }
 
+/// Top/bottom-only divider block (Q3 path B: weakened borders). Uses
+/// box-drawing `─` (U+2500) for horizontal rules; no left/right borders,
+/// giving the inner content 2 extra columns vs `rounded_block`.
+fn divider_block(title: Line<'static>, active: bool) -> Block<'static> {
+    Block::new()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_type(BorderType::Plain)
+        .border_style(theme::border_style(active))
+        .title(title)
+}
+
 /// Unified width for centered Input / Search modals.
 pub fn modal_width(frame_width: u16) -> u16 {
     frame_width
@@ -153,10 +164,11 @@ pub fn picker_left_stack(left: Rect) -> (Rect, Rect) {
     (candidates, search)
 }
 
-/// Clear + rounded active shell with a plain title. Returns the inner content rect.
+/// Clear + top/bottom divider shell with a glyph-prefixed plain title.
+/// Returns the inner content rect (2 cols wider than the old rounded shell).
 pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
     frame.render_widget(Clear, area);
-    let block = rounded_block(theme::plain_title(title, true), true);
+    let block = divider_block(theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
@@ -242,8 +254,7 @@ pub fn render_candidate_list(
     frame: &mut Frame,
     area: Rect,
 ) {
-    frame.render_widget(Clear, area);
-    let block = rounded_block(theme::plain_title(title, true), true);
+    let block = divider_block(theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true), true);
     if labels.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -810,7 +821,11 @@ pub fn render_bookmark_strip(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn group_dot_span(enabled: bool, selected: bool) -> Span<'static> {
-    let dot = if enabled { '●' } else { '○' };
+    let dot = if enabled {
+        theme::GLYPH_GROUP_ON
+    } else {
+        theme::GLYPH_GROUP_OFF
+    };
     // Selection uses the same Magenta accent as region selection frames;
     // kept to one cell so the strip can stay a single content row tall.
     let style = if selected {
@@ -838,8 +853,8 @@ fn filter_group_spans(g: &Group, selected: bool) -> Vec<Span<'static>> {
             if i > 0 {
                 spans.push(Span::raw(" ".repeat(PILL_GAP as usize)));
             }
-            let (text, body) = theme::chip_pill_style(chip.field, &chip.value, !g.enabled);
-            spans.push(Span::styled(text, body));
+            let pill = theme::chip_pill_spans(chip.field, &chip.value, !g.enabled);
+            spans.extend(pill);
         }
     }
     spans
@@ -853,8 +868,8 @@ fn highlight_group_spans(
 ) -> Vec<Span<'static>> {
     let mut spans = vec![group_dot_span(g.enabled, selected)];
     spans.push(Span::raw(" ".repeat(DOT_PILL_GAP as usize)));
-    let (text, body) = theme::highlight_pill_style(&g.pattern, color_idx, !g.enabled, active_global);
-    spans.push(Span::styled(text, body));
+    let pill = theme::highlight_pill_spans(&g.pattern, color_idx, !g.enabled, active_global);
+    spans.extend(pill);
     spans
 }
 
@@ -864,8 +879,8 @@ fn exclude_entry_spans(
 ) -> Vec<Span<'static>> {
     let mut spans = vec![group_dot_span(e.enabled, selected)];
     spans.push(Span::raw(" ".repeat(DOT_PILL_GAP as usize)));
-    let (text, body) = theme::exclude_pill_style(e.chip.field, &e.chip.value, !e.enabled);
-    spans.push(Span::styled(text, body));
+    let pill = theme::exclude_pill_spans(e.chip.field, &e.chip.value, !e.enabled);
+    spans.extend(pill);
     spans
 }
 
@@ -1038,7 +1053,7 @@ pub fn render_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
     let active = app.focus == Focus::ChipStrip;
-    let block = rounded_block(theme::numbered_title(1, "Filter", active), active);
+    let block = divider_block(theme::numbered_title(1, "Filter", active), active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(filter_strip_lines(app, inner.width)), inner);
@@ -1049,7 +1064,7 @@ pub fn render_exclude_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
     let active = app.focus == Focus::ExcludeStrip;
-    let block = rounded_block(theme::numbered_title(2, "Exclude", active), active);
+    let block = divider_block(theme::numbered_title(2, "Exclude", active), active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(exclude_strip_lines(app, inner.width)), inner);
@@ -1060,7 +1075,7 @@ pub fn render_highlight_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
     let active = app.focus == Focus::HighlightStrip;
-    let block = rounded_block(theme::numbered_title(3, "Highlight", active), active);
+    let block = divider_block(theme::numbered_title(3, "Highlight", active), active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(highlight_strip_lines(app, inner.width)), inner);
@@ -1075,12 +1090,12 @@ fn committed_chip_spans(
         if i > 0 {
             spans.push(Span::raw(" ".repeat(PILL_GAP as usize)));
         }
-        let (text, body) = if exclude_mode {
-            theme::exclude_pill_style(chip.field, &chip.value, false)
+        let pill = if exclude_mode {
+            theme::exclude_pill_spans(chip.field, &chip.value, false)
         } else {
-            theme::chip_pill_style(chip.field, &chip.value, false)
+            theme::chip_pill_spans(chip.field, &chip.value, false)
         };
-        spans.push(Span::styled(text, body));
+        spans.extend(pill);
     }
     spans
 }
@@ -1093,7 +1108,7 @@ fn input_content_spans(input: &InputBox, show_caret: bool) -> Vec<Span<'static>>
     }
     if let Some(field) = input.draft_field {
         spans.push(Span::styled(
-            format!("{}:", field.keyword()),
+            format!("{} {}:", theme::field_icon(field), field.keyword()),
             Style::reset().fg(theme::field_color(field)),
         ));
     }
@@ -1126,7 +1141,7 @@ pub fn render_input_box(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let block = rounded_block(theme::numbered_title(5, "Input", focused), focused);
+    let block = divider_block(theme::numbered_title(5, "Input", focused), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
@@ -1386,7 +1401,7 @@ pub fn render_picker_search_line(
     let mut prompt_spans = vec![theme::picker_mode_prefix(mode)];
     if let Some(field) = draft_field {
         prompt_spans.push(Span::styled(
-            format!("{}:", field.keyword()),
+            format!("{} {}:", theme::field_icon(field), field.keyword()),
             Style::reset().fg(theme::field_color(field)),
         ));
     }
@@ -1594,43 +1609,51 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     }
     if app.following {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("FOLLOWING", theme::success()));
+        spans.push(theme::status_badge(
+            theme::GLYPH_FOLLOWING,
+            "FOLLOWING",
+            theme::success(),
+        ));
     }
     if let Some(lock) = app.lock_badge_label() {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge(&lock, theme::lock()));
+        spans.push(theme::status_badge(theme::GLYPH_LOCK, &lock, theme::lock()));
     }
     if app.visual_anchor.is_some() {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("VISUAL", theme::accent()));
+        spans.push(theme::status_badge(
+            theme::GLYPH_VISUAL,
+            "VISUAL",
+            theme::accent(),
+        ));
     } else if app.pending_chip {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("c…", theme::warning()));
+        spans.push(theme::status_badge("", "c…", theme::warning()));
     } else if app.pending_exclude {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("C…", theme::warning()));
+        spans.push(theme::status_badge("", "C…", theme::warning()));
     } else if app.pending_lock {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("f…", theme::warning()));
+        spans.push(theme::status_badge("", "f…", theme::warning()));
     } else if app.pending_m {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("m…", theme::warning()));
+        spans.push(theme::status_badge("", "m…", theme::warning()));
     } else if app.pending_yank {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("y…", theme::warning()));
+        spans.push(theme::status_badge("", "y…", theme::warning()));
     } else if app.pending_d {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("d…", theme::warning()));
+        spans.push(theme::status_badge("", "d…", theme::warning()));
     }
     // Timed flash toast (YANKED / NO ERROR / …); pending badges above are separate.
     if let Some(msg) = &app.status_msg {
         spans.push(Span::raw(" "));
-        let bg = if msg.starts_with("YANK FAILED") {
+        let fg = if msg.starts_with("YANK FAILED") {
             theme::warning()
         } else {
             theme::accent()
         };
-        spans.push(theme::status_badge(msg, bg));
+        spans.push(theme::status_badge("", msg, fg));
     }
     // Trailing context help (H6): badges keep priority; hint truncates or hides.
     let left_width: usize = spans.iter().map(span_width).sum();
@@ -2131,18 +2154,16 @@ mod tests {
             .unwrap();
         let after = cell_text(terminal.backend().buffer());
 
-        // Selection only restyles the ● — glyph layout stays put.
+        // Selection only restyles the group dot — glyph layout stays put.
         assert!(before.contains('A') && after.contains('A'));
         assert!(before.contains('B') && after.contains('B'));
         assert_eq!(
             before.chars().filter(|c| *c == 'A' || *c == 'B').count(),
             after.chars().filter(|c| *c == 'A' || *c == 'B').count()
         );
-        let corners = before
-            .chars()
-            .filter(|c| matches!(*c, '╭' | '╮' | '╰' | '╯'))
-            .count();
-        assert_eq!(corners, 4, "only strip outer rounded chrome, got {corners}");
+        // divider_block draws top + bottom horizontal rules (─), no rounded corners.
+        let rules = before.chars().filter(|c| *c == '─').count();
+        assert!(rules >= 2, "strip should have top+bottom ─ rules, got {rules}");
     }
 
     #[test]
