@@ -174,3 +174,37 @@ Committed mmap FileStore (RowStore, bg filter, Subset). Grilled All-scan A1 (Vis
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: File async Vis scans
+
+**Date**: 2026-07-24
+**Task**: File async Vis scans
+**Package**: aloggrep-core
+**Branch**: `master`
+
+### Summary
+
+Background Vis+Inc highlight hits, filter UI-parse reinforcement, severe prefetch, LogList L1+T+Free loading; archived tui-file-async-scans.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2dffcda` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

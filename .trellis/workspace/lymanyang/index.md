@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-07-24
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~176 | Active |
+| `journal-1.md` | ~210 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-07-24 | File async Vis scans | `2dffcda` | `master` |
 | 5 | 2026-07-24 | mmap FileStore land + All-scan grill | `0dca14d` | `master` |
 | 4 | 2026-07-24 | HDC Visible::All + drop-oldest ring | `95a701f` | `master` |
 | 3 | 2026-07-24 | Grill split hdc/mmap Trellis plans | - | `master` |
