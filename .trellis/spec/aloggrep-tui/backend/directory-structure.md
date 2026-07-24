@@ -17,7 +17,7 @@ pipeline, or input dispatch. Cross-module state flows through `App`.
 ```
 aloggrep-tui/src/
 ├── main.rs         # CLI entry, terminal lifecycle, event loop, key dispatch
-├── app.rs          # App state machine: rows/visible/groups/time_bound/bookmarks/picker/focus
+├── app.rs          # App state machine: rows/Visible::All/groups/time_bound/bookmarks/picker/focus
 ├── model.rs        # EntryRow: owned line model, from_line()/as_log_entry()
 ├── filter_model.rs # Group/GroupList + TimeBound (global window matching)
 ├── time_panel.rs   # `-f` ts panel: date candidates from rows + HH:MM:SS clamp
@@ -31,7 +31,7 @@ aloggrep-tui/src/
 ├── export.rs       # H10 yc CLI export (filters + lock + time_bound)
 ├── config.rs       # theme.toml/config.toml loading
 ├── preview.rs      # H1 preview sampling
-└── ingest.rs       # spawn_file_ingest / spawn_hdc_ingest
+└── ingest.rs       # spawn_file_ingest (channel) / spawn_hdc_ingest (DropOldestRing) / IngestHandle
 ```
 
 ### Global time window module

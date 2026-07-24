@@ -680,7 +680,8 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
         } else {
             s * (n - 1) / (samples - 1)
         };
-        let row = &app.view_source()[app.visible[i]];
+        let row_idx = app.source_idx_for_visible(i).expect("i < visible_len");
+        let row = &app.view_source()[row_idx];
         let r = minimap_row_for_index(i, n, h);
         if app.highlight_groups.any_match(&row.tag, &row.msg) && cells[r] < MinimapMark::Highlight {
             cells[r] = MinimapMark::Highlight;
@@ -695,11 +696,11 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
     // below Bookmark. Builds a row_id → visible index map once per frame.
     if !app.bookmarks.items.is_empty() {
         let source = app.view_source();
-        let row_id_to_vis: std::collections::HashMap<u64, usize> = app
-            .visible
-            .iter()
-            .enumerate()
-            .map(|(i, &src_idx)| (source[src_idx].row_id, i))
+        let row_id_to_vis: std::collections::HashMap<u64, usize> = (0..n)
+            .filter_map(|i| {
+                let src_idx = app.source_idx_for_visible(i)?;
+                Some((source[src_idx].row_id, i))
+            })
             .collect();
         for bm in &app.bookmarks.items {
             if !app.bookmark_alive(bm.row_id) {
@@ -829,11 +830,11 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = if n == 0 {
         Vec::new()
     } else {
-        app.visible[window_start..window_end]
-            .iter()
-            .enumerate()
-            .map(|(i, &row_idx)| {
-                let abs_i = window_start + i;
+        (window_start..window_end)
+            .map(|abs_i| {
+                let row_idx = app
+                    .source_idx_for_visible(abs_i)
+                    .expect("abs_i < visible_len");
                 let row = &source[row_idx];
                 let mut item = ListItem::new(render_entry_lines(
                     row,

@@ -1,5 +1,5 @@
 use std::collections::{HashSet, VecDeque};
-use std::sync::{mpsc::Receiver, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use aloggrep::crash::CrashDetector;
@@ -16,6 +16,53 @@ use crate::vocab::Vocab;
 /// matching rows are retained in `App::matched` independently of `rows`'
 /// rolling eviction; only this cap reclaims them.
 const MATCHED_HARD_CAP: usize = 1_000_000;
+
+/// Soft per-frame drain budget: protect the UI when the ingest ring was filled
+/// by a burst. Remaining rows stay in the ring for subsequent frames.
+const DRAIN_BUDGET_PER_FRAME: usize = 4096;
+
+/// Visible-row index set into [`App::view_source`].
+///
+/// Stream path (`--hdc` and owned `VecDeque` ingest) always uses [`Visible::All`]:
+/// an identity mapping `0..len` — never a materialised `Vec<usize>`. Eviction is
+/// O(1) (adjust `len` / cursor / offsets) instead of shifting every index.
+///
+/// `Subset` is reserved for the file/mmap sparse-index task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visible {
+    /// Identity: visible slot `i` maps to `view_source()[i]`.
+    All { len: usize },
+}
+
+impl Visible {
+    pub fn len(self) -> usize {
+        match self {
+            Visible::All { len } => len,
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn clear(&mut self) {
+        *self = Visible::All { len: 0 };
+    }
+
+    /// Source index in `view_source` for visible slot `vis_i`.
+    pub fn source_idx(self, vis_i: usize) -> Option<usize> {
+        match self {
+            Visible::All { len } if vis_i < len => Some(vis_i),
+            Visible::All { .. } => None,
+        }
+    }
+}
+
+impl Default for Visible {
+    fn default() -> Self {
+        Visible::All { len: 0 }
+    }
+}
 
 fn crash_detector() -> &'static CrashDetector {
     static DETECTOR: OnceLock<CrashDetector> = OnceLock::new();
@@ -145,7 +192,7 @@ pub struct App {
     /// `rows` overflow — only by reaching this cap. Defaults to
     /// [`MATCHED_HARD_CAP`]; tests override.
     pub matched_cap: usize,
-    pub visible: Vec<usize>,
+    pub visible: Visible,
     pub groups: GroupList,
     pub highlight_groups: HighlightGroupList,
     pub highlight_box: HighlightBox,
@@ -229,7 +276,7 @@ impl App {
             rows: VecDeque::new(),
             matched: VecDeque::new(),
             matched_cap: MATCHED_HARD_CAP,
-            visible: Vec::new(),
+            visible: Visible::default(),
             groups: GroupList::default(),
             highlight_groups: HighlightGroupList::default(),
             highlight_box: HighlightBox::default(),
@@ -403,6 +450,16 @@ impl App {
         }
     }
 
+    /// Number of currently visible rows (`Visible::All.len`).
+    pub fn visible_len(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Source index in [`Self::view_source`] for visible slot `vis_i`.
+    pub fn source_idx_for_visible(&self, vis_i: usize) -> Option<usize> {
+        self.visible.source_idx(vis_i)
+    }
+
     /// Whether `row_id` is still present in either buffer (bookmark liveness).
     /// A row retained in `matched` after being evicted from `rows` is alive.
     fn row_alive(&self, row_id: u64) -> bool {
@@ -410,18 +467,24 @@ impl App {
             || self.rows.iter().any(|r| r.row_id == row_id)
     }
 
-    /// Drain everything currently available on the channel without blocking.
+    /// Drain pending rows from an ingest source without blocking.
     /// Each new row is checked against the current filter in O(1) and, if
-    /// visible, appended — no full rescan (see design doc "增量过滤").
-    /// Drain all pending rows from the ingest channel without blocking.
-    /// Sets `self.ingest_done = true` when the sender has been dropped (P4).
-    pub fn drain(&mut self, rx: &Receiver<EntryRow>) {
-        use std::sync::mpsc::TryRecvError;
+    /// visible, appended — no full rescan. Stops at empty, disconnect, or
+    /// [`DRAIN_BUDGET_PER_FRAME`]. Sets `ingest_done` when the producer has
+    /// finished and the queue is empty (P4).
+    pub fn drain(&mut self, ingest: &impl crate::ingest::TryRecvRow) {
+        let mut drained = 0usize;
         loop {
-            match rx.try_recv() {
-                Ok(row) => self.push_row(row),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
+            if drained >= DRAIN_BUDGET_PER_FRAME {
+                break;
+            }
+            match ingest.try_recv_row() {
+                Ok(row) => {
+                    self.push_row(row);
+                    drained += 1;
+                }
+                Err(crate::ingest::TryRecvKind::Empty) => break,
+                Err(crate::ingest::TryRecvKind::Disconnected) => {
                     self.ingest_done = true;
                     break;
                 }
@@ -440,27 +503,34 @@ impl App {
         let matches = active && self.row_passes_filters(&row);
 
         // `rows` rolling buffer. When a filter is active, `visible` tracks
-        // `matched`, so a `rows` eviction must NOT shift `visible`.
+        // `matched`, so a `rows` eviction must NOT adjust visible coords.
         if self.rows.len() >= self.max_lines {
-            self.rows.pop_front();
-            if !active {
-                self.shift_visible_after_front_evict(self.visible.first() == Some(&0));
+            // Only adjust after a real eviction (empty + max_lines==0 is a no-op pop).
+            if self.rows.pop_front().is_some() && !active {
+                // Identity visible: pop+push keeps `All.len` unchanged; O(1)
+                // shift cursor/viewport if the evicted front was on-screen.
+                self.adjust_after_identity_front_evict();
             }
         }
 
         if matches {
             // Retain in `matched` (clone into `rows`; original goes to `matched`).
             if self.matched.len() >= self.matched_cap {
-                self.matched.pop_front();
-                self.shift_visible_after_front_evict(self.visible.first() == Some(&0));
+                if self.matched.pop_front().is_some() {
+                    self.adjust_after_identity_front_evict();
+                }
             }
             self.rows.push_back(row.clone());
             self.matched.push_back(row);
-            self.visible.push(self.matched.len() - 1);
+            self.visible = Visible::All {
+                len: self.matched.len(),
+            };
         } else {
             self.rows.push_back(row);
             if !active {
-                self.visible.push(self.rows.len() - 1);
+                self.visible = Visible::All {
+                    len: self.rows.len(),
+                };
             }
         }
         self.follow_tick();
@@ -468,33 +538,27 @@ impl App {
         self.match_stats_stale = true;
     }
 
-    /// Update `visible`/`cursor`/`list_offset`/`visual_anchor` after the front
-    /// row of the active source buffer was evicted. `evicted_was_visible`
-    /// indicates that row was `visible[0]` (its source index was 0).
-    fn shift_visible_after_front_evict(&mut self, evicted_was_visible: bool) {
-        if evicted_was_visible {
-            self.visible.remove(0);
-            // `list_offset` is an index into `visible`; dropping the front item
-            // must shift the viewport with the content, otherwise the list
-            // appears to scroll up even when no new visible rows arrive.
-            if self.list_offset > 0 {
-                self.list_offset -= 1;
-            }
+    /// O(1) cursor/viewport adjustment after the front row of the identity
+    /// `view_source` was evicted and a replacement is about to be (or was)
+    /// appended — `Visible::All.len` is unchanged across the pop+push pair.
+    fn adjust_after_identity_front_evict(&mut self) {
+        // No visible slots ⇒ nothing was on-screen at source index 0.
+        if self.visible.is_empty() {
+            return;
         }
-        for i in self.visible.iter_mut() {
-            *i -= 1;
+        // Identity: source index 0 was always visible slot 0 when non-empty.
+        if self.list_offset > 0 {
+            self.list_offset -= 1;
         }
-        if evicted_was_visible && self.cursor > 0 {
+        if self.cursor > 0 {
             self.cursor -= 1;
         }
         // `visual_anchor` shares `cursor`'s coordinate space (index into
-        // `visible`). Evicting the oldest visible row shifts that space.
-        if evicted_was_visible {
-            match self.visual_anchor {
-                Some(0) => self.visual_anchor = None,
-                Some(a) => self.visual_anchor = Some(a - 1),
-                None => {}
-            }
+        // visible slots). Evicting the oldest visible row shifts that space.
+        match self.visual_anchor {
+            Some(0) => self.visual_anchor = None,
+            Some(a) => self.visual_anchor = Some(a - 1),
+            None => {}
         }
     }
 
@@ -510,10 +574,14 @@ impl App {
                     self.matched.push_back(row.clone());
                 }
             }
-            self.visible = (0..self.matched.len()).collect();
+            self.visible = Visible::All {
+                len: self.matched.len(),
+            };
         } else {
             self.matched.clear();
-            self.visible = (0..self.rows.len()).collect();
+            self.visible = Visible::All {
+                len: self.rows.len(),
+            };
         }
         if self.following {
             self.jump_bottom();
@@ -590,7 +658,8 @@ impl App {
 
     pub fn visible_rows(&self) -> impl Iterator<Item = &EntryRow> {
         let source = self.view_source();
-        self.visible.iter().map(move |&i| &source[i])
+        let len = self.visible.len();
+        (0..len).map(move |i| &source[i])
     }
 
     pub fn cycle_focus_forward(&mut self) {
@@ -772,7 +841,7 @@ impl App {
     }
 
     pub fn current_row(&self) -> Option<&EntryRow> {
-        let &i = self.visible.get(self.cursor)?;
+        let i = self.source_idx_for_visible(self.cursor)?;
         Some(&self.view_source()[i])
     }
 
@@ -871,11 +940,12 @@ impl App {
                 JumpResult::Evicted
             };
         };
-        let Some(vis) = self.visible.iter().position(|&i| i == row_idx) else {
+        // Identity visible: source index == visible slot when in range.
+        if self.source_idx_for_visible(row_idx).is_none() {
             return JumpResult::Filtered;
-        };
+        }
         self.following = false;
-        self.cursor = vis;
+        self.cursor = row_idx;
         self.match_stats_stale = true;
         JumpResult::Ok
     }
@@ -1291,7 +1361,8 @@ impl App {
         let source = self.view_source();
         let mut parts = Vec::with_capacity(hi - lo + 1);
         for vi in lo..=hi {
-            let row = &source[self.visible[vi]];
+            let row_idx = self.source_idx_for_visible(vi)?;
+            let row = &source[row_idx];
             parts.push(Self::field_text(row, field));
         }
         Some(parts.join("\n"))
@@ -1312,7 +1383,7 @@ impl App {
         let start = self.cursor as isize;
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            let row_idx = self.visible[idx];
+            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
             if self.view_source()[row_idx].severe {
                 self.following = false;
                 self.cursor = idx;
@@ -1345,7 +1416,7 @@ impl App {
         let start = self.cursor as isize;
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            let row_idx = self.visible[idx];
+            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
             let row = &self.view_source()[row_idx];
             let hit = self.highlight_groups.groups[active_idx].matches_row(&row.tag, &row.msg);
             if hit {
@@ -1368,7 +1439,7 @@ impl App {
             return false;
         }
         for idx in 0..self.visible.len() {
-            let row_idx = self.visible[idx];
+            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
             let row = &self.view_source()[row_idx];
             if group.matches_row(&row.tag, &row.msg) {
                 self.following = false;
@@ -1635,7 +1706,8 @@ impl App {
         let mut total = 0usize;
         let mut current = None;
         let source = self.view_source();
-        for (idx, &row_idx) in self.visible.iter().enumerate() {
+        for idx in 0..self.visible.len() {
+            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
             let row = &source[row_idx];
             if group.matches_row(&row.tag, &row.msg) {
                 total += 1;
@@ -1704,7 +1776,10 @@ mod tests {
         drop(tx);
         app.drain(&rx);
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.view_source()[app.visible[0]].tag, "A");
+        assert_eq!(
+            app.view_source()[app.source_idx_for_visible(0).unwrap()].tag,
+            "A"
+        );
         assert_eq!(
             app.time_badge_label().as_deref(),
             Some("TIME 10:00:00…10:00:00")
@@ -1771,7 +1846,9 @@ mod tests {
         app.drain(&rx);
         assert_eq!(app.visible.len(), 1);
         assert_eq!(
-            app.view_source()[app.visible[0]].as_log_entry().time_hms(),
+            app.view_source()[app.source_idx_for_visible(0).unwrap()]
+                .as_log_entry()
+                .time_hms(),
             Some("11:00:00")
         );
 
@@ -1782,7 +1859,9 @@ mod tests {
         assert!(app.filter_active());
         assert_eq!(app.visible.len(), 1);
         assert_eq!(
-            app.view_source()[app.visible[0]].as_log_entry().time_hms(),
+            app.view_source()[app.source_idx_for_visible(0).unwrap()]
+                .as_log_entry()
+                .time_hms(),
             Some("11:00:00")
         );
     }
@@ -1799,7 +1878,92 @@ mod tests {
         assert_eq!(app.rows.len(), 2);
         assert_eq!(app.rows[0].tag, "B");
         assert_eq!(app.rows[1].tag, "C");
-        assert_eq!(app.visible, vec![0, 1]);
+        assert_eq!(app.visible, Visible::All { len: 2 });
+    }
+
+    #[test]
+    fn test_visible_all_identity_under_filter_active() {
+        let mut app = App::new(100);
+        app.groups = GroupList {
+            groups: vec![filter_group(
+                "keep-A",
+                Some(Expr::parse("tag~A", false).unwrap()),
+            )],
+            excludes: Vec::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        tx.send(row("A")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.matched.len(), 2);
+        assert_eq!(app.visible, Visible::All { len: 2 });
+        assert_eq!(app.source_idx_for_visible(0), Some(0));
+        assert_eq!(app.source_idx_for_visible(1), Some(1));
+        assert_eq!(app.source_idx_for_visible(2), None);
+    }
+
+    #[test]
+    fn test_drain_ring_applies_push_row() {
+        use crate::ingest::DropOldestRing;
+        let mut app = App::new(100);
+        let ring = DropOldestRing::new(8);
+        ring.push(row("A"));
+        ring.push(row("B"));
+        ring.mark_disconnected();
+        app.drain(&ring);
+        assert_eq!(app.visible_len(), 2);
+        assert!(app.ingest_done);
+        assert_eq!(app.rows[0].tag, "A");
+        assert_eq!(app.rows[1].tag, "B");
+    }
+
+    #[test]
+    fn test_drain_budget_leaves_remainder_and_defers_ingest_done() {
+        use crate::ingest::DropOldestRing;
+        let mut app = App::new(DRAIN_BUDGET_PER_FRAME + 8);
+        let ring = DropOldestRing::new(DRAIN_BUDGET_PER_FRAME + 4);
+        for i in 0..(DRAIN_BUDGET_PER_FRAME + 3) {
+            ring.push(row(&format!("T{i}")));
+        }
+        ring.mark_disconnected();
+        app.drain(&ring);
+        assert_eq!(app.rows.len(), DRAIN_BUDGET_PER_FRAME);
+        assert!(
+            !app.ingest_done,
+            "budget stop must not mark done while rows remain"
+        );
+        assert_eq!(ring.len(), 3);
+        app.drain(&ring);
+        assert_eq!(app.rows.len(), DRAIN_BUDGET_PER_FRAME + 3);
+        assert!(app.ingest_done);
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn test_inactive_front_evict_decrements_list_offset_o1() {
+        let mut app = App::new(2);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.list_offset = 1;
+        app.cursor = 1;
+        assert_eq!(app.visible, Visible::All { len: 2 });
+
+        let (tx2, rx2) = mpsc::channel();
+        tx2.send(row("C")).unwrap(); // rows at cap → pop A, O(1) adjust
+        drop(tx2);
+        app.drain(&rx2);
+
+        assert_eq!(app.rows[0].tag, "B");
+        assert_eq!(app.rows[1].tag, "C");
+        assert_eq!(app.visible, Visible::All { len: 2 });
+        assert_eq!(app.list_offset, 0);
+        assert_eq!(app.cursor, 0);
     }
 
     #[test]
@@ -1944,7 +2108,7 @@ mod tests {
         tx.send(row("X2")).unwrap();
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.visible, vec![0, 1]);
+        assert_eq!(app.visible, Visible::All { len: 2 });
         app.cursor = 1; // pointing at X2
         app.following = false;
         let selected_tag_before = app.current_row().unwrap().tag.clone();
@@ -1986,7 +2150,7 @@ mod tests {
         assert_eq!(app.rows[1].tag, "Y");
         assert_eq!(app.matched.len(), 1);
         assert_eq!(app.matched[0].tag, "A");
-        assert_eq!(app.visible, vec![0]);
+        assert_eq!(app.visible, Visible::All { len: 1 });
         assert_eq!(app.current_row().unwrap().tag, "A");
     }
 
@@ -2016,7 +2180,7 @@ mod tests {
         app.rebuild_visible();
         assert_eq!(app.matched.len(), 1);
         assert_eq!(app.matched[0].tag, "A");
-        assert_eq!(app.visible, vec![0]);
+        assert_eq!(app.visible, Visible::All { len: 1 });
     }
 }
 
@@ -2209,12 +2373,12 @@ mod follow_tests {
         tx.send(row("B")).unwrap(); // doesn't match "a" group, filtered out
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.visible, vec![0]); // only A is visible
+        assert_eq!(app.visible, Visible::All { len: 1 }); // only A is visible
         assert!(app.following);
 
         app.groups.groups.clear(); // simulates deleting the last filter group -> empty GroupList matches everything
         app.rebuild_visible();
-        assert_eq!(app.visible, vec![0, 1]); // both now visible, set grew
+        assert_eq!(app.visible, Visible::All { len: 2 }); // both now visible, set grew
         assert_eq!(app.cursor, 1); // still following: cursor pinned to new bottom (B), not stuck at old position
     }
 }
@@ -2326,7 +2490,7 @@ mod highlight_tests {
         assert!(app.jump_first_match());
         // Must land on newest group ("bar"), not the earlier "foo" at index 0.
         assert_eq!(app.cursor, 1);
-        assert_eq!(app.rows[app.visible[app.cursor]].msg, "bar later");
+        assert_eq!(app.current_row().unwrap().msg, "bar later");
     }
 
     #[test]
@@ -2357,7 +2521,7 @@ mod highlight_tests {
         assert_eq!(app.highlight_match_stats(), Some((None, 1)));
         assert!(app.jump_first_match());
         assert_eq!(app.cursor, 1);
-        assert_eq!(app.rows[app.visible[app.cursor]].tag, "MyTag");
+        assert_eq!(app.current_row().unwrap().tag, "MyTag");
         assert!(app.find_match(1));
         assert_eq!(app.cursor, 1, "only one tag hit; wrap lands on same row");
     }
@@ -2404,9 +2568,9 @@ mod highlight_tests {
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
         // active is "bar" — n must not land on "foo"
         assert!(app.find_match(1));
-        assert_eq!(app.rows[app.visible[app.cursor]].msg, "bar mid");
+        assert_eq!(app.current_row().unwrap().msg, "bar mid");
         assert!(app.find_match(1)); // wrap to same hit
-        assert_eq!(app.rows[app.visible[app.cursor]].msg, "bar mid");
+        assert_eq!(app.current_row().unwrap().msg, "bar mid");
     }
 
     #[test]
@@ -2737,7 +2901,9 @@ mod severe_tests {
         app.drain(&rx);
         app.following = false;
         app.cursor = 0;
-        assert!(is_severe_row(&app.rows[app.visible[1]]));
+        assert!(is_severe_row(
+            &app.view_source()[app.source_idx_for_visible(1).unwrap()]
+        ));
         assert!(app.find_severe(1));
         assert_eq!(app.cursor, 1);
     }

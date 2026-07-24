@@ -205,9 +205,7 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
     let anchor = if app.filter_active() {
         app.rows.len().saturating_sub(1)
     } else {
-        app.visible
-            .get(app.cursor)
-            .copied()
+        app.source_idx_for_visible(app.cursor)
             .unwrap_or(app.rows.len().saturating_sub(1))
     };
 
@@ -239,9 +237,7 @@ pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<P
     let anchor = if app.filter_active() {
         app.rows.len().saturating_sub(1)
     } else {
-        app.visible
-            .get(app.cursor)
-            .copied()
+        app.source_idx_for_visible(app.cursor)
             .unwrap_or(app.rows.len().saturating_sub(1))
     };
 

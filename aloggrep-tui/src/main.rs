@@ -352,13 +352,13 @@ fn main() -> Result<(), String> {
         app.set_flash(hint);
     }
 
-    let (rx, hdc_child) = if cli.hdc {
+    let (ingest, hdc_child) = if cli.hdc {
         let session = aloggrep::hdc::spawn_hilog(cli.device.as_deref())?;
-        let (rx, child) = ingest::spawn_hdc_ingest(session);
-        (rx, Some(child))
+        let (ring, child) = ingest::spawn_hdc_ingest(session);
+        (ingest::IngestHandle::Ring(ring), Some(child))
     } else {
         let rx = ingest::spawn_file_ingest(cli.file.clone().unwrap()).map_err(|e| e.to_string())?;
-        (rx, None)
+        (ingest::IngestHandle::Channel(rx), None)
     };
     let _hdc_child_guard = HdcChildGuard(hdc_child);
 
@@ -392,7 +392,7 @@ fn main() -> Result<(), String> {
 
     let mut input = input::InputBox::default();
     let _ = cli.ignore_case; // retained for CLI compat; TUI always ignore-case
-    let result = run(&mut terminal, &mut app, &mut input, &rx);
+    let result = run(&mut terminal, &mut app, &mut input, &ingest);
 
     let disable_result = disable_raw_mode().map_err(|e| e.to_string());
     let leave_result = execute!(
@@ -430,7 +430,7 @@ fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     input: &mut input::InputBox,
-    rx: &std::sync::mpsc::Receiver<model::EntryRow>,
+    ingest: &ingest::IngestHandle,
 ) -> Result<(), String> {
     use app::Mode;
     use std::time::Instant;
@@ -444,7 +444,7 @@ fn run<B: ratatui::backend::Backend>(
     let mut force_draw = true; // first frame always draws
 
     while !app.should_quit {
-        app.drain(rx);
+        app.drain(ingest);
         app.tick_flash();
         // P1: recompute highlight match stats once per frame (O(n) scan).
         // All mutation paths set match_stats_stale=true; here is the single
@@ -4378,7 +4378,10 @@ mod dispatch_tests {
         handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // submit excludes
         assert_eq!(app.groups.excludes.len(), 1);
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.view_source()[app.visible[0]].tag, "Keep");
+        assert_eq!(
+            app.view_source()[app.source_idx_for_visible(0).unwrap()].tag,
+            "Keep"
+        );
     }
 
     #[test]
@@ -4782,7 +4785,7 @@ mod dispatch_tests {
                 "04-02 10:00:01.000  1  1 I TagB    : second",
             ],
         );
-        let rid0 = app.view_source()[app.visible[0]].row_id;
+        let rid0 = app.view_source()[app.source_idx_for_visible(0).unwrap()].row_id;
         app.cursor = 0;
         app.bookmark_add_current();
         assert!(app.is_bookmark_row(rid0));
