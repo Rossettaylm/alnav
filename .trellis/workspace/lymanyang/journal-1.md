@@ -140,3 +140,37 @@ Implemented and checked Visible::All (O(1) eviction) plus P-after hdc DropOldest
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: mmap FileStore land + All-scan grill
+
+**Date**: 2026-07-24
+**Task**: mmap FileStore land + All-scan grill
+**Package**: aloggrep-core
+**Branch**: `master`
+
+### Summary
+
+Committed mmap FileStore (RowStore, bg filter, Subset). Grilled All-scan A1 (Vis/Inc, LogList L1+T+Free); next: new tui-file-async-scans task.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0dca14d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
