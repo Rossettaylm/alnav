@@ -6,6 +6,7 @@ use crate::model::EntryRow;
 /// One AND-combined filter clause. `label` is precomputed display text; `chips`
 /// drives pill rendering and dedup. Session time window lives on [`crate::app::App`],
 /// not on groups.
+#[derive(Debug, Clone)]
 pub struct Group {
     pub label: String,
     pub chips: Vec<Chip>,
@@ -86,7 +87,7 @@ impl TimeBound {
 }
 
 /// One global exclude chip (H9): positive `expr` is matched as AND NOT.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExcludeEntry {
     pub chip: Chip,
     pub expr: Expr,
@@ -103,7 +104,7 @@ impl ExcludeEntry {
 /// OR'd list of groups, plus global AND-NOT excludes (H9).
 /// Empty / all-disabled includes = no include filtering (everything eligible).
 /// Each enabled exclude independently ANDs a NOT.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GroupList {
     pub groups: Vec<Group>,
     pub excludes: Vec<ExcludeEntry>,

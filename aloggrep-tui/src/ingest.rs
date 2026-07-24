@@ -48,7 +48,10 @@ impl TryRecvRow for Arc<DropOldestRing> {
     }
 }
 
-/// Owned ingest handle for the main event loop (file channel or hdc ring).
+/// Owned ingest handle for the main event loop.
+///
+/// `-f` now uses [`crate::store::FileStore`] (no row channel). `Channel` remains
+/// for unit tests and any transitional callers; `--hdc` uses [`Self::Ring`].
 pub enum IngestHandle {
     Channel(Receiver<EntryRow>),
     Ring(Arc<DropOldestRing>),
@@ -136,17 +139,11 @@ impl DropOldestRing {
     }
 }
 
-/// Open `path` synchronously and, on success, spawn a background thread
-/// that reads it line by line, parses each line into an `EntryRow`, and
-/// sends it on the returned channel. The channel closes (sender dropped)
-/// once the file is fully read — this is the same channel shape `--hdc`
-/// streaming will use in Task 15, just with a finite instead of unbounded
-/// producer.
+/// Legacy line→`EntryRow` channel ingest (unit tests). Production `-f` uses
+/// [`crate::store::FileStore::open`] instead.
 ///
 /// The file is opened before spawning the thread so a missing/unreadable
-/// path surfaces as an immediate `Err` to the caller, rather than as a
-/// `Receiver` that silently closes with zero rows sent (indistinguishable
-/// from "opened fine but had no matching lines").
+/// path surfaces as an immediate `Err` to the caller.
 pub fn spawn_file_ingest(path: String) -> io::Result<Receiver<EntryRow>> {
     let file = File::open(&path)?;
     let (tx, rx) = mpsc::channel();

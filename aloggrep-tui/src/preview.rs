@@ -6,6 +6,7 @@ use crate::filter_model::{ExcludeEntry, Group, GroupList};
 use crate::highlight_model::HighlightGroup;
 use crate::input::{build_group_from_chips, Chip, ChipField, InputBox};
 use crate::model::EntryRow;
+use crate::store::RowStore;
 
 /// Max rows shown in the Preview window.
 pub const PREVIEW_LIMIT: usize = 10;
@@ -108,19 +109,33 @@ fn format_preview_line(row: &EntryRow) -> String {
     }
 }
 
+fn preview_source_len(app: &App) -> usize {
+    match &app.store {
+        RowStore::Stream(s) => s.rows.len(),
+        RowStore::File(f) => f.line_count(),
+    }
+}
+
+fn preview_row_at(app: &App, i: usize) -> Option<EntryRow> {
+    match &app.store {
+        RowStore::Stream(s) => s.rows.get(i).cloned(),
+        RowStore::File(f) => f.row_at(i),
+    }
+}
+
 /// Pick up to `limit` matching row indices near `anchor_row`, scanning at most
 /// `scan_cap` rows total.
 fn sample_near_anchor(
-    rows: &std::collections::VecDeque<EntryRow>,
+    app: &App,
     anchor_row: usize,
     scan_cap: usize,
     limit: usize,
     mut passes: impl FnMut(&EntryRow) -> bool,
 ) -> Vec<usize> {
-    if rows.is_empty() || limit == 0 {
+    let n = preview_source_len(app);
+    if n == 0 || limit == 0 {
         return Vec::new();
     }
-    let n = rows.len();
     let anchor = anchor_row.min(n - 1);
     let mut hits: Vec<usize> = Vec::new();
     let mut scanned = 0usize;
@@ -131,8 +146,10 @@ fn sample_near_anchor(
     while scanned < scan_cap && (lo >= 0 || hi < n as isize) && hits.len() < limit * 3 {
         if hi < n as isize {
             let i = hi as usize;
-            if passes(&rows[i]) {
-                hits.push(i);
+            if let Some(row) = preview_row_at(app, i) {
+                if passes(&row) {
+                    hits.push(i);
+                }
             }
             scanned += 1;
             hi += 1;
@@ -143,38 +160,32 @@ fn sample_near_anchor(
         lo -= 1;
         if lo >= 0 {
             let i = lo as usize;
-            if passes(&rows[i]) {
-                hits.push(i);
+            if let Some(row) = preview_row_at(app, i) {
+                if passes(&row) {
+                    hits.push(i);
+                }
             }
             scanned += 1;
         }
     }
+
     hits.sort_unstable();
     hits.dedup();
-    if hits.is_empty() {
-        return Vec::new();
-    }
-    // Window of `limit` centered on the hit closest to anchor.
-    let best = hits
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, &i)| i.abs_diff(anchor))
-        .map(|(idx, _)| idx)
-        .unwrap_or(0);
-    let start = best.saturating_sub(limit / 2);
-    let end = (start + limit).min(hits.len());
-    let start = end.saturating_sub(limit);
-    hits[start..end].to_vec()
+    // Prefer hits closest to the anchor.
+    hits.sort_by_key(|&i| i.abs_diff(anchor));
+    hits.truncate(limit);
+    hits.sort_unstable();
+    hits
 }
 
 fn compile_temp_include(chips: Vec<Chip>) -> Result<Option<Group>, String> {
-    build_group_from_chips(chips, true)
+    Ok(build_group_from_chips(chips, true)?)
 }
 
 fn compile_temp_excludes(chips: Vec<Chip>) -> Result<Vec<ExcludeEntry>, String> {
     let mut out = Vec::new();
-    let mut tmp = GroupList::default();
     for chip in chips {
+        let mut tmp = GroupList::default();
         match tmp.push_exclude(chip) {
             Ok(true) => {
                 if let Some(e) = tmp.excludes.pop() {
@@ -202,21 +213,25 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
         }
     };
 
+    let n = preview_source_len(app);
     let anchor = if app.filter_active() {
-        app.rows.len().saturating_sub(1)
+        n.saturating_sub(1)
     } else {
         app.source_idx_for_visible(app.cursor)
-            .unwrap_or(app.rows.len().saturating_sub(1))
+            .unwrap_or(n.saturating_sub(1))
     };
 
-    let indices = sample_near_anchor(&app.rows, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
+    let indices = sample_near_anchor(app, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
         row_passes_preview(app, row, temp_include.as_ref(), &extra_excludes)
     });
     indices
         .into_iter()
-        .map(|i| PreviewLine {
-            text: format_preview_line(&app.rows[i]),
-            highlight: None,
+        .filter_map(|i| {
+            let row = preview_row_at(app, i)?;
+            Some(PreviewLine {
+                text: format_preview_line(&row),
+                highlight: None,
+            })
         })
         .collect()
 }
@@ -234,21 +249,24 @@ pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<P
         return Ok(Vec::new());
     }
     let group = HighlightGroup::from_pattern(draft).ok_or(())?;
+    let n = preview_source_len(app);
     let anchor = if app.filter_active() {
-        app.rows.len().saturating_sub(1)
+        n.saturating_sub(1)
     } else {
         app.source_idx_for_visible(app.cursor)
-            .unwrap_or(app.rows.len().saturating_sub(1))
+            .unwrap_or(n.saturating_sub(1))
     };
 
-    let indices = sample_near_anchor(&app.rows, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
+    let indices = sample_near_anchor(app, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
         app.row_passes_filters(row) && group.matches_row(&row.tag, &row.msg)
     });
 
     let mut out = Vec::with_capacity(indices.len());
     for i in indices {
-        let row = &app.rows[i];
-        let text = format_preview_line(row);
+        let Some(row) = preview_row_at(app, i) else {
+            continue;
+        };
+        let text = format_preview_line(&row);
         let highlight = find_highlight_in_preview(&text, &group.re);
         out.push(PreviewLine { text, highlight });
     }

@@ -1,14 +1,12 @@
 use std::collections::{HashSet, VecDeque};
-use std::sync::OnceLock;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use aloggrep::crash::CrashDetector;
-use aloggrep::parser::Level;
 
 use crate::bookmark::{bookmark_label, AddError, Bookmark, BookmarkList, JumpResult};
 use crate::filter_model::{ExcludeEntry, Group, GroupList, TimeBound};
 use crate::highlight_model::{HighlightBox, HighlightGroup, HighlightGroupList};
-use crate::model::EntryRow;
+use crate::model::{is_severe_row, EntryRow};
+use crate::store::{FileEvent, FileStore, RowRef, RowStore, StreamStore};
 use crate::time_panel::TimePanel;
 use crate::vocab::Vocab;
 
@@ -21,27 +19,28 @@ const MATCHED_HARD_CAP: usize = 1_000_000;
 /// by a burst. Remaining rows stay in the ring for subsequent frames.
 const DRAIN_BUDGET_PER_FRAME: usize = 4096;
 
-/// Visible-row index set into [`App::view_source`].
+/// Visible-row index set into the active row source.
 ///
-/// Stream path (`--hdc` and owned `VecDeque` ingest) always uses [`Visible::All`]:
-/// an identity mapping `0..len` — never a materialised `Vec<usize>`. Eviction is
-/// O(1) (adjust `len` / cursor / offsets) instead of shifting every index.
-///
-/// `Subset` is reserved for the file/mmap sparse-index task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Stream path (`--hdc`) always uses [`Visible::All`]: an identity mapping
+/// `0..len` — never a materialised `Vec<usize>`. File path uses [`Visible::All`]
+/// when unfiltered and [`Visible::Subset`] (hit line numbers) when filtered.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Visible {
-    /// Identity: visible slot `i` maps to `view_source()[i]`.
+    /// Identity: visible slot `i` maps to source index `i`.
     All { len: usize },
+    /// Sparse hits (file/mmap filter): visible slot `i` → `hits[i]` line index.
+    Subset(Vec<usize>),
 }
 
 impl Visible {
-    pub fn len(self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
-            Visible::All { len } => len,
+            Visible::All { len } => *len,
+            Visible::Subset(v) => v.len(),
         }
     }
 
-    pub fn is_empty(self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -49,11 +48,12 @@ impl Visible {
         *self = Visible::All { len: 0 };
     }
 
-    /// Source index in `view_source` for visible slot `vis_i`.
-    pub fn source_idx(self, vis_i: usize) -> Option<usize> {
+    /// Source index for visible slot `vis_i`.
+    pub fn source_idx(&self, vis_i: usize) -> Option<usize> {
         match self {
-            Visible::All { len } if vis_i < len => Some(vis_i),
+            Visible::All { len } if vis_i < *len => Some(vis_i),
             Visible::All { .. } => None,
+            Visible::Subset(v) => v.get(vis_i).copied(),
         }
     }
 }
@@ -62,11 +62,6 @@ impl Default for Visible {
     fn default() -> Self {
         Visible::All { len: 0 }
     }
-}
-
-fn crash_detector() -> &'static CrashDetector {
-    static DETECTOR: OnceLock<CrashDetector> = OnceLock::new();
-    DETECTOR.get_or_init(CrashDetector::new)
 }
 
 fn group_to_exclude_entry(group: Group) -> Option<ExcludeEntry> {
@@ -80,12 +75,6 @@ fn group_to_exclude_entry(group: Group) -> Option<ExcludeEntry> {
         expr,
         enabled: group.enabled,
     })
-}
-
-/// Severe = level E/F, or a crash signature in the message (H2 jump target).
-pub fn is_severe_row(row: &EntryRow) -> bool {
-    matches!(row.level, Level::E | Level::F)
-        || crash_detector().detect(&row.as_log_entry()).is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,16 +172,14 @@ pub enum DetailView {
 }
 
 pub struct App {
-    pub rows: VecDeque<EntryRow>,
-    /// Matched-rows buffer: when a filter is active, rows passing the filter
-    /// are retained here independently of `rows`' rolling eviction, so a tight
-    /// filter isn't washed out by non-matching churn. Capped by `matched_cap`.
-    pub matched: VecDeque<EntryRow>,
-    /// Hard cap on `matched` (OOM safety). Matched rows are never evicted by
-    /// `rows` overflow — only by reaching this cap. Defaults to
-    /// [`MATCHED_HARD_CAP`]; tests override.
+    /// Stream (`--hdc`/tests) or mmap file (`-f`) row backend.
+    pub store: RowStore,
+    /// Hard cap on stream `matched` (OOM safety). Defaults to
+    /// [`MATCHED_HARD_CAP`]; tests override. Ignored for File.
     pub matched_cap: usize,
     pub visible: Visible,
+    /// Active filter-scan generation for FileStore (stale batches ignored).
+    file_filter_gen: u64,
     pub groups: GroupList,
     pub highlight_groups: HighlightGroupList,
     pub highlight_box: HighlightBox,
@@ -273,10 +260,10 @@ pub struct App {
 impl App {
     pub fn new(max_lines: usize) -> Self {
         Self {
-            rows: VecDeque::new(),
-            matched: VecDeque::new(),
+            store: RowStore::stream(max_lines, MATCHED_HARD_CAP),
             matched_cap: MATCHED_HARD_CAP,
             visible: Visible::default(),
+            file_filter_gen: 0,
             groups: GroupList::default(),
             highlight_groups: HighlightGroupList::default(),
             highlight_box: HighlightBox::default(),
@@ -320,6 +307,55 @@ impl App {
             cached_match_stats: None,
             ingest_done: false,
         }
+    }
+
+    /// Install a mmap file backend (replaces the default stream store).
+    pub fn set_file_store(&mut self, file: FileStore) {
+        let n = file.line_count();
+        let done = file.index_done();
+        self.store = RowStore::File(file);
+        self.visible = Visible::All { len: n };
+        self.ingest_done = done && !self.filter_active();
+        self.file_filter_gen = 0;
+        // Drain priming events (e.g. open_sync IndexDone) + start filter if needed.
+        self.poll_file_store();
+        if self.filter_active() {
+            self.rebuild_visible();
+        } else if self.following {
+            self.jump_bottom();
+        }
+    }
+
+    /// Stream rolling buffer (tests / hdc). Empty static for File.
+    pub fn rows(&self) -> &VecDeque<EntryRow> {
+        static EMPTY: std::sync::OnceLock<VecDeque<EntryRow>> = std::sync::OnceLock::new();
+        match &self.store {
+            RowStore::Stream(s) => &s.rows,
+            RowStore::File(_) => EMPTY.get_or_init(VecDeque::new),
+        }
+    }
+
+    /// Stream matched buffer (tests / hdc). Empty static for File.
+    pub fn matched(&self) -> &VecDeque<EntryRow> {
+        static EMPTY: std::sync::OnceLock<VecDeque<EntryRow>> = std::sync::OnceLock::new();
+        match &self.store {
+            RowStore::Stream(s) => &s.matched,
+            RowStore::File(_) => EMPTY.get_or_init(VecDeque::new),
+        }
+    }
+
+    fn stream_mut(&mut self) -> &mut StreamStore {
+        self.store
+            .as_stream_mut()
+            .expect("stream operation on file store")
+    }
+
+    /// Visible slot → row (lazy-parse for File).
+    pub fn row_at(&self, vis_i: usize) -> Option<RowRef<'_>> {
+        let src = self.source_idx_for_visible(vis_i)?;
+        // File ignores filter_active for buffer selection (source is line idx).
+        let filter_active = matches!(self.store, RowStore::Stream(_)) && self.filter_active();
+        self.store.row_at_source(src, filter_active)
     }
 
     /// Open the unified Manage picker (aggregated Filter/Highlight/Exclude/Bookmark).
@@ -439,40 +475,36 @@ impl App {
             || self.time_bound.as_ref().is_some_and(|t| t.is_active())
     }
 
-    /// The buffer `visible` currently indexes: `matched` when a filter is
-    /// active, `rows` otherwise. All read paths (render, cursor, yank, search)
-    /// go through here so they stay correct across `rows` overflow.
+    /// Stream-only: the buffer `visible` indexes (`matched` when filter
+    /// active). Prefer [`Self::row_at`] for render paths (works for File too).
     pub fn view_source(&self) -> &VecDeque<EntryRow> {
-        if self.filter_active() {
-            &self.matched
-        } else {
-            &self.rows
+        match &self.store {
+            RowStore::Stream(s) => s.view_source(self.filter_active()),
+            RowStore::File(_) => self.rows(), // empty
         }
     }
 
-    /// Number of currently visible rows (`Visible::All.len`).
+    /// Number of currently visible rows.
     pub fn visible_len(&self) -> usize {
         self.visible.len()
     }
 
-    /// Source index in [`Self::view_source`] for visible slot `vis_i`.
+    /// Source index for visible slot `vis_i`.
     pub fn source_idx_for_visible(&self, vis_i: usize) -> Option<usize> {
         self.visible.source_idx(vis_i)
     }
 
-    /// Whether `row_id` is still present in either buffer (bookmark liveness).
-    /// A row retained in `matched` after being evicted from `rows` is alive.
+    /// Whether `row_id` is still present (bookmark liveness).
     fn row_alive(&self, row_id: u64) -> bool {
-        self.matched.iter().any(|r| r.row_id == row_id)
-            || self.rows.iter().any(|r| r.row_id == row_id)
+        self.store.row_alive(row_id)
     }
 
-    /// Drain pending rows from an ingest source without blocking.
-    /// Each new row is checked against the current filter in O(1) and, if
-    /// visible, appended — no full rescan. Stops at empty, disconnect, or
-    /// [`DRAIN_BUDGET_PER_FRAME`]. Sets `ingest_done` when the producer has
-    /// finished and the queue is empty (P4).
+    /// Drain pending rows from a stream ingest source without blocking.
+    /// No-op for File (use [`Self::poll_file_store`]).
     pub fn drain(&mut self, ingest: &impl crate::ingest::TryRecvRow) {
+        if self.store.is_file() {
+            return;
+        }
         let mut drained = 0usize;
         loop {
             if drained >= DRAIN_BUDGET_PER_FRAME {
@@ -492,6 +524,122 @@ impl App {
         }
     }
 
+    /// Poll mmap indexer / filter worker events (file mode). Call each frame.
+    pub fn poll_file_store(&mut self) {
+        let Some(_) = self.store.as_file() else {
+            return;
+        };
+        let events = self
+            .store
+            .as_file()
+            .map(|f| f.drain_events())
+            .unwrap_or_default();
+        let mut index_grew = false;
+        let mut filter_batches: Vec<(u64, Vec<usize>)> = Vec::new();
+        let mut filter_done_gen = None;
+        let mut index_done = false;
+        for ev in events {
+            match ev {
+                FileEvent::IndexProgress { line_count, .. } => {
+                    index_grew = true;
+                    if let Some(f) = self.store.as_file() {
+                        f.grow_severe_cache();
+                    }
+                    if !self.filter_active() {
+                        self.visible = Visible::All { len: line_count };
+                    }
+                }
+                FileEvent::IndexDone { line_count } => {
+                    index_grew = true;
+                    index_done = true;
+                    if let Some(f) = self.store.as_file() {
+                        f.grow_severe_cache();
+                    }
+                    if !self.filter_active() {
+                        self.visible = Visible::All { len: line_count };
+                    }
+                    // One-shot sampled vocab after index completes.
+                    if let Some(f) = self.store.as_file() {
+                        if f.mark_vocab_started() {
+                            let mut feeds = Vec::new();
+                            f.feed_vocab_sample(|tag, pkg, tokens| {
+                                feeds.push((tag.to_string(), pkg.to_string(), tokens.to_vec()));
+                            });
+                            for (tag, pkg, tokens) in feeds {
+                                self.vocab.feed(&tag, &pkg, &tokens);
+                            }
+                        }
+                    }
+                }
+                FileEvent::FilterBatch { gen, hits, .. } => {
+                    filter_batches.push((gen, hits));
+                }
+                FileEvent::FilterDone { gen, .. } => {
+                    filter_done_gen = Some(gen);
+                }
+            }
+        }
+        for (gen, hits) in filter_batches {
+            if gen != self.file_filter_gen {
+                continue;
+            }
+            match &mut self.visible {
+                Visible::Subset(v) => v.extend(hits),
+                _ => self.visible = Visible::Subset(hits),
+            }
+            // Defer highlight match-stats recompute until FilterDone — a
+            // per-batch O(visible) parse scan freezes large-file UI.
+        }
+        if let Some(gen) = filter_done_gen {
+            if gen == self.file_filter_gen {
+                // ensure Subset even if zero hits
+                if !matches!(self.visible, Visible::Subset(_)) && self.filter_active() {
+                    self.visible = Visible::Subset(Vec::new());
+                }
+                self.match_stats_stale = true;
+            }
+        }
+        if index_grew || index_done {
+            if self.following {
+                self.jump_bottom();
+            } else if self.cursor >= self.visible.len() {
+                self.cursor = self.visible.len().saturating_sub(1);
+            }
+        }
+        if index_done {
+            // Final index length only — avoid O(n) highlight scans every progress tick.
+            self.match_stats_stale = true;
+            if !self.filter_active() {
+                self.ingest_done = true;
+            }
+        }
+        if let Some(gen) = filter_done_gen {
+            if gen == self.file_filter_gen && self.filter_active() {
+                self.ingest_done = true;
+            }
+        }
+    }
+
+    /// Status fragment for file load/filter progress (None when idle/stream).
+    pub fn file_progress_label(&self) -> Option<String> {
+        let f = self.store.as_file()?;
+        let p = f.progress();
+        if !p.index_done {
+            let pct = if p.file_bytes == 0 {
+                100
+            } else {
+                (p.indexed_bytes.saturating_mul(100) / p.file_bytes).min(100)
+            };
+            return Some(format!("INDEX {}% ({} lines)", pct, p.indexed_lines));
+        }
+        if self.filter_active() && !p.filter_done {
+            let total = p.indexed_lines.max(1);
+            let pct = (p.filter_scanned.saturating_mul(100) / total).min(100);
+            return Some(format!("FILTER {pct}%"));
+        }
+        None
+    }
+
     fn push_row(&mut self, mut row: EntryRow) {
         let msg_tokens = crate::input::tokenize_msg_for_vocab(&row.msg);
         self.vocab.feed(&row.tag, &row.pkg, &msg_tokens);
@@ -501,40 +649,44 @@ impl App {
         row.severe = is_severe_row(&row);
         let active = self.filter_active();
         let matches = active && self.row_passes_filters(&row);
+        let max_lines = self.max_lines;
+        let matched_cap = self.matched_cap;
 
-        // `rows` rolling buffer. When a filter is active, `visible` tracks
-        // `matched`, so a `rows` eviction must NOT adjust visible coords.
-        if self.rows.len() >= self.max_lines {
-            // Only adjust after a real eviction (empty + max_lines==0 is a no-op pop).
-            if self.rows.pop_front().is_some() && !active {
-                // Identity visible: pop+push keeps `All.len` unchanged; O(1)
-                // shift cursor/viewport if the evicted front was on-screen.
-                self.adjust_after_identity_front_evict();
+        let mut evict_rows = false;
+        let mut evict_matched = false;
+        {
+            let stream = self.stream_mut();
+            stream.max_lines = max_lines;
+            stream.matched_cap = matched_cap;
+            if stream.rows.len() >= stream.max_lines && stream.rows.pop_front().is_some() && !active
+            {
+                evict_rows = true;
+            }
+            if matches
+                && stream.matched.len() >= stream.matched_cap
+                && stream.matched.pop_front().is_some()
+            {
+                evict_matched = true;
             }
         }
+        if evict_rows || evict_matched {
+            self.adjust_after_identity_front_evict();
+        }
 
+        let stream = self.stream_mut();
         if matches {
-            // Retain in `matched` (clone into `rows`; original goes to `matched`).
-            if self.matched.len() >= self.matched_cap {
-                if self.matched.pop_front().is_some() {
-                    self.adjust_after_identity_front_evict();
-                }
-            }
-            self.rows.push_back(row.clone());
-            self.matched.push_back(row);
-            self.visible = Visible::All {
-                len: self.matched.len(),
-            };
+            stream.rows.push_back(row.clone());
+            stream.matched.push_back(row);
+            let len = stream.matched.len();
+            self.visible = Visible::All { len };
         } else {
-            self.rows.push_back(row);
+            stream.rows.push_back(row);
             if !active {
-                self.visible = Visible::All {
-                    len: self.rows.len(),
-                };
+                let len = stream.rows.len();
+                self.visible = Visible::All { len };
             }
         }
         self.follow_tick();
-        // P1: any visible change (row added / evicted) invalidates cached stats.
         self.match_stats_stale = true;
     }
 
@@ -563,26 +715,74 @@ impl App {
     }
 
     /// Full rescan, used when the filter groups or session lock change.
-    /// Rebuilds `matched` from the current `rows`: rows already evicted from
-    /// `rows` (even if previously retained in `matched`) cannot be recovered.
+    /// Stream: rebuilds `matched` from `rows`. File: starts a cancellable
+    /// background filter scan into [`Visible::Subset`] (or All when inactive).
     pub fn rebuild_visible(&mut self) {
         let active = self.filter_active();
-        if active {
-            self.matched.clear();
-            for row in &self.rows {
-                if self.row_passes_filters(row) {
-                    self.matched.push_back(row.clone());
+        if self.store.is_file() {
+            if !active {
+                if let Some(file) = self.store.as_file_mut() {
+                    file.cancel_filter_scan();
+                    let n = file.line_count();
+                    let done = file.index_done();
+                    self.file_filter_gen = 0;
+                    self.visible = Visible::All { len: n };
+                    self.ingest_done = done;
                 }
+            } else {
+                self.visible = Visible::Subset(Vec::new());
+                self.ingest_done = false;
+                let groups = self.groups.clone();
+                let lock_pid = self.lock_pid.clone();
+                let lock_tid = self.lock_tid.clone();
+                let time_bound = self.time_bound.clone();
+                let pred: crate::store::FilterPred = Arc::new(move |row: &EntryRow| {
+                    if !groups.matches(row) {
+                        return false;
+                    }
+                    if let Some(pid) = &lock_pid {
+                        if row.pid != *pid {
+                            return false;
+                        }
+                    } else if let Some(tid) = &lock_tid {
+                        if row.tid != *tid {
+                            return false;
+                        }
+                    }
+                    if let Some(bound) = &time_bound {
+                        if bound.is_active() && !bound.matches(&row.as_log_entry()) {
+                            return false;
+                        }
+                    }
+                    true
+                });
+                let gen = self
+                    .store
+                    .as_file_mut()
+                    .expect("file")
+                    .start_filter_scan(pred);
+                self.file_filter_gen = gen;
             }
+        } else if active {
+            let rows: Vec<EntryRow> = self.stream_mut().rows.iter().cloned().collect();
+            let passing: Vec<EntryRow> = rows
+                .into_iter()
+                .filter(|r| self.row_passes_filters(r))
+                .collect();
+            let stream = self.stream_mut();
+            stream.matched.clear();
+            stream.matched.extend(passing);
             self.visible = Visible::All {
-                len: self.matched.len(),
+                len: stream.matched.len(),
             };
         } else {
-            self.matched.clear();
+            let stream = self.stream_mut();
+            stream.matched.clear();
             self.visible = Visible::All {
-                len: self.rows.len(),
+                len: stream.rows.len(),
             };
         }
+
         if self.following {
             self.jump_bottom();
         } else if self.cursor >= self.visible.len() {
@@ -636,8 +836,9 @@ impl App {
     /// `visible` and bookmarks, keeps filter/highlight/exclude/lock, resumes
     /// following, and flashes `CLEARED`.
     pub fn clear_buffered_logs(&mut self) {
-        self.rows.clear();
-        self.matched.clear();
+        if let Some(stream) = self.store.as_stream_mut() {
+            stream.clear();
+        }
         self.visible.clear();
         self.clear_bookmarks();
         self.clear_visual();
@@ -656,10 +857,13 @@ impl App {
         self.set_flash("CLEARED");
     }
 
-    pub fn visible_rows(&self) -> impl Iterator<Item = &EntryRow> {
-        let source = self.view_source();
+    /// Collect currently visible rows (owned clones; prefer [`Self::row_at`]
+    /// for hot paths).
+    pub fn visible_rows(&self) -> Vec<EntryRow> {
         let len = self.visible.len();
-        (0..len).map(move |i| &source[i])
+        (0..len)
+            .filter_map(|i| self.row_at(i).map(|r| r.into_owned()))
+            .collect()
     }
 
     pub fn cycle_focus_forward(&mut self) {
@@ -840,9 +1044,8 @@ impl App {
         }
     }
 
-    pub fn current_row(&self) -> Option<&EntryRow> {
-        let i = self.source_idx_for_visible(self.cursor)?;
-        Some(&self.view_source()[i])
+    pub fn current_row(&self) -> Option<RowRef<'_>> {
+        self.row_at(self.cursor)
     }
 
     /// Flash a short status-bar toast that auto-hides after 3 seconds.
@@ -925,27 +1128,31 @@ impl App {
         }
     }
 
+    /// Map `row_id` → visible slot without parsing file lines.
+    /// `Subset` hits are append-ordered, so lookup is binary search.
+    pub fn visible_idx_for_row_id(&self, row_id: u64) -> Option<usize> {
+        let filter_active = matches!(self.store, RowStore::Stream(_)) && self.filter_active();
+        let src_idx = self.store.find_row_id(row_id, filter_active)?;
+        match &self.visible {
+            Visible::All { len } if src_idx < *len => Some(src_idx),
+            Visible::All { .. } => None,
+            Visible::Subset(v) => v.binary_search(&src_idx).ok(),
+        }
+    }
+
     /// Jump to a bookmarked row_id; sets `following=false` on success.
     /// A bookmark is jumpable iff its row is still alive (`row_alive`).
     /// A row retained in `matched` (evicted from `rows`) is still jumpable.
     pub fn jump_to_bookmark(&mut self, row_id: u64) -> JumpResult {
-        // `view_source()` is the active buffer `visible` indexes; by
-        // construction every entry there is in `visible` (front-eviction
-        // shifts both in tandem), so a hit here is always jumpable.
-        let row_idx = self.view_source().iter().position(|r| r.row_id == row_id);
-        let Some(row_idx) = row_idx else {
+        let Some(vis_idx) = self.visible_idx_for_row_id(row_id) else {
             return if self.row_alive(row_id) {
                 JumpResult::Filtered
             } else {
                 JumpResult::Evicted
             };
         };
-        // Identity visible: source index == visible slot when in range.
-        if self.source_idx_for_visible(row_idx).is_none() {
-            return JumpResult::Filtered;
-        }
         self.following = false;
-        self.cursor = row_idx;
+        self.cursor = vis_idx;
         self.match_stats_stale = true;
         JumpResult::Ok
     }
@@ -1057,11 +1264,29 @@ impl App {
         self.pending_leader = false;
     }
 
-    /// `ts`: open time panel from current `rows`. Returns false when refused
-    /// (empty date candidates). Sets `following=false` on success.
+    /// `ts`: open time panel from current rows / file sample. Returns false
+    /// when refused (empty date candidates). Sets `following=false` on success.
     pub fn open_time_panel(&mut self) -> bool {
         self.pending_time = false;
-        match TimePanel::open(&self.rows, self.time_bound.as_ref()) {
+        let catalog_rows: Vec<EntryRow> = match &self.store {
+            RowStore::Stream(s) => s.rows.iter().cloned().collect(),
+            RowStore::File(f) => {
+                // Sample up to 4000 lines for date catalog (full scan is ok for
+                // medium files; large files still get a useful date set).
+                let n = f.line_count();
+                let step = (n / 4000).max(1);
+                let mut rows = Vec::new();
+                let mut i = 0usize;
+                while i < n {
+                    if let Some(r) = f.row_at(i) {
+                        rows.push(r);
+                    }
+                    i = i.saturating_add(step);
+                }
+                rows
+            }
+        };
+        match TimePanel::open_from_iter(catalog_rows.iter(), self.time_bound.as_ref()) {
             Some(panel) => {
                 self.following = false;
                 self.time_panel = Some(panel);
@@ -1204,7 +1429,7 @@ impl App {
             ChipField::Tid => YankField::Tid,
             ChipField::Level => YankField::Level,
         };
-        let value = Self::field_text(row, yank);
+        let value = Self::field_text(&row, yank);
         if value.is_empty() {
             self.set_flash(format!("空 {}", field.keyword()));
             return false;
@@ -1285,7 +1510,7 @@ impl App {
             ChipField::Tid => YankField::Tid,
             ChipField::Level => YankField::Level,
         };
-        let value = Self::field_text(row, yank);
+        let value = Self::field_text(&row, yank);
         if value.is_empty() {
             self.set_flash(format!("空 {}", field.keyword()));
             return false;
@@ -1350,7 +1575,7 @@ impl App {
     }
 
     pub fn yank_field(&self, field: YankField) -> Option<String> {
-        self.current_row().map(|row| Self::field_text(row, field))
+        self.current_row().map(|row| Self::field_text(&row, field))
     }
 
     /// Join `field` values for visible indices `lo..=hi` with newlines.
@@ -1358,12 +1583,10 @@ impl App {
         if self.visible.is_empty() || lo > hi || hi >= self.visible.len() {
             return None;
         }
-        let source = self.view_source();
         let mut parts = Vec::with_capacity(hi - lo + 1);
         for vi in lo..=hi {
-            let row_idx = self.source_idx_for_visible(vi)?;
-            let row = &source[row_idx];
-            parts.push(Self::field_text(row, field));
+            let row = self.row_at(vi)?;
+            parts.push(Self::field_text(&row, field));
         }
         Some(parts.join("\n"))
     }
@@ -1383,8 +1606,7 @@ impl App {
         let start = self.cursor as isize;
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
-            if self.view_source()[row_idx].severe {
+            if self.row_at(idx).is_some_and(|r| r.severe) {
                 self.following = false;
                 self.cursor = idx;
                 self.match_stats_stale = true;
@@ -1416,8 +1638,9 @@ impl App {
         let start = self.cursor as isize;
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
-            let row = &self.view_source()[row_idx];
+            let Some(row) = self.row_at(idx) else {
+                continue;
+            };
             let hit = self.highlight_groups.groups[active_idx].matches_row(&row.tag, &row.msg);
             if hit {
                 self.following = false;
@@ -1439,8 +1662,9 @@ impl App {
             return false;
         }
         for idx in 0..self.visible.len() {
-            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
-            let row = &self.view_source()[row_idx];
+            let Some(row) = self.row_at(idx) else {
+                continue;
+            };
             if group.matches_row(&row.tag, &row.msg) {
                 self.following = false;
                 self.cursor = idx;
@@ -1705,10 +1929,10 @@ impl App {
         };
         let mut total = 0usize;
         let mut current = None;
-        let source = self.view_source();
         for idx in 0..self.visible.len() {
-            let row_idx = self.source_idx_for_visible(idx).expect("idx < visible_len");
-            let row = &source[row_idx];
+            let Some(row) = self.row_at(idx) else {
+                continue;
+            };
             if group.matches_row(&row.tag, &row.msg) {
                 total += 1;
                 if idx == self.cursor {
@@ -1875,9 +2099,9 @@ mod tests {
         tx.send(row("C")).unwrap();
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.rows.len(), 2);
-        assert_eq!(app.rows[0].tag, "B");
-        assert_eq!(app.rows[1].tag, "C");
+        assert_eq!(app.rows().len(), 2);
+        assert_eq!(app.rows()[0].tag, "B");
+        assert_eq!(app.rows()[1].tag, "C");
         assert_eq!(app.visible, Visible::All { len: 2 });
     }
 
@@ -1897,7 +2121,7 @@ mod tests {
         tx.send(row("A")).unwrap();
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.matched.len(), 2);
+        assert_eq!(app.matched().len(), 2);
         assert_eq!(app.visible, Visible::All { len: 2 });
         assert_eq!(app.source_idx_for_visible(0), Some(0));
         assert_eq!(app.source_idx_for_visible(1), Some(1));
@@ -1915,8 +2139,8 @@ mod tests {
         app.drain(&ring);
         assert_eq!(app.visible_len(), 2);
         assert!(app.ingest_done);
-        assert_eq!(app.rows[0].tag, "A");
-        assert_eq!(app.rows[1].tag, "B");
+        assert_eq!(app.rows()[0].tag, "A");
+        assert_eq!(app.rows()[1].tag, "B");
     }
 
     #[test]
@@ -1929,14 +2153,14 @@ mod tests {
         }
         ring.mark_disconnected();
         app.drain(&ring);
-        assert_eq!(app.rows.len(), DRAIN_BUDGET_PER_FRAME);
+        assert_eq!(app.rows().len(), DRAIN_BUDGET_PER_FRAME);
         assert!(
             !app.ingest_done,
             "budget stop must not mark done while rows remain"
         );
         assert_eq!(ring.len(), 3);
         app.drain(&ring);
-        assert_eq!(app.rows.len(), DRAIN_BUDGET_PER_FRAME + 3);
+        assert_eq!(app.rows().len(), DRAIN_BUDGET_PER_FRAME + 3);
         assert!(app.ingest_done);
         assert!(ring.is_empty());
     }
@@ -1959,8 +2183,8 @@ mod tests {
         drop(tx2);
         app.drain(&rx2);
 
-        assert_eq!(app.rows[0].tag, "B");
-        assert_eq!(app.rows[1].tag, "C");
+        assert_eq!(app.rows()[0].tag, "B");
+        assert_eq!(app.rows()[1].tag, "C");
         assert_eq!(app.visible, Visible::All { len: 2 });
         assert_eq!(app.list_offset, 0);
         assert_eq!(app.cursor, 0);
@@ -2053,11 +2277,11 @@ mod tests {
         tx.send(row("B")).unwrap();
         drop(tx);
         app.drain(&rx);
-        assert!(!app.rows.is_empty());
-        assert!(!app.matched.is_empty());
+        assert!(!app.rows().is_empty());
+        assert!(!app.matched().is_empty());
         assert!(!app.visible.is_empty());
 
-        let row_id = app.matched[0].row_id;
+        let row_id = app.matched()[0].row_id;
         app.bookmarks
             .try_add(Bookmark {
                 row_id,
@@ -2075,8 +2299,8 @@ mod tests {
 
         app.clear_buffered_logs();
 
-        assert!(app.rows.is_empty());
-        assert!(app.matched.is_empty());
+        assert!(app.rows().is_empty());
+        assert!(app.matched().is_empty());
         assert!(app.visible.is_empty());
         assert!(app.bookmarks.is_empty());
         assert!(app.bookmark_row_ids.is_empty());
@@ -2145,11 +2369,11 @@ mod tests {
         tx.send(row("Y")).unwrap(); // rows rolls: [X,Y], A0 evicted from rows
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.rows.len(), 2);
-        assert_eq!(app.rows[0].tag, "X");
-        assert_eq!(app.rows[1].tag, "Y");
-        assert_eq!(app.matched.len(), 1);
-        assert_eq!(app.matched[0].tag, "A");
+        assert_eq!(app.rows().len(), 2);
+        assert_eq!(app.rows()[0].tag, "X");
+        assert_eq!(app.rows()[1].tag, "Y");
+        assert_eq!(app.matched().len(), 1);
+        assert_eq!(app.matched()[0].tag, "A");
         assert_eq!(app.visible, Visible::All { len: 1 });
         assert_eq!(app.current_row().unwrap().tag, "A");
     }
@@ -2166,8 +2390,8 @@ mod tests {
         tx.send(row("A")).unwrap(); // rows rolls: [B,A]
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.rows[0].tag, "B");
-        assert_eq!(app.rows[1].tag, "A");
+        assert_eq!(app.rows()[0].tag, "B");
+        assert_eq!(app.rows()[1].tag, "A");
         // Now activate a filter matching `A`; rebuild scans only current rows
         // ([B,A]) — the first `A` (already evicted from `rows`) is gone.
         app.groups = GroupList {
@@ -2178,8 +2402,8 @@ mod tests {
             excludes: Vec::new(),
         };
         app.rebuild_visible();
-        assert_eq!(app.matched.len(), 1);
-        assert_eq!(app.matched[0].tag, "A");
+        assert_eq!(app.matched().len(), 1);
+        assert_eq!(app.matched()[0].tag, "A");
         assert_eq!(app.visible, Visible::All { len: 1 });
     }
 }
@@ -2926,5 +3150,116 @@ mod vocab_tests {
             "VocabTag should appear in tag candidates"
         );
         assert_eq!(cands[0], "VocabTag");
+    }
+}
+
+#[cfg(test)]
+mod file_store_tests {
+    use super::*;
+    use crate::filter_model::Group;
+    use aloggrep::expr::Expr;
+    use std::io::Write;
+
+    fn write_temp(contents: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn file_store_full_browse_no_max_lines_cap() {
+        let mut body = String::new();
+        for i in 0..50 {
+            body.push_str(&format!(
+                "04-02 10:00:{i:02}.000  1  1 I Tag{i}   : line{i}\n"
+            ));
+        }
+        let f = write_temp(&body);
+        let mut app = App::new(10); // max_lines would cap stream; ignored for file
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        assert_eq!(app.visible_len(), 50);
+        app.jump_bottom();
+        assert_eq!(app.cursor, 49);
+        assert_eq!(app.row_at(0).unwrap().tag, "Tag0");
+        assert_eq!(app.row_at(49).unwrap().tag, "Tag49");
+    }
+
+    #[test]
+    fn file_filter_uses_subset_not_matched_buffer() {
+        let f = write_temp(
+            "04-02 10:00:00.000  1  1 I Keep   : a\n\
+             04-02 10:00:01.000  1  1 I Drop   : b\n\
+             04-02 10:00:02.000  1  1 I Keep   : c\n",
+        );
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.groups.groups.push(Group {
+            label: "tag~Keep".into(),
+            chips: Vec::new(),
+            expr: Some(Expr::parse("tag ~ Keep", true).unwrap()),
+            enabled: true,
+        });
+        app.rebuild_visible();
+        // Drain bg filter to completion.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("filter timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(app.visible, Visible::Subset(_)));
+        assert_eq!(app.visible_len(), 2);
+        assert!(app.matched().is_empty());
+        assert_eq!(app.row_at(0).unwrap().tag, "Keep");
+        assert_eq!(app.row_at(1).unwrap().tag, "Keep");
+    }
+
+    #[test]
+    fn file_unparseable_kept_as_raw() {
+        let f = write_temp("not a log\n04-02 10:00:00.000  1  1 I TagA   : ok\n");
+        let mut app = App::new(100);
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        assert_eq!(app.visible_len(), 2);
+        assert_eq!(app.row_at(0).unwrap().raw, "not a log");
+        assert_eq!(app.row_at(1).unwrap().tag, "TagA");
+    }
+
+    #[test]
+    fn file_visible_idx_for_row_id_uses_line_mapping() {
+        let f = write_temp(
+            "04-02 10:00:00.000  1  1 I Keep   : a\n\
+             04-02 10:00:01.000  1  1 I Drop   : b\n\
+             04-02 10:00:02.000  1  1 I Keep   : c\n",
+        );
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        // Unfiltered: row_id 3 → visible 2
+        assert_eq!(app.visible_idx_for_row_id(3), Some(2));
+        app.groups.groups.push(Group {
+            label: "tag~Keep".into(),
+            chips: Vec::new(),
+            expr: Some(Expr::parse("tag ~ Keep", true).unwrap()),
+            enabled: true,
+        });
+        app.rebuild_visible();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("filter timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Filtered Subset [0, 2]: row_id 3 (line 2) → visible 1
+        assert_eq!(app.visible_idx_for_row_id(3), Some(1));
+        assert_eq!(app.visible_idx_for_row_id(2), None); // Drop filtered out
+        assert_eq!(app.jump_to_bookmark(3), JumpResult::Ok);
+        assert_eq!(app.cursor, 1);
     }
 }

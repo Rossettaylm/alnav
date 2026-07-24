@@ -141,7 +141,15 @@ impl TimePanel {
     /// Build panel from buffered rows and optional current bound (best-effort prefill).
     /// Returns `None` when there are no date candidates.
     pub fn open(rows: &VecDeque<EntryRow>, bound: Option<&TimeBound>) -> Option<Self> {
-        let catalog = DateCatalog::from_rows(rows.iter());
+        Self::open_from_iter(rows.iter(), bound)
+    }
+
+    /// Same as [`Self::open`] but accepts any `EntryRow` iterator (file sample).
+    pub fn open_from_iter<'a, I>(rows: I, bound: Option<&TimeBound>) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a EntryRow>,
+    {
+        let catalog = DateCatalog::from_rows(rows);
         if catalog.is_empty() {
             return None;
         }

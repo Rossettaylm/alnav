@@ -66,12 +66,15 @@ aloggrep-tui/src/
 ├── bookmark.rs     # M2：会话书签（row_id 锚定；ma/md；顶区展示 + Picker 管理）
 ├── config.rs       # 配置目录解析 + theme.toml/config.toml 加载（坏文件回退）
 ├── theme.rs        # UI 颜色映射唯一入口：运行时 UiTokens（可 theme.toml 覆盖）+ 日志色派生自 aloggrep::logcolor
-└── ingest.rs        # 统一摄入管线：spawn_file_ingest（-f，io::Result 立即报告打开失败）/ spawn_hdc_ingest（--hdc，复用 aloggrep-core::hdc）
+├── store.rs         # RowStore：FileStore（mmap+行索引+惰性解析）/ StreamStore（--hdc VecDeque）/ RowRef
+└── ingest.rs        # spawn_hdc_ingest（DropOldestRing）；spawn_file_ingest 仅供测试（生产 -f 走 FileStore）
 ```
 
 **CLI 数据流：** stdin/file → 逐行读取 → [MultilineMerger] → `LogEntry::parse()` → `FilterChain::matches()` → [CrashDetector] → `Formatter::write_entry()` / `Summary::record()`
 
-**TUI 数据流：** 后台线程（文件一次性读完 / `--hdc` 持续读取）→ `EntryRow::from_line()` → `mpsc::channel` → `App::drain()` 增量过滤：filter 未激活时入 `rows`、`visible` 索引 `rows`；filter 激活时命中行双写 `rows`+`matched`、`visible` 索引 `matched`（O(1)）→ `render_log_list` 渲染；过滤条件（`Vec<Group>`）变化时 `App::rebuild_visible()` 从 `rows` 全量重扫重建 `matched`（O(n)）。
+**TUI 数据流：**
+- **`-f`：** `FileStore::open` → mmap + 后台行索引 → `Visible::All { len }`；filter 时后台扫描 → `Visible::Subset(命中行号)`；渲染经 `App::row_at` 惰性解析（无全文件 owned `EntryRow`，无 `max_lines` 淘汰）。
+- **`--hdc`：** 后台线程 → `EntryRow::from_line()` → `DropOldestRing` → `App::drain()` → `StreamStore`；filter 未激活时 `Visible::All` 索引 `rows`；激活时命中双写 `matched`、`Visible::All` 索引 `matched`。
 
 ### Key Design Decisions
 
@@ -82,8 +85,8 @@ aloggrep-tui/src/
 - **`--hdc` Ctrl-L 清屏（CLI）**：仅在 stdin/stdout 都是 tty 时启用；用 cbreak 模式（保留 `ISIG`）而非标准 raw mode，避免破坏现有 Ctrl+C 依赖的 `SIGINT` 语义。按键上报走 channel + `KeypressGate` 迭代器分发。仅支持 Unix，Windows 上静默不可用。已知权衡：若进程被 `SIGTERM`/`SIGKILL` 直接杀死（而非 Ctrl+C），termios 不会被恢复，终端会卡在 cbreak 模式，需手动 `stty sane`/`reset`——这与 vim/less 等直接操作终端的工具在被强杀时的行为一致，未特殊处理。
 - **`aloggrep-tui` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。Input：`Space` 进草稿（可含空格）；有草稿时 `Enter` 收成 pill；无草稿且已有 pill 时 `Enter` 提交组。提交前按 chip 多重集（ignore-case）去重，重复则不 push。启动 CLI 过滤转为第 0 组（可 `dd`/`di`）。chip 编译走 `Expr::from_filters(..., SameFieldOp::And)`；启动 `initial_group` 仍用 `SameFieldOp::Or`。**TUI 过滤/搜索一律 ignore-case**。LogList 另有 **H7 光标→Chip**：operator `c`+字段字母（`t/m/g/p/T/l`，与 `YankField` 对齐）从当前行推单 chip 组；`c`+`m` 开 msg 切词候选面板；成功后 `following=false`，Esc 只清 pending 不 resume。**H8 会话 lock**：`App.lock_pid`/`lock_tid` 互斥，在 chip 过滤后 AND；operator `f`+`p`/`t`/`u`（toggle 同值清除）；status `LOCK pid=…` 与 FOLLOWING 可并存；Esc resume 不清除 lock。**全局时间窗（仅 `-f`）**：`App.time_bound: Option<TimeBound>` 与 Filter 组正交，在 chip/exclude/lock 之后 AND；启动 `--since`/`--until` 写入全局窗（不再挂 Group）；operator `t`+`s` 开靠上 Time 面板（日期候选自 `rows` 去重、只能选自候选；时间 `HH:MM:SS` 键入并夹到该日缓冲 min/max，保证 since≤until；允许只设一端，端内须日+时成对），`t`+`u` 清除；无日期候选时 `ts` flash 拒绝；`--hdc` 硬隐藏 `t`/`ts`/`tu`；status `TIME …` 徽标；计入 `filter_active`；`yc` 导出 `--since`/`--until`；打开/提交/`tu` → `following=false`，面板 Esc 不 resume。
 - **`aloggrep-tui` 的统一 fzf Picker**：Normal `Space` 进入 Leader；`Space Space` 打开 ActionList（Filter / Highlight / Exclude / Bookmark）；裸键 Manage：`;`→Filter、`/`→Highlight、`` ` ``→Exclude、`mm`→Bookmark；Shift 对应字符强制 New：`:`/`?`/`~`/`MM`；`Space f/s/m/x` 仍为别名（有候选 Manage / 无候选 New）。Picker 为左右 4:6（可由 `config.toml` 的 `picker_left_ratio` 调整），左侧候选+底部检索（mode 前缀图标：Manage `>` / New `＋` / Edit `✎`），右侧 Preview；Manage 下键入无匹配时自动切 New（query→draft；清空草稿回退 Manage）；手动进 New 不清空也不回退；Esc / 提交成功 Enter 一律关闭面板（不回 Manage）；Manage 内 Ctrl-X 编辑、Delete/Ctrl-Backspace 删除选中（二次确认）；草稿行支持中间光标与 ←/→/Home/End/Ctrl-A/E/Ctrl-U（New/Edit 另有 Ctrl-Backspace 删词）。**Filter/Highlight/Exclude/Bookmark 统一**：候选为空时打开即 New；有候选且未强制 New 则 Manage；msg-chip 也复用 Picker 壳。
-- **`aloggrep-tui` 的环形缓冲与光标**：`App.rows: VecDeque<EntryRow>` 按 `max_lines`（默认 500_000）淘汰最旧行；`App.visible: Vec<usize>` 始终保持升序；`rebuild_visible` 与 `follow_tick` 共同维护 following 不变量。
-- **`aloggrep-tui` 的匹配行保留缓冲（防筛选被冲走）**：filter active（任一启用的 include/exclude/lock/全局时间窗，**不含** search）时，命中行双写 `rows`+`App.matched`（`VecDeque<EntryRow>`），`visible` 改为索引 `matched`；`rows` 滚动淘汰**不动** `visible`，只有 `matched` 触及硬上限 `MATCHED_HARD_CAP`（1_000_000，防 OOM，不可配）才淘汰可见行。读路径统一走 `App::view_source()`（active 返回 `&matched`，否则 `&rows`）；`current_row`/`visible_rows`/`yank_range`/`find_severe`/`find_match`/`jump_first_match_of`/`highlight_match_stats`/minimap 均经此出口。`rebuild_visible` 在 filter 变化时从当前 `rows` 全扫重建 `matched`——**已从 `rows` 淘汰的历史匹配行不可恢复**（物理限制，已接受）。书签 `row_alive`/`jump_to_bookmark` 查 `view_source()`，命中即可跳（行还在 `matched`、已从 `rows` 淘汰也算存活）。preview 采样仍读 `app.rows`（模拟新 filter 对全量缓冲的命中），active 时锚点退回 `rows.len()-1`。
+- **`aloggrep-tui` 的 RowStore**：`App.store` 为 `File`（`-f` mmap）或 `Stream`（`--hdc`）。Stream 的 `rows` 按 `max_lines`（默认 500_000，`--max-lines` 仅 hdc）淘汰；File 无淘汰、可浏览全文件。`Visible::All`（身份映射）用于 Stream 与未过滤 File；File 过滤用 `Visible::Subset(行号)`。读路径统一 `App::row_at` → `RowRef`（Stream 借出 / File 惰性 Owned）。
+- **`aloggrep-tui` 的匹配行保留（Stream）**：filter active 时命中双写 `rows`+`matched`，`Visible::All` 索引 `matched`；`matched` 硬上限 `MATCHED_HARD_CAP`（1_000_000）。File 不过滤进 `matched`，只维护 `Subset`。书签：Stream 查 `rows`/`matched`；File 用稳定 `row_id = line_index+1`。preview 对 Stream 扫 `rows`、对 File 惰性 `row_at`。
 - **`aloggrep-tui` 的 Following**：任意 LogList 手动操作（`j/k/J/K`、滚轮、`g/G`、`n/N`、Visual、搜索跳转）一律 `following=false`；**仅 `Esc`（及同等取消路径）** `resume_following`（钉底并恢复）。`G` 只跳底不恢复。
 - **`aloggrep-tui` 的 LogList 滚动跟随**：`ui::render_log_list` 每帧用持久化的 `App.list_offset` 驱动 ratatui `List` 视口。
 - **`aloggrep-tui` 的 LogList 作为行动原点**：`Esc` / Insert 取消 / 提交 Filter 组 → `Focus::LogList` 并恢复 following；HighlightBox `Enter` 上屏后跳到首命中（退出 following）；`dd` 删光 strip 后回 LogList。popup 打开时 `Esc` 只关 popup。

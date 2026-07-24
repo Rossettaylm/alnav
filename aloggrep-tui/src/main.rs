@@ -10,6 +10,7 @@ mod input;
 mod model;
 mod picker;
 mod preview;
+mod store;
 mod text_field;
 mod theme;
 mod time_panel;
@@ -81,7 +82,7 @@ struct Cli {
     #[arg(short = 'i', long)]
     ignore_case: bool,
 
-    /// Max in-memory lines before the oldest are evicted (streaming modes)
+    /// Max in-memory lines before the oldest are evicted (`--hdc` only; ignored for `-f`)
     #[arg(long, default_value_t = 500_000)]
     max_lines: usize,
 
@@ -355,10 +356,12 @@ fn main() -> Result<(), String> {
     let (ingest, hdc_child) = if cli.hdc {
         let session = aloggrep::hdc::spawn_hilog(cli.device.as_deref())?;
         let (ring, child) = ingest::spawn_hdc_ingest(session);
-        (ingest::IngestHandle::Ring(ring), Some(child))
+        (Some(ingest::IngestHandle::Ring(ring)), Some(child))
     } else {
-        let rx = ingest::spawn_file_ingest(cli.file.clone().unwrap()).map_err(|e| e.to_string())?;
-        (ingest::IngestHandle::Channel(rx), None)
+        let path = cli.file.clone().unwrap();
+        let file_store = store::FileStore::open(&path).map_err(|e| e.to_string())?;
+        app.set_file_store(file_store);
+        (None, None)
     };
     let _hdc_child_guard = HdcChildGuard(hdc_child);
 
@@ -430,7 +433,7 @@ fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     input: &mut input::InputBox,
-    ingest: &ingest::IngestHandle,
+    ingest: &Option<ingest::IngestHandle>,
 ) -> Result<(), String> {
     use app::Mode;
     use std::time::Instant;
@@ -444,7 +447,10 @@ fn run<B: ratatui::backend::Backend>(
     let mut force_draw = true; // first frame always draws
 
     while !app.should_quit {
-        app.drain(ingest);
+        if let Some(ingest) = ingest {
+            app.drain(ingest);
+        }
+        app.poll_file_store();
         app.tick_flash();
         // P1: recompute highlight match stats once per frame (O(n) scan).
         // All mutation paths set match_stats_stale=true; here is the single
@@ -3227,10 +3233,10 @@ mod dispatch_tests {
             .unwrap();
         drop(tx);
         app.drain(&rx);
-        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows().len(), 1);
 
         try_handle_ctrl_l(&mut app);
-        assert!(app.rows.is_empty());
+        assert!(app.rows().is_empty());
         assert!(app.following);
         assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
     }
@@ -3248,7 +3254,7 @@ mod dispatch_tests {
         drop(tx);
         app.drain(&rx);
         try_handle_ctrl_l(&mut app);
-        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows().len(), 1);
         assert_ne!(app.status_msg.as_deref(), Some("CLEARED"));
     }
 
@@ -3268,7 +3274,7 @@ mod dispatch_tests {
         assert!(app.detail_open());
 
         try_handle_ctrl_l(&mut app);
-        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows().len(), 1);
         assert_ne!(app.status_msg.as_deref(), Some("CLEARED"));
     }
 
@@ -4030,7 +4036,11 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('l'));
         assert_eq!(app.visible.len(), 3, "level>=W keeps W/E/F");
-        let levels: Vec<_> = app.visible_rows().map(|r| r.level.as_char()).collect();
+        let levels: Vec<_> = app
+            .visible_rows()
+            .iter()
+            .map(|r| r.level.as_char())
+            .collect();
         assert_eq!(levels, vec!['W', 'E', 'F']);
     }
 
@@ -4406,7 +4416,7 @@ mod dispatch_tests {
         app.cursor = 0;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
         assert_eq!(app.detail, DetailView::Fields);
-        let lines = ui::detail_field_lines(app.current_row(), 40);
+        let lines = ui::detail_field_lines(app.current_row().as_deref(), 40);
         let joined: String = lines
             .iter()
             .map(|l| {
@@ -4419,7 +4429,7 @@ mod dispatch_tests {
             .join("\n");
         assert!(joined.contains("TagA"), "detail shows selected tag");
         handle_normal_key(&mut app, &mut input, KeyCode::Char('j'));
-        let lines2 = ui::detail_field_lines(app.current_row(), 40);
+        let lines2 = ui::detail_field_lines(app.current_row().as_deref(), 40);
         let joined2: String = lines2
             .iter()
             .map(|l| {
@@ -4483,7 +4493,7 @@ mod dispatch_tests {
         app.following = false;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
         assert_eq!(app.detail, DetailView::Pretty);
-        let (text, ok) = ui::pretty_json_for_row(app.current_row().unwrap());
+        let (text, ok) = ui::pretty_json_for_row(&app.current_row().unwrap());
         assert!(ok);
         assert!(text.contains('\n'), "pretty should indent");
         handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
@@ -4505,7 +4515,7 @@ mod dispatch_tests {
         );
         app.following = false;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('P'));
-        let lines = ui::detail_pretty_lines(app.current_row(), 40);
+        let lines = ui::detail_pretty_lines(app.current_row().as_deref(), 40);
         let joined: String = lines
             .iter()
             .map(|l| {

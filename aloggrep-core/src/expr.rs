@@ -111,7 +111,7 @@ fn tokenize(input: &str) -> Result<Vec<(Token, usize)>, String> {
 
 // ── AST ──────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),

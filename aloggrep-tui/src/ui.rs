@@ -680,8 +680,9 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
         } else {
             s * (n - 1) / (samples - 1)
         };
-        let row_idx = app.source_idx_for_visible(i).expect("i < visible_len");
-        let row = &app.view_source()[row_idx];
+        let Some(row) = app.row_at(i) else {
+            continue;
+        };
         let r = minimap_row_for_index(i, n, h);
         if app.highlight_groups.any_match(&row.tag, &row.msg) && cells[r] < MinimapMark::Highlight {
             cells[r] = MinimapMark::Highlight;
@@ -691,22 +692,14 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
         }
     }
 
-    // Bookmarks (F5): full scan (≤ BOOKMARK_SOFT_CAP), mark alive rows in
-    // visible. Priority Severe > Bookmark > Highlight; only upgrade cells
-    // below Bookmark. Builds a row_id → visible index map once per frame.
+    // Bookmarks (F5): O(bookmarks) via row_id→visible lookup — never scan /
+    // parse all visible rows (FileStore would O(n) parse multi-million files).
     if !app.bookmarks.items.is_empty() {
-        let source = app.view_source();
-        let row_id_to_vis: std::collections::HashMap<u64, usize> = (0..n)
-            .filter_map(|i| {
-                let src_idx = app.source_idx_for_visible(i)?;
-                Some((source[src_idx].row_id, i))
-            })
-            .collect();
         for bm in &app.bookmarks.items {
             if !app.bookmark_alive(bm.row_id) {
                 continue;
             }
-            if let Some(&i) = row_id_to_vis.get(&bm.row_id) {
+            if let Some(i) = app.visible_idx_for_row_id(bm.row_id) {
                 let r = minimap_row_for_index(i, n, h);
                 if cells[r] < MinimapMark::Bookmark {
                     cells[r] = MinimapMark::Bookmark;
@@ -826,18 +819,14 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
         0
     };
 
-    let source = app.view_source();
     let items: Vec<ListItem> = if n == 0 {
         Vec::new()
     } else {
         (window_start..window_end)
-            .map(|abs_i| {
-                let row_idx = app
-                    .source_idx_for_visible(abs_i)
-                    .expect("abs_i < visible_len");
-                let row = &source[row_idx];
+            .filter_map(|abs_i| {
+                let row = app.row_at(abs_i)?;
                 let mut item = ListItem::new(render_entry_lines(
-                    row,
+                    &row,
                     &patterns,
                     inner_width,
                     abs_i + 1,
@@ -854,7 +843,7 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 } else if active && abs_i == app.cursor {
                     item = item.style(theme::log_selection_style());
                 }
-                item
+                Some(item)
             })
             .collect()
     };
@@ -1545,8 +1534,8 @@ pub fn detail_pretty_lines(
 pub fn detail_content_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
     use crate::app::DetailView;
     match app.detail {
-        DetailView::Fields => detail_field_lines(app.current_row(), inner_width),
-        DetailView::Pretty => detail_pretty_lines(app.current_row(), inner_width),
+        DetailView::Fields => detail_field_lines(app.current_row().as_deref(), inner_width),
+        DetailView::Pretty => detail_pretty_lines(app.current_row().as_deref(), inner_width),
         DetailView::Closed => Vec::new(),
     }
 }
@@ -2043,6 +2032,10 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     if let Some(time) = app.time_badge_label() {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge(theme::GLYPH_TIME, &time, theme::lock()));
+    }
+    if let Some(prog) = app.file_progress_label() {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_badge("", &prog, theme::warning()));
     }
     if app.visual_anchor.is_some() {
         spans.push(Span::raw(" "));

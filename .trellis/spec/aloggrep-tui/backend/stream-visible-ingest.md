@@ -17,11 +17,11 @@
 // app.rs
 pub enum Visible {
     All { len: usize },
-    // Subset reserved for file/mmap sparse hits — do not invent ad-hoc Vec<usize>
+    Subset(Vec<usize>), // file/mmap filter hits (line indices into FileStore)
 }
 impl Visible {
-    pub fn len(self) -> usize;
-    pub fn source_idx(self, vis_i: usize) -> Option<usize>; // All ⇒ Some(i) if i < len
+    pub fn len(&self) -> usize;
+    pub fn source_idx(&self, vis_i: usize) -> Option<usize>; // All ⇒ Some(i) if i < len
 }
 
 pub fn visible_len(&self) -> usize;
@@ -88,7 +88,7 @@ pub trait TryRecvRow {
     fn try_recv_row(&self) -> Result<EntryRow, TryRecvKind>;
 }
 pub enum IngestHandle {
-    Channel(Receiver<EntryRow>), // file path until mmap
+    Channel(Receiver<EntryRow>), // legacy/tests; production `-f` uses FileStore
     Ring(Arc<DropOldestRing>),   // hdc
 }
 pub struct DropOldestRing { /* ... */ }
@@ -123,7 +123,7 @@ pub fn drain(&mut self, ingest: &impl TryRecvRow);
 ### 5. Good / Base / Bad
 
 - **Good**: UI lag under flood; newest lines still arrive; hilog thread not blocked.
-- **Base**: file `IngestHandle::Channel` unbounded until mmap task.
+- **Base**: production `-f` uses `FileStore` (mmap); `IngestHandle::Channel` remains for tests.
 - **Bad**: `sync_channel` that blocks producer, or `try_send` drop-newest.
 
 ### 6. Tests Required

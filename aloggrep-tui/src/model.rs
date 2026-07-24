@@ -1,4 +1,18 @@
+use std::sync::OnceLock;
+
+use aloggrep::crash::CrashDetector;
 use aloggrep::parser::{Level, LogEntry};
+
+fn crash_detector() -> &'static CrashDetector {
+    static DETECTOR: OnceLock<CrashDetector> = OnceLock::new();
+    DETECTOR.get_or_init(CrashDetector::new)
+}
+
+/// Severe = level E/F, or a crash signature in the message (H2 jump target).
+pub fn is_severe_row(row: &EntryRow) -> bool {
+    matches!(row.level, Level::E | Level::F)
+        || crash_detector().detect(&row.as_log_entry()).is_some()
+}
 
 #[derive(Debug, Clone)]
 pub struct EntryRow {
@@ -40,6 +54,26 @@ impl EntryRow {
         })
     }
 
+    /// File/mmap path: parse when possible; otherwise keep a raw-only row so
+    /// unparseable lines remain browsable (stream ingest still drops them).
+    pub fn from_line_or_raw(line: &str) -> Self {
+        if let Some(row) = Self::from_line(line) {
+            return row;
+        }
+        EntryRow {
+            raw: line.to_string(),
+            row_id: 0,
+            timestamp: String::new(),
+            pid: String::new(),
+            tid: String::new(),
+            level: Level::I,
+            tag: String::new(),
+            pkg: String::new(),
+            msg: line.to_string(),
+            severe: false,
+        }
+    }
+
     /// Borrow this row's owned fields as a `LogEntry`, so `aloggrep_core`
     /// matching code (`Expr::matches`, `LogEntry::time_hms`/`time_full`)
     /// can be reused without duplicating logic.
@@ -73,6 +107,16 @@ mod tests {
     #[test]
     fn test_from_line_rejects_unparseable() {
         assert!(EntryRow::from_line("not a log line at all").is_none());
+    }
+
+    #[test]
+    fn test_from_line_or_raw_keeps_unparseable() {
+        let row = EntryRow::from_line_or_raw("not a log line at all");
+        assert_eq!(row.raw, "not a log line at all");
+        assert_eq!(row.msg, "not a log line at all");
+        assert!(row.tag.is_empty());
+        let parsed = EntryRow::from_line_or_raw("04-02 10:00:00.000  1  1 I TagA   : ok");
+        assert_eq!(parsed.tag, "TagA");
     }
 
     #[test]
