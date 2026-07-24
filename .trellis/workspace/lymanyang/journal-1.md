@@ -40,3 +40,37 @@ Implemented TextField mid-cursor editing for all Picker drafts with Manage key r
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: TUI global time window (-f)
+
+**Date**: 2026-07-24
+**Task**: TUI global time window (-f)
+**Package**: aloggrep-core
+**Branch**: `master`
+
+### Summary
+
+Grilled and shipped App.time_bound with ts/tu panel (date candidates from rows, HH:MM:SS clamp); hdc hard-hide; filter_active/yc/TIME badge; Trellis session-filters spec; 351 tests green.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fcded9b` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
