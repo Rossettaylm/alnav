@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "TUI package quality check entry"}
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "Review checklist: no Color literals, cache sync"}
+{"file": ".trellis/spec/aloggrep-tui/backend/session-filters.md", "reason": "Verify filter order + time_bound under file backend"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared guides for review mindset"}
+{"file": ".trellis/tasks/07-24-tui-mmap-file-backend/prd.md", "reason": "Acceptance criteria (startup, memory, full-file, Phase C UI)"}
+{"file": ".trellis/tasks/07-24-tui-mmap-file-backend/design.md", "reason": "RowRef/visible/memory budget contracts"}
+{"file": ".trellis/tasks/07-24-tui-mmap-file-backend/implement.md", "reason": "Validation commands and B-gate vs C acceptance"}

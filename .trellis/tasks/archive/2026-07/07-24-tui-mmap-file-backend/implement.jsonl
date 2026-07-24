@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "TUI package pre-development checklist entry"}
+{"file": ".trellis/spec/aloggrep-tui/backend/directory-structure.md", "reason": "Module layout + where store.rs / RowStore fits"}
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "Forbidden patterns: no hardcoded Color, per-frame O(1) cache sync"}
+{"file": ".trellis/spec/aloggrep-tui/backend/session-filters.md", "reason": "Keep time on App.time_bound; filter order in file scan"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared thinking guides before implementation"}
+{"file": ".trellis/tasks/07-24-tui-mmap-file-backend/prd.md", "reason": "Requirements and acceptance criteria (B-gate)"}
+{"file": ".trellis/tasks/07-24-tui-mmap-file-backend/design.md", "reason": "RowStore/FileStore/Subset architecture"}
+{"file": ".trellis/tasks/07-24-tui-mmap-file-backend/implement.md", "reason": "Phases A→B milestone→C acceptance"}
+{"file": ".trellis/tasks/07-24-tui-hdc-stream-visible/prd.md", "reason": "Hard prerequisite: Visible::All + stream ring already landed"}

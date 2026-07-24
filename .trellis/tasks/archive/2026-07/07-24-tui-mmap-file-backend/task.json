@@ -1,0 +1,32 @@
+{
+  "id": "tui-mmap-file-backend",
+  "name": "tui-mmap-file-backend",
+  "title": "TUI -f mmap file backend for huge logs",
+  "description": "-f mmap + line index + lazy parse; B-gate then background C. Depends on tui-hdc-stream-visible (Visible::All) landing first.",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": "aloggrep-tui",
+  "priority": "P1",
+  "creator": "lymanyang",
+  "assignee": "lymanyang",
+  "createdAt": "2026-07-24",
+  "completedAt": "2026-07-24",
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "aloggrep-tui/src/store.rs",
+    "aloggrep-tui/src/app.rs",
+    "aloggrep-tui/src/ingest.rs",
+    "aloggrep-tui/src/main.rs",
+    "aloggrep-tui/src/ui.rs"
+  ],
+  "notes": "Split from combined mmap+hdc plan 2026-07-24 grilling. hdc work is sibling task tui-hdc-stream-visible.",
+  "meta": {}
+}
