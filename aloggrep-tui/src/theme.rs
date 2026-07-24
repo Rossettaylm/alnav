@@ -445,6 +445,16 @@ fn numbered_glyph(number: u8) -> &'static str {
 /// a nerdfont glyph + digit badge + label, styled by whether the region is
 /// currently focused. No reverse-color block (Q3: weakened borders).
 pub fn numbered_title(number: u8, label: &str, active: bool) -> Line<'static> {
+    numbered_title_with_loading(number, label, active, None)
+}
+
+/// Like [`numbered_title`], with an optional dim loading suffix (LogList L1 banner).
+pub fn numbered_title_with_loading(
+    number: u8,
+    label: &str,
+    active: bool,
+    loading: Option<&str>,
+) -> Line<'static> {
     let glyph = numbered_glyph(number);
     let badge_style = if active {
         Style::default().fg(accent()).add_modifier(Modifier::BOLD)
@@ -456,10 +466,25 @@ pub fn numbered_title(number: u8, label: &str, active: bool) -> Line<'static> {
     } else {
         Style::default().add_modifier(Modifier::DIM)
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!(" {glyph} {number} "), badge_style),
         Span::styled(format!(" {label} "), label_style),
-    ])
+    ];
+    if let Some(msg) = loading {
+        spans.push(Span::styled(format!(" {msg} "), log_loading_style(active)));
+    }
+    Line::from(spans)
+}
+
+/// Style for LogList index/filter/highlight progress text in the block title.
+pub fn log_loading_style(active: bool) -> Style {
+    if active {
+        Style::default()
+            .fg(accent())
+            .add_modifier(Modifier::DIM | Modifier::ITALIC)
+    } else {
+        Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC)
+    }
 }
 
 /// Border title for a region that isn't part of the numbered Tab cycle

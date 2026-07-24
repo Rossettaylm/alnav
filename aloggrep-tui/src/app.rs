@@ -6,9 +6,14 @@ use crate::bookmark::{bookmark_label, AddError, Bookmark, BookmarkList, JumpResu
 use crate::filter_model::{ExcludeEntry, Group, GroupList, TimeBound};
 use crate::highlight_model::{HighlightBox, HighlightGroup, HighlightGroupList};
 use crate::model::{is_severe_row, EntryRow};
+use crate::scan::{HighlightDomain, HighlightScanState};
 use crate::store::{FileEvent, FileStore, RowRef, RowStore, StreamStore};
 use crate::time_panel::TimePanel;
 use crate::vocab::Vocab;
+
+/// Max synchronous `row_at` parses per `find_severe` keypress in File mode
+/// when the severe cache has not yet been filled (prefetch miss).
+const SEVERE_SYNC_PARSE_BUDGET: usize = 256;
 
 /// Hard cap on the matched-rows buffer (OOM safety). When a filter is active,
 /// matching rows are retained in `App::matched` independently of `rows`'
@@ -252,6 +257,12 @@ pub struct App {
     match_stats_cursor: usize,
     /// Cached result of `highlight_match_stats`. Valid when stale=false and cursor unchanged.
     pub cached_match_stats: Option<(Option<usize>, usize)>,
+    /// File-mode Vis-domain highlight hit index (async Inc scan). Unused for Stream.
+    pub highlight_scan: HighlightScanState,
+    /// Shared domain snapshot for the in-flight File highlight worker (Inc growth).
+    highlight_domain: Option<Arc<HighlightDomain>>,
+    /// Jump to first hit of this highlight group once the async scan yields a hit.
+    pending_jump_first: Option<usize>,
     /// Set to true the first time `drain` finds the ingest channel disconnected
     /// (file fully read or --hdc session ended). Used by P4 draw throttle.
     pub ingest_done: bool,
@@ -305,6 +316,9 @@ impl App {
             match_stats_stale: true,
             match_stats_cursor: usize::MAX, // sentinel: force first computation
             cached_match_stats: None,
+            highlight_scan: HighlightScanState::default(),
+            highlight_domain: None,
+            pending_jump_first: None,
             ingest_done: false,
         }
     }
@@ -324,6 +338,7 @@ impl App {
         } else if self.following {
             self.jump_bottom();
         }
+        self.restart_highlight_scan();
     }
 
     /// Stream rolling buffer (tests / hdc). Empty static for File.
@@ -524,7 +539,7 @@ impl App {
         }
     }
 
-    /// Poll mmap indexer / filter worker events (file mode). Call each frame.
+    /// Poll mmap indexer / filter / highlight worker events (file mode). Call each frame.
     pub fn poll_file_store(&mut self) {
         let Some(_) = self.store.as_file() else {
             return;
@@ -538,6 +553,8 @@ impl App {
         let mut filter_batches: Vec<(u64, Vec<usize>)> = Vec::new();
         let mut filter_done_gen = None;
         let mut index_done = false;
+        let mut hl_batches: Vec<(u64, Vec<usize>, usize)> = Vec::new();
+        let mut hl_done_gen = None;
         for ev in events {
             match ev {
                 FileEvent::IndexProgress { line_count, .. } => {
@@ -547,6 +564,9 @@ impl App {
                     }
                     if !self.filter_active() {
                         self.visible = Visible::All { len: line_count };
+                        if let Some(dom) = &self.highlight_domain {
+                            dom.set_identity_len(line_count);
+                        }
                     }
                 }
                 FileEvent::IndexDone { line_count } => {
@@ -557,6 +577,10 @@ impl App {
                     }
                     if !self.filter_active() {
                         self.visible = Visible::All { len: line_count };
+                        if let Some(dom) = &self.highlight_domain {
+                            dom.set_identity_len(line_count);
+                            dom.seal();
+                        }
                     }
                     // One-shot sampled vocab after index completes.
                     if let Some(f) = self.store.as_file() {
@@ -577,18 +601,27 @@ impl App {
                 FileEvent::FilterDone { gen, .. } => {
                     filter_done_gen = Some(gen);
                 }
+                FileEvent::HighlightBatch { gen, hits, scanned } => {
+                    hl_batches.push((gen, hits, scanned));
+                }
+                FileEvent::HighlightDone { gen, scanned } => {
+                    hl_done_gen = Some((gen, scanned));
+                }
             }
         }
         for (gen, hits) in filter_batches {
             if gen != self.file_filter_gen {
                 continue;
             }
+            // Inc: grow highlight domain with Subset so the worker can continue.
+            if let Some(dom) = &self.highlight_domain {
+                dom.extend_subset(&hits);
+            }
             match &mut self.visible {
                 Visible::Subset(v) => v.extend(hits),
                 _ => self.visible = Visible::Subset(hits),
             }
-            // Defer highlight match-stats recompute until FilterDone — a
-            // per-batch O(visible) parse scan freezes large-file UI.
+            // Never O(visible) parse here — highlight Inc follows Subset growth.
         }
         if let Some(gen) = filter_done_gen {
             if gen == self.file_filter_gen {
@@ -596,7 +629,28 @@ impl App {
                 if !matches!(self.visible, Visible::Subset(_)) && self.filter_active() {
                     self.visible = Visible::Subset(Vec::new());
                 }
+                if let Some(dom) = &self.highlight_domain {
+                    dom.seal();
+                }
+                // Refresh cached ordinal from hit index (no full parse).
                 self.match_stats_stale = true;
+            }
+        }
+        for (gen, hits, scanned) in hl_batches {
+            if gen != self.highlight_scan.gen {
+                continue;
+            }
+            self.highlight_scan.hits.extend(hits);
+            self.highlight_scan.scanned_vis = scanned;
+            self.match_stats_stale = true;
+            self.try_pending_jump_first();
+        }
+        if let Some((gen, scanned)) = hl_done_gen {
+            if gen == self.highlight_scan.gen {
+                self.highlight_scan.scanned_vis = scanned;
+                self.highlight_scan.done = true;
+                self.match_stats_stale = true;
+                self.try_pending_jump_first();
             }
         }
         if index_grew || index_done {
@@ -607,7 +661,7 @@ impl App {
             }
         }
         if index_done {
-            // Final index length only — avoid O(n) highlight scans every progress tick.
+            // Cursor-only refresh from hit index — never full UI parse.
             self.match_stats_stale = true;
             if !self.filter_active() {
                 self.ingest_done = true;
@@ -617,6 +671,24 @@ impl App {
             if gen == self.file_filter_gen && self.filter_active() {
                 self.ingest_done = true;
             }
+        }
+    }
+
+    fn try_pending_jump_first(&mut self) {
+        let Some(group_idx) = self.pending_jump_first else {
+            return;
+        };
+        if self.active_highlight != Some(group_idx) {
+            self.pending_jump_first = None;
+            return;
+        }
+        if let Some(h) = self.highlight_scan.first_hit() {
+            self.following = false;
+            self.cursor = h;
+            self.match_stats_stale = true;
+            self.pending_jump_first = None;
+        } else if self.highlight_scan.done {
+            self.pending_jump_first = None;
         }
     }
 
@@ -638,6 +710,85 @@ impl App {
             return Some(format!("FILTER {pct}%"));
         }
         None
+    }
+
+    /// LogList title/banner loading text (index / filter / highlight). Free: does
+    /// not block input. Stream sessions always return `None`.
+    pub fn log_loading_label(&self) -> Option<String> {
+        let f = self.store.as_file()?;
+        let p = f.progress();
+        if !p.index_done {
+            let pct = if p.file_bytes == 0 {
+                100
+            } else {
+                (p.indexed_bytes.saturating_mul(100) / p.file_bytes).min(100)
+            };
+            return Some(format!("Indexing {pct}%…"));
+        }
+        if self.filter_active() && !p.filter_done {
+            let total = p.indexed_lines.max(1);
+            let pct = (p.filter_scanned.saturating_mul(100) / total).min(100);
+            return Some(format!("Filtering {pct}%…"));
+        }
+        if self.active_highlight_group().is_some() && !self.highlight_scan.done {
+            let total = self.visible.len().max(1);
+            let pct = (self.highlight_scan.scanned_vis.saturating_mul(100) / total).min(100);
+            return Some(format!("Highlight {pct}%…"));
+        }
+        None
+    }
+
+    /// Cancel + restart File highlight Vis scan for the active group (or clear).
+    pub fn restart_highlight_scan(&mut self) {
+        self.pending_jump_first = None;
+        if !self.store.is_file() {
+            self.highlight_scan.clear();
+            self.highlight_domain = None;
+            self.match_stats_stale = true;
+            return;
+        }
+        let Some(group) = self.active_highlight_group().cloned() else {
+            if let Some(f) = self.store.as_file_mut() {
+                f.cancel_highlight_scan();
+            }
+            self.highlight_scan.clear();
+            self.highlight_scan.done = true;
+            self.highlight_domain = None;
+            self.match_stats_stale = true;
+            return;
+        };
+        let domain = match &self.visible {
+            Visible::All { len } => {
+                let d = HighlightDomain::identity(*len);
+                // Seal when index already done and no filter growth expected.
+                if let Some(f) = self.store.as_file() {
+                    let p = f.progress();
+                    if p.index_done && !self.filter_active() {
+                        d.seal();
+                    }
+                }
+                d
+            }
+            Visible::Subset(v) => {
+                let d = HighlightDomain::subset(v.clone());
+                if let Some(f) = self.store.as_file() {
+                    if f.progress().filter_done {
+                        d.seal();
+                    }
+                }
+                d
+            }
+        };
+        self.highlight_domain = Some(Arc::clone(&domain));
+        self.highlight_scan.clear();
+        let gen = self
+            .store
+            .as_file_mut()
+            .expect("file")
+            .start_highlight_scan(domain, &group.re);
+        self.highlight_scan.gen = gen;
+        self.highlight_scan.done = false;
+        self.match_stats_stale = true;
     }
 
     fn push_row(&mut self, mut row: EntryRow) {
@@ -789,6 +940,10 @@ impl App {
             self.cursor = self.visible.len().saturating_sub(1);
         }
         self.match_stats_stale = true;
+        // File: filter change invalidates Vis domain — restart highlight Inc.
+        if self.store.is_file() {
+            self.restart_highlight_scan();
+        }
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -1040,6 +1195,9 @@ impl App {
                 let g = &mut self.highlight_groups.groups[cursor];
                 g.enabled = !g.enabled;
                 self.match_stats_stale = true;
+                if self.store.is_file() {
+                    self.restart_highlight_scan();
+                }
             }
         }
     }
@@ -1597,6 +1755,9 @@ impl App {
 
     /// Jump to the next (`dir > 0`) or previous (`dir < 0`) severe visible row
     /// (level E/F or crash). Wraps like vim `wrapscan`. Independent of search.
+    ///
+    /// File mode prefers the severe cache / prefetch; synchronous `row_at` is
+    /// budget-capped so a keypress never full-scans a huge visible set.
     pub fn find_severe(&mut self, dir: i8) -> bool {
         let n = self.visible.len();
         if n == 0 {
@@ -1604,9 +1765,29 @@ impl App {
         }
         let step: isize = if dir >= 0 { 1 } else { -1 };
         let start = self.cursor as isize;
+        let file_mode = self.store.is_file();
+        let mut sync_parses = 0usize;
         for offset in 1..=n as isize {
             let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            if self.row_at(idx).is_some_and(|r| r.severe) {
+            let is_severe = if file_mode {
+                let Some(src) = self.source_idx_for_visible(idx) else {
+                    continue;
+                };
+                match self.store.as_file().and_then(|f| f.severe_cached(src)) {
+                    Some(v) => v,
+                    None => {
+                        if sync_parses >= SEVERE_SYNC_PARSE_BUDGET {
+                            self.set_flash("SEVERE…");
+                            return false;
+                        }
+                        sync_parses += 1;
+                        self.row_at(idx).is_some_and(|r| r.severe)
+                    }
+                }
+            } else {
+                self.row_at(idx).is_some_and(|r| r.severe)
+            };
+            if is_severe {
                 self.following = false;
                 self.cursor = idx;
                 self.match_stats_stale = true;
@@ -1629,6 +1810,15 @@ impl App {
             .is_some_and(|g| g.enabled)
         {
             return false;
+        }
+        if self.store.is_file() {
+            let Some(idx) = self.highlight_scan.find_next(self.cursor, dir) else {
+                return false;
+            };
+            self.following = false;
+            self.cursor = idx;
+            self.match_stats_stale = true;
+            return true;
         }
         let n = self.visible.len();
         if n == 0 {
@@ -1660,6 +1850,22 @@ impl App {
         };
         if !group.enabled {
             return false;
+        }
+        if self.store.is_file() {
+            if let Some(h) = self.highlight_scan.first_hit() {
+                self.following = false;
+                self.cursor = h;
+                self.match_stats_stale = true;
+                self.pending_jump_first = None;
+                return true;
+            }
+            if self.highlight_scan.done {
+                return false;
+            }
+            // Scan still running — jump when the first hit arrives.
+            self.following = false;
+            self.pending_jump_first = Some(group_idx);
+            return true;
         }
         for idx in 0..self.visible.len() {
             let Some(row) = self.row_at(idx) else {
@@ -1789,6 +1995,9 @@ impl App {
         group.enabled = self.highlight_groups.groups[index].enabled;
         self.highlight_groups.groups[index] = group;
         self.match_stats_stale = true;
+        if self.store.is_file() && self.active_highlight == Some(index) {
+            self.restart_highlight_scan();
+        }
         true
     }
 
@@ -1797,6 +2006,9 @@ impl App {
         self.active_highlight = None;
         self.highlight_cursor = 0;
         self.match_stats_stale = true;
+        if self.store.is_file() {
+            self.restart_highlight_scan();
+        }
     }
 
     pub fn delete_highlight_group_at(&mut self, index: usize) -> bool {
@@ -1808,6 +2020,9 @@ impl App {
             self.highlight_cursor = self.highlight_groups.groups.len().saturating_sub(1);
         }
         self.fix_active_highlight_after_delete(index);
+        if self.store.is_file() {
+            self.restart_highlight_scan();
+        }
         true
     }
 
@@ -1859,6 +2074,10 @@ impl App {
                     return false;
                 };
                 g.enabled = !g.enabled;
+                self.match_stats_stale = true;
+                if self.store.is_file() {
+                    self.restart_highlight_scan();
+                }
                 true
             }
             UnifiedKind::Exclude => {
@@ -1897,6 +2116,9 @@ impl App {
         };
         self.active_highlight = Some(idx);
         self.match_stats_stale = true;
+        if self.store.is_file() {
+            self.restart_highlight_scan();
+        }
         idx
     }
 
@@ -1913,8 +2135,7 @@ impl App {
     }
 
     /// Eagerly recompute and cache highlight match stats if the stale flag is set.
-    /// Called once per draw cycle in `run()` so that the O(n) scan is always done
-    /// BEFORE any render work, keeping the render phase O(viewport).
+    /// File mode reads the async hit index (O(log n)); Stream may O(visible) parse.
     pub fn recompute_match_stats_if_stale(&mut self) {
         if self.match_stats_stale || self.cursor != self.match_stats_cursor {
             self.match_stats_stale = false;
@@ -1924,9 +2145,13 @@ impl App {
     }
 
     fn compute_match_stats_inner(&self) -> Option<(Option<usize>, usize)> {
-        let Some(group) = self.active_highlight_group() else {
+        let Some(_group) = self.active_highlight_group() else {
             return None;
         };
+        if self.store.is_file() {
+            return Some(self.highlight_scan.match_stats(self.cursor));
+        }
+        let group = self.active_highlight_group()?;
         let mut total = 0usize;
         let mut current = None;
         for idx in 0..self.visible.len() {
@@ -3261,5 +3486,163 @@ mod file_store_tests {
         assert_eq!(app.visible_idx_for_row_id(2), None); // Drop filtered out
         assert_eq!(app.jump_to_bookmark(3), JumpResult::Ok);
         assert_eq!(app.cursor, 1);
+    }
+
+    fn wait_highlight_done(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.highlight_scan.done {
+            if Instant::now() > deadline {
+                panic!("highlight scan timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn file_highlight_scan_stats_and_n_without_ui_full_parse() {
+        use crate::highlight_model::HighlightGroup;
+
+        let f = write_temp(
+            "04-02 10:00:00.000  1  1 I T   : aaa\n\
+             04-02 10:00:01.000  1  1 I T   : hit one\n\
+             04-02 10:00:02.000  1  1 I T   : bbb\n\
+             04-02 10:00:03.000  1  1 I T   : hit two\n",
+        );
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.following = false;
+        app.cursor = 0;
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
+        wait_highlight_done(&mut app);
+        assert_eq!(app.highlight_scan.hits, vec![1, 3]);
+        assert_eq!(app.highlight_match_stats(), Some((None, 2)));
+        assert!(app.find_match(1));
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.highlight_match_stats(), Some((Some(1), 2)));
+        assert!(app.find_match(1));
+        assert_eq!(app.cursor, 3);
+        assert!(app.find_match(1)); // wrap
+        assert_eq!(app.cursor, 1);
+        assert!(app
+            .log_loading_label()
+            .is_none_or(|s| !s.contains("Highlight")));
+    }
+
+    #[test]
+    fn file_highlight_scan_cancels_on_filter_change() {
+        use crate::highlight_model::HighlightGroup;
+
+        let f = write_temp(
+            "04-02 10:00:00.000  1  1 I Keep   : hit a\n\
+             04-02 10:00:01.000  1  1 I Drop   : hit b\n\
+             04-02 10:00:02.000  1  1 I Keep   : other\n",
+        );
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
+        wait_highlight_done(&mut app);
+        assert_eq!(app.highlight_scan.hits, vec![0, 1]);
+        let gen_before = app.highlight_scan.gen;
+
+        app.groups.groups.push(Group {
+            label: "tag~Keep".into(),
+            chips: Vec::new(),
+            expr: Some(Expr::parse("tag ~ Keep", true).unwrap()),
+            enabled: true,
+        });
+        app.rebuild_visible();
+        assert_ne!(app.highlight_scan.gen, gen_before);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("filter timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        wait_highlight_done(&mut app);
+        // Vis domain is Keep rows only: line 0 (hit) and line 2 (no hit) → one hit at vis 0.
+        assert_eq!(app.highlight_scan.hits, vec![0]);
+        assert_eq!(app.visible_len(), 2);
+    }
+
+    #[test]
+    fn file_find_severe_uses_cache_not_full_visible_parse() {
+        let f = write_temp(
+            "04-02 10:00:00.000  1  1 I T   : ok\n\
+             04-02 10:00:01.000  1  1 E T   : err\n\
+             04-02 10:00:02.000  1  1 I T   : ok2\n",
+        );
+        let mut app = App::new(100);
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        // Wait for severe prefetch to fill cache for all lines.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let done = app
+                .store
+                .as_file()
+                .map(|f| f.progress().severe_done)
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("severe prefetch timed out");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.store.as_file().unwrap().severe_cached(1), Some(true));
+        app.following = false;
+        app.cursor = 0;
+        assert!(app.find_severe(1));
+        assert_eq!(app.cursor, 1);
+        assert!(app.log_loading_label().is_none());
+    }
+
+    #[test]
+    fn file_log_loading_label_during_filter() {
+        let mut body = String::new();
+        for i in 0..200 {
+            body.push_str(&format!("04-02 10:00:00.000  1  1 I Tag{i}   : line{i}\n"));
+        }
+        let f = write_temp(&body);
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        // Async open so filter can still be in-flight when we sample the label.
+        app.set_file_store(FileStore::open(f.path()).unwrap());
+        app.groups.groups.push(Group {
+            label: "tag~Tag1".into(),
+            chips: Vec::new(),
+            expr: Some(Expr::parse("tag ~ Tag1", true).unwrap()),
+            enabled: true,
+        });
+        app.rebuild_visible();
+        // Either indexing or filtering should produce a loading label.
+        let mut saw_loading = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            app.poll_file_store();
+            if let Some(label) = app.log_loading_label() {
+                assert!(
+                    label.contains("Indexing")
+                        || label.contains("Filtering")
+                        || label.contains("Highlight"),
+                    "unexpected label {label}"
+                );
+                saw_loading = true;
+                break;
+            }
+            if app.ingest_done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            saw_loading || app.ingest_done,
+            "expected loading or quick finish"
+        );
     }
 }

@@ -78,6 +78,12 @@ pub enum FileEvent {
 | `matched: VecDeque<EntryRow>` for file filter | `Visible::Subset` line numbers |
 | per-frame `row_at` over all visible for minimap bookmarks | `visible_idx_for_row_id` / bounded scans |
 
-## Known follow-up (out of this task)
+## Async Vis scans (task `07-24-tui-file-async-scans`)
 
-Highlight / `nN` / severe full-visible scans on UI thread — see task `tui-file-async-scans` (All-scan A1).
+| Topic | Rule |
+|-------|------|
+| Highlight | Background Vis-domain Inc scan (`scan.rs` + `FileEvent::Highlight*`); UI stats / `n`/`N` read hit index only |
+| FilterBatch | Extend `Visible::Subset` + highlight domain; never UI O(visible) `row_at` |
+| Severe | Prefetch fills `severe_cache`; `find_severe` prefers cache (sync parse budget-capped) |
+| Loading | `App::log_loading_label` → LogList title via `theme::numbered_title_with_loading` (Free navigation) |
+| Stream | Sync match stats / severe unchanged; `Visible::All` + ring intact |

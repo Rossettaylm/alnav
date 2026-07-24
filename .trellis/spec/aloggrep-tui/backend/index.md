@@ -19,6 +19,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 | [Session Filters](./session-filters.md) | Lock + global `App.time_bound` contracts | Active |
 | [Stream Visible + HDC Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest hdc ring | Active |
 | [FileStore mmap](./file-store.md) | `-f` mmap + lazy parse + bg filter | Active |
+| [Async Vis Scans](./async-scans.md) | Highlight Inc / severe prefetch / LogList loading | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Forbidden patterns, testing requirements | Active |
 | [Database Guidelines](./database-guidelines.md) | N/A for this crate | Stub |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Stub |
@@ -31,6 +32,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Read [session-filters.md](./session-filters.md) before changing filter/lock/time matching or `yc` export.
 - [ ] Read [stream-visible-ingest.md](./stream-visible-ingest.md) before changing `visible`, `push_row` eviction, or hdc ingest.
 - [ ] Read [file-store.md](./file-store.md) before changing `-f` ingest, `RowStore`, or file filter scanning.
+- [ ] Read [async-scans.md](./async-scans.md) before changing File highlight/`nN`/severe/minimap cache paths or LogList loading.
 - [ ] Read [quality-guidelines.md](./quality-guidelines.md) Forbidden Patterns (theme colors, Group.time, modal Ctrl+C).
 - [ ] Touching picker Manage: read Directory Structure "Picker session dispatch".
 
@@ -41,6 +43,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Stream `visible` is `Visible::All` (no identity `Vec` + per-row index shift).
 - [ ] File filter hits use `Visible::Subset` (line numbers); no full-file owned `EntryRow` / `matched`.
 - [ ] `--hdc` ingest uses drop-oldest ring (`INGEST_RING_CAP`), not a blocking/unbounded channel.
+- [ ] File highlight stats / `n`/`N` use hit index (no UI O(visible) `row_at`); FilterBatch does not full-parse.
 - [ ] New modal key paths handle Ctrl+C as cancel when appropriate.
 - [ ] `cargo test -p aloggrep-tui` green; `cargo fmt -p aloggrep-tui --check` clean.
 

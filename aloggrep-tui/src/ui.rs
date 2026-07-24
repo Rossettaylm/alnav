@@ -673,22 +673,64 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
         }
     }
 
-    let samples = n.min(MINIMAP_MARK_BUDGET);
-    for s in 0..samples {
-        let i = if samples <= 1 {
-            0
-        } else {
-            s * (n - 1) / (samples - 1)
-        };
-        let Some(row) = app.row_at(i) else {
-            continue;
-        };
-        let r = minimap_row_for_index(i, n, h);
-        if app.highlight_groups.any_match(&row.tag, &row.msg) && cells[r] < MinimapMark::Highlight {
-            cells[r] = MinimapMark::Highlight;
+    // File: never O(budget) `row_at` — severe via prefetch cache, highlight via
+    // async hit index. Stream keeps owned-row sample parse (bounded buffer).
+    if app.store.is_file() {
+        let samples = n.min(MINIMAP_MARK_BUDGET);
+        for s in 0..samples {
+            let i = if samples <= 1 {
+                0
+            } else {
+                s * (n - 1) / (samples - 1)
+            };
+            let Some(src) = app.source_idx_for_visible(i) else {
+                continue;
+            };
+            if app.store.as_file().and_then(|f| f.severe_cached(src)) == Some(true) {
+                let r = minimap_row_for_index(i, n, h);
+                cells[r] = MinimapMark::Severe;
+            }
         }
-        if row.severe {
-            cells[r] = MinimapMark::Severe;
+        let hits = &app.highlight_scan.hits;
+        let hit_n = hits.len();
+        if hit_n > 0 {
+            let take = hit_n.min(MINIMAP_MARK_BUDGET);
+            for s in 0..take {
+                let hi = if take <= 1 {
+                    0
+                } else {
+                    s * (hit_n - 1) / (take - 1)
+                };
+                let i = hits[hi];
+                if i >= n {
+                    continue;
+                }
+                let r = minimap_row_for_index(i, n, h);
+                if cells[r] < MinimapMark::Highlight {
+                    cells[r] = MinimapMark::Highlight;
+                }
+            }
+        }
+    } else {
+        let samples = n.min(MINIMAP_MARK_BUDGET);
+        for s in 0..samples {
+            let i = if samples <= 1 {
+                0
+            } else {
+                s * (n - 1) / (samples - 1)
+            };
+            let Some(row) = app.row_at(i) else {
+                continue;
+            };
+            let r = minimap_row_for_index(i, n, h);
+            if app.highlight_groups.any_match(&row.tag, &row.msg)
+                && cells[r] < MinimapMark::Highlight
+            {
+                cells[r] = MinimapMark::Highlight;
+            }
+            if row.severe {
+                cells[r] = MinimapMark::Severe;
+            }
         }
     }
 
@@ -756,7 +798,9 @@ fn render_minimap(app: &App, frame: &mut Frame, rail: Rect) {
 /// viewport-snap bug.
 pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let active = app.focus == Focus::LogList;
-    let block = rounded_block(theme::numbered_title(4, "Log", active), active);
+    let loading = app.log_loading_label();
+    let title = theme::numbered_title_with_loading(4, "Log", active, loading.as_deref());
+    let block = rounded_block(title, active);
     let inner = block.inner(area);
     // H3: reserve 1 inner column for the minimap when there is content.
     let rail_w = if !app.visible.is_empty() && inner.width > 1 {
@@ -2825,6 +2869,52 @@ mod tests {
         assert!(marks.iter().any(|m| *m == MinimapMark::Viewport));
         // Index 1 (E) maps near row 1 of 4.
         assert_eq!(marks[minimap_row_for_index(1, 4, 4)], MinimapMark::Severe);
+    }
+
+    #[test]
+    fn test_build_minimap_marks_file_uses_cache_and_hit_index() {
+        use crate::store::FileStore;
+        use std::io::Write;
+
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(
+            b"04-02 10:00:00.000  1  1 I Tag     : ok\n\
+              04-02 10:00:01.000  1  1 E Tag     : boom\n\
+              04-02 10:00:02.000  1  1 I Tag     : findme here\n\
+              04-02 10:00:03.000  1  1 I Tag     : ok\n",
+        )
+        .unwrap();
+        f.flush().unwrap();
+        let mut app = App::new(100);
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        // Wait for severe prefetch so cache is warm (no UI row_at needed).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let done = app
+                .store
+                .as_file()
+                .map(|fs| fs.progress().severe_done)
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("severe prefetch timed out");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.highlight_scan.hits = vec![2];
+        app.highlight_scan.done = true;
+        app.list_offset = 0;
+
+        let marks = build_minimap_marks(&app, 4);
+        assert!(marks.iter().any(|m| *m == MinimapMark::Severe));
+        assert!(marks.iter().any(|m| *m == MinimapMark::Highlight));
+        assert_eq!(marks[minimap_row_for_index(1, 4, 4)], MinimapMark::Severe);
+        assert_eq!(
+            marks[minimap_row_for_index(2, 4, 4)],
+            MinimapMark::Highlight
+        );
     }
 
     #[test]

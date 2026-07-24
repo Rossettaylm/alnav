@@ -19,6 +19,7 @@ use memchr::memchr_iter;
 use memmap2::Mmap;
 
 use crate::model::{is_severe_row, EntryRow};
+use crate::scan::{self, HighlightDomain};
 
 /// Parse-cache capacity for file lazy rows (viewport + minimap reuse).
 const FILE_PARSE_LRU: usize = 256;
@@ -110,6 +111,11 @@ pub struct FileProgress {
     pub filter_done: bool,
     /// Active filter generation (0 = none / inactive filter).
     pub filter_gen: u64,
+    pub highlight_scanned: usize,
+    pub highlight_done: bool,
+    pub highlight_gen: u64,
+    pub severe_scanned: usize,
+    pub severe_done: bool,
 }
 
 /// Messages from background file workers to the UI thread.
@@ -130,6 +136,16 @@ pub enum FileEvent {
         scanned: usize,
     },
     FilterDone {
+        gen: u64,
+        scanned: usize,
+    },
+    /// Incremental highlight hits (Vis indices) for generation `gen`.
+    HighlightBatch {
+        gen: u64,
+        hits: Vec<usize>,
+        scanned: usize,
+    },
+    HighlightDone {
         gen: u64,
         scanned: usize,
     },
@@ -154,9 +170,19 @@ pub struct FileStore {
     filter_gen: Arc<AtomicU64>,
     filter_scanned: Arc<AtomicUsize>,
     filter_done: Arc<AtomicBool>,
+    highlight_handle: Option<JoinHandle<()>>,
+    highlight_cancel: Arc<AtomicBool>,
+    highlight_gen: Arc<AtomicU64>,
+    highlight_scanned: Arc<AtomicUsize>,
+    highlight_done: Arc<AtomicBool>,
+    highlight_domain: Option<Arc<HighlightDomain>>,
+    _severe_handle: Option<JoinHandle<()>>,
+    _severe_cancel: Arc<AtomicBool>,
+    severe_scanned: Arc<AtomicUsize>,
+    severe_done: Arc<AtomicBool>,
     parse_lru: Mutex<LruCache<usize, EntryRow>>,
-    /// Lazy severe flags keyed by line index; `None` = unknown.
-    severe_cache: RwLock<Vec<Option<bool>>>,
+    /// Lazy / prefetched severe flags keyed by line index; `None` = unknown.
+    severe_cache: Arc<RwLock<Vec<Option<bool>>>>,
     vocab_started: AtomicBool,
 }
 
@@ -182,6 +208,20 @@ impl FileStore {
             index_file_background(mmap_bg, lines_bg, indexed_bytes_bg, index_done_bg, tx_bg);
         });
 
+        let severe_cache = Arc::new(RwLock::new(Vec::new()));
+        let severe_cancel = Arc::new(AtomicBool::new(false));
+        let severe_scanned = Arc::new(AtomicUsize::new(0));
+        let severe_done = Arc::new(AtomicBool::new(false));
+        let _severe_handle = Some(scan::spawn_severe_prefetch(
+            Arc::clone(&mmap),
+            Arc::clone(&lines),
+            Arc::clone(&index_done),
+            Arc::clone(&severe_cancel),
+            Arc::clone(&severe_cache),
+            Arc::clone(&severe_scanned),
+            Arc::clone(&severe_done),
+        ));
+
         Ok(Self {
             path,
             mmap,
@@ -197,10 +237,20 @@ impl FileStore {
             filter_gen: Arc::new(AtomicU64::new(0)),
             filter_scanned: Arc::new(AtomicUsize::new(0)),
             filter_done: Arc::new(AtomicBool::new(true)),
+            highlight_handle: None,
+            highlight_cancel: Arc::new(AtomicBool::new(false)),
+            highlight_gen: Arc::new(AtomicU64::new(0)),
+            highlight_scanned: Arc::new(AtomicUsize::new(0)),
+            highlight_done: Arc::new(AtomicBool::new(true)),
+            highlight_domain: None,
+            _severe_handle,
+            _severe_cancel: severe_cancel,
+            severe_scanned,
+            severe_done,
             parse_lru: Mutex::new(LruCache::new(
                 NonZeroUsize::new(FILE_PARSE_LRU).expect("non-zero"),
             )),
-            severe_cache: RwLock::new(Vec::new()),
+            severe_cache,
             vocab_started: AtomicBool::new(false),
         })
     }
@@ -216,13 +266,31 @@ impl FileStore {
         let (tx, rx) = mpsc::channel();
         let _ = tx.send(FileEvent::IndexDone { line_count });
 
+        let mmap = Arc::new(mmap);
+        let lines = Arc::new(RwLock::new(spans));
+        let index_done = Arc::new(AtomicBool::new(true));
+        let severe_cache = Arc::new(RwLock::new(vec![None; line_count]));
+        let severe_cancel = Arc::new(AtomicBool::new(false));
+        let severe_scanned = Arc::new(AtomicUsize::new(0));
+        let severe_done = Arc::new(AtomicBool::new(false));
+        // Prefetch severe flags even for sync-open (tests + find_severe path).
+        let _severe_handle = Some(scan::spawn_severe_prefetch(
+            Arc::clone(&mmap),
+            Arc::clone(&lines),
+            Arc::clone(&index_done),
+            Arc::clone(&severe_cancel),
+            Arc::clone(&severe_cache),
+            Arc::clone(&severe_scanned),
+            Arc::clone(&severe_done),
+        ));
+
         Ok(Self {
             path,
-            mmap: Arc::new(mmap),
-            lines: Arc::new(RwLock::new(spans)),
+            mmap,
+            lines,
             file_bytes,
             indexed_bytes: Arc::new(AtomicUsize::new(file_bytes)),
-            index_done: Arc::new(AtomicBool::new(true)),
+            index_done,
             event_tx: tx,
             events: rx,
             _index_handle: None,
@@ -231,10 +299,20 @@ impl FileStore {
             filter_gen: Arc::new(AtomicU64::new(0)),
             filter_scanned: Arc::new(AtomicUsize::new(0)),
             filter_done: Arc::new(AtomicBool::new(true)),
+            highlight_handle: None,
+            highlight_cancel: Arc::new(AtomicBool::new(false)),
+            highlight_gen: Arc::new(AtomicU64::new(0)),
+            highlight_scanned: Arc::new(AtomicUsize::new(0)),
+            highlight_done: Arc::new(AtomicBool::new(true)),
+            highlight_domain: None,
+            _severe_handle,
+            _severe_cancel: severe_cancel,
+            severe_scanned,
+            severe_done,
             parse_lru: Mutex::new(LruCache::new(
                 NonZeroUsize::new(FILE_PARSE_LRU).expect("non-zero"),
             )),
-            severe_cache: RwLock::new(vec![None; line_count]),
+            severe_cache,
             vocab_started: AtomicBool::new(false),
         })
     }
@@ -264,6 +342,11 @@ impl FileStore {
             filter_scanned: self.filter_scanned.load(Ordering::Relaxed),
             filter_done: self.filter_done.load(Ordering::Acquire),
             filter_gen: self.filter_gen.load(Ordering::Relaxed),
+            highlight_scanned: self.highlight_scanned.load(Ordering::Relaxed),
+            highlight_done: self.highlight_done.load(Ordering::Acquire),
+            highlight_gen: self.highlight_gen.load(Ordering::Relaxed),
+            severe_scanned: self.severe_scanned.load(Ordering::Relaxed),
+            severe_done: self.severe_done.load(Ordering::Acquire),
         }
     }
 
@@ -318,6 +401,59 @@ impl FileStore {
         drop(self.filter_handle.take());
         self.filter_done = Arc::new(AtomicBool::new(true));
         self.filter_scanned = Arc::new(AtomicUsize::new(0));
+    }
+
+    /// Cancel any in-flight highlight scan and start a new Vis-domain scan.
+    /// Returns the generation id.
+    pub fn start_highlight_scan(
+        &mut self,
+        domain: Arc<HighlightDomain>,
+        pattern: &regex::Regex,
+    ) -> u64 {
+        self.highlight_cancel.store(true, Ordering::Release);
+        drop(self.highlight_handle.take());
+        self.highlight_cancel = Arc::new(AtomicBool::new(false));
+        self.highlight_scanned = Arc::new(AtomicUsize::new(0));
+        self.highlight_done = Arc::new(AtomicBool::new(false));
+        let gen = {
+            let g = self.highlight_gen.load(Ordering::Relaxed) + 1;
+            self.highlight_gen.store(g, Ordering::Release);
+            g
+        };
+        self.highlight_domain = Some(Arc::clone(&domain));
+        let handle = scan::spawn_highlight_scan(
+            Arc::clone(&self.mmap),
+            Arc::clone(&self.lines),
+            domain,
+            Arc::clone(&self.highlight_cancel),
+            Arc::clone(&self.highlight_scanned),
+            Arc::clone(&self.highlight_done),
+            gen,
+            pattern.clone(),
+            self.event_tx.clone(),
+        );
+        self.highlight_handle = Some(handle);
+        gen
+    }
+
+    /// Cancel highlight scan without starting a new one.
+    pub fn cancel_highlight_scan(&mut self) {
+        self.highlight_cancel.store(true, Ordering::Release);
+        drop(self.highlight_handle.take());
+        self.highlight_done = Arc::new(AtomicBool::new(true));
+        self.highlight_scanned = Arc::new(AtomicUsize::new(0));
+        self.highlight_domain = None;
+    }
+
+    /// Shared domain for Inc growth (FilterBatch / IndexProgress), if scanning.
+    pub fn highlight_domain(&self) -> Option<&Arc<HighlightDomain>> {
+        self.highlight_domain.as_ref()
+    }
+
+    /// Cached severe flag without parsing (`None` = unknown).
+    pub fn severe_cached(&self, i: usize) -> Option<bool> {
+        let cache = self.severe_cache.read().expect("severe cache");
+        cache.get(i).copied().flatten()
     }
 
     /// Lazy parse line `i` (0-based). Unparseable → raw-fallback EntryRow.

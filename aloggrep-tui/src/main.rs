@@ -10,6 +10,7 @@ mod input;
 mod model;
 mod picker;
 mod preview;
+mod scan;
 mod store;
 mod text_field;
 mod theme;

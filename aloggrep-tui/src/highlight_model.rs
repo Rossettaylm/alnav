@@ -3,6 +3,7 @@ use regex::Regex;
 /// One committed highlight group: a single pattern highlighted in the log list.
 /// Multiple highlights = multiple groups (all enabled patterns paint; `n`/`N`
 /// and underline follow `App.active_highlight` only).
+#[derive(Clone)]
 pub struct HighlightGroup {
     /// Original pattern string (for display + dedup); matching uses `re`.
     pub pattern: String,

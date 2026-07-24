@@ -19,6 +19,7 @@ aloggrep-tui/src/
 ├── main.rs         # CLI entry, terminal lifecycle, event loop, key dispatch
 ├── app.rs          # App state machine: store/Visible::{All,Subset}/groups/time_bound/bookmarks/picker/focus
 ├── store.rs        # RowStore/FileStore/StreamStore/RowRef (mmap file + stream)
+├── scan.rs         # File Vis+Inc highlight worker + severe prefetch (async-scans)
 ├── model.rs        # EntryRow: owned line model, from_line()/from_line_or_raw()/as_log_entry()
 ├── filter_model.rs # Group/GroupList + TimeBound (global window matching)
 ├── time_panel.rs   # `-f` ts panel: date candidates from rows + HH:MM:SS clamp
