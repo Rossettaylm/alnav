@@ -1,0 +1,31 @@
+{
+  "id": "tui-file-async-scans",
+  "name": "tui-file-async-scans",
+  "title": "TUI file async scans (highlight/filter/severe) + LogList loading",
+  "description": "All-scan A1: background Vis-domain incremental highlight hits + n/N; reinforce filter no UI O(n); severe off UI; LogList L1+T+Free loading.",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": "aloggrep-tui",
+  "priority": "P1",
+  "creator": "lymanyang",
+  "assignee": "lymanyang",
+  "createdAt": "2026-07-24",
+  "completedAt": "2026-07-24",
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "aloggrep-tui/src/store.rs",
+    "aloggrep-tui/src/app.rs",
+    "aloggrep-tui/src/ui.rs",
+    "aloggrep-tui/src/theme.rs"
+  ],
+  "notes": "Grilled 2026-07-24: All-scan A1 Vis+Inc L1+T+Free. Depends on mmap 0dca14d.",
+  "meta": {}
+}

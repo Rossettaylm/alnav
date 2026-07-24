@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "TUI package pre-development checklist"}
+{"file": ".trellis/spec/aloggrep-tui/backend/file-store.md", "reason": "FileStore contracts; known follow-up for highlight scans"}
+{"file": ".trellis/spec/aloggrep-tui/backend/stream-visible-ingest.md", "reason": "Visible::All/Subset + hdc ring must not regress"}
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "No hardcoded Color; theme tokens for loading"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared thinking guides"}
+{"file": ".trellis/tasks/07-24-tui-file-async-scans/prd.md", "reason": "Requirements and acceptance"}
+{"file": ".trellis/tasks/07-24-tui-file-async-scans/design.md", "reason": "ScanHub / Vis+Inc / loading UI design"}
+{"file": ".trellis/tasks/07-24-tui-file-async-scans/implement.md", "reason": "Phased execution"}
+{"file": "aloggrep-tui/src/store.rs", "reason": "Extend workers / events"}
+{"file": "aloggrep-tui/src/app.rs", "reason": "match stats / nN / poll / loading label"}
+{"file": "aloggrep-tui/src/ui.rs", "reason": "LogList loading banner"}

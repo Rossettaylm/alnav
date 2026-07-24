@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "Quality check entry"}
+{"file": ".trellis/spec/aloggrep-tui/backend/file-store.md", "reason": "File contracts"}
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "Theme / forbidden patterns"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Review mindset"}
+{"file": ".trellis/tasks/07-24-tui-file-async-scans/prd.md", "reason": "Acceptance criteria"}
+{"file": ".trellis/tasks/07-24-tui-file-async-scans/design.md", "reason": "Design contracts"}
+{"file": ".trellis/tasks/07-24-tui-file-async-scans/implement.md", "reason": "Validation commands"}
