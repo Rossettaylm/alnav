@@ -12,6 +12,7 @@ mod picker;
 mod preview;
 mod text_field;
 mod theme;
+mod time_panel;
 mod ui;
 mod vocab;
 
@@ -26,8 +27,8 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::layout::Position;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Position;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::Terminal;
 
@@ -97,6 +98,7 @@ struct Cli {
     config_path: Option<PathBuf>,
 }
 
+/// Startup chip/expr Filter group (no time — time goes to [`App::time_bound`]).
 fn initial_group(cli: &Cli) -> Result<GroupList, String> {
     // TUI always compiles filters case-insensitively (CLI `-i` is a no-op).
     // Startup CLI multi-values keep OR (`msg:a|b` label); interactive chips use And.
@@ -110,15 +112,14 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
         true,
         SameFieldOp::Or,
     )?;
-    let time = if cli.since.is_some() || cli.until.is_some() {
-        Some(TimeBound {
-            since: cli.since.clone(),
-            until: cli.until.clone(),
-        })
-    } else {
-        None
-    };
-    if expr.is_none() && time.is_none() {
+    if expr.is_none()
+        && cli.tag.is_empty()
+        && cli.msg.is_empty()
+        && cli.pkg.is_empty()
+        && cli.pid.is_empty()
+        && cli.tid.is_empty()
+        && cli.level.is_none()
+    {
         return Ok(GroupList::default());
     }
     let mut chips = Vec::new();
@@ -177,12 +178,6 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
     if let Some(l) = &cli.level {
         label_parts.push(format!("level:{l}"));
     }
-    if let Some(s) = &cli.since {
-        label_parts.push(format!("since:{s}"));
-    }
-    if let Some(u) = &cli.until {
-        label_parts.push(format!("until:{u}"));
-    }
     let label = if label_parts.is_empty() {
         "(startup filter)".to_string()
     } else {
@@ -193,10 +188,20 @@ fn initial_group(cli: &Cli) -> Result<GroupList, String> {
             label,
             chips,
             expr,
-            time,
             enabled: true,
         }],
         excludes: Vec::new(),
+    })
+}
+
+/// Startup `--since`/`--until` → global session time window (not a Filter group).
+fn initial_time_bound(cli: &Cli) -> Option<TimeBound> {
+    if cli.since.is_none() && cli.until.is_none() {
+        return None;
+    }
+    Some(TimeBound {
+        since: cli.since.clone(),
+        until: cli.until.clone(),
     })
 }
 
@@ -260,8 +265,22 @@ mod tests {
         assert!(label.contains("pid:111"), "label was: {label}");
         assert!(label.contains("tid:222"), "label was: {label}");
         assert!(label.contains("level:E"), "label was: {label}");
-        assert!(label.contains("since:10:00:00"), "label was: {label}");
-        assert!(label.contains("until:10:01:00"), "label was: {label}");
+        // Time is global, not on the Filter group label.
+        assert!(!label.contains("since:"), "label was: {label}");
+        assert!(!label.contains("until:"), "label was: {label}");
+        let bound = initial_time_bound(&c).unwrap();
+        assert_eq!(bound.since.as_deref(), Some("10:00:00"));
+        assert_eq!(bound.until.as_deref(), Some("10:01:00"));
+    }
+
+    #[test]
+    fn test_initial_time_only_yields_empty_groups() {
+        let c = cli(&["-f", "app.log", "--since", "10:00:00"]);
+        let groups = initial_group(&c).unwrap();
+        assert!(groups.groups.is_empty());
+        let bound = initial_time_bound(&c).unwrap();
+        assert_eq!(bound.since.as_deref(), Some("10:00:00"));
+        assert!(bound.until.is_none());
     }
 }
 
@@ -314,9 +333,11 @@ fn main() -> Result<(), String> {
     let (app_config, config_status) = config::load_config(&config_dir);
 
     let groups = initial_group(&cli)?;
+    let time_bound = initial_time_bound(&cli);
     let mut app = App::new(cli.max_lines);
     app.config = app_config;
     app.groups = groups;
+    app.time_bound = time_bound;
     app.export_source = if cli.hdc {
         export::ExportSource::Hdc {
             device: cli.device.clone(),
@@ -551,6 +572,10 @@ fn run<B: ratatui::backend::Backend>(
                         if prev.height > 0 {
                             ui::render_preview("Preview", &preview_lines, "无匹配行", frame, prev);
                         }
+                    } else if app.time_panel.is_some() {
+                        let h = ui::time_panel_height(frame_area);
+                        let area = ui::top_modal_rect(frame_area, modal_w.max(56), h);
+                        hw_cursor = ui::render_time_panel(app, frame, area);
                     } else if app.detail_open() {
                         let inner_w = modal_w.saturating_sub(2).max(1);
                         let content_rows = ui::detail_content_lines(app, inner_w).len().max(1);
@@ -591,10 +616,14 @@ fn run<B: ratatui::backend::Backend>(
             _ => continue,
         };
 
-        // Picker / Search-box are checked before Ctrl+C / Normal/Insert
+        // Picker / Search-box / time panel are checked before Ctrl+C / Normal/Insert
         // so Ctrl+C cancels the draft like Esc, instead of quitting in Normal.
         if app.picker.is_some() {
             handle_picker_key(app, key);
+            continue;
+        }
+        if app.time_panel.is_some() {
+            handle_time_panel_key(app, key);
             continue;
         }
         if app.highlight_box.editing {
@@ -820,8 +849,9 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                         .collect();
                     styles = vec![theme::muted(); labels.len()];
                 }
-                preview_lines = preview::preview_highlight_pattern_lines(app, session.draft.as_str())
-                    .unwrap_or_default();
+                preview_lines =
+                    preview::preview_highlight_pattern_lines(app, session.draft.as_str())
+                        .unwrap_or_default();
                 empty_msg = "输入高亮词".to_string();
             }
             PickerKind::Filter | PickerKind::Exclude => {
@@ -1694,6 +1724,10 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
         app.cancel_lock_pending();
         return;
     }
+    if app.pending_time {
+        app.cancel_time_pending();
+        return;
+    }
 
     match app.mode {
         Mode::Normal => app.should_quit = true,
@@ -1870,11 +1904,40 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
         app.pending_chip = false;
         app.pending_exclude = false;
         app.pending_lock = false;
+        app.pending_time = false;
         app.pending_m = false;
         app.pending_leader = true;
         return true;
     }
     false
+}
+
+/// Route keys to the open `ts` time panel. Esc / Ctrl+C cancel without applying
+/// and do not resume following (same draft-cancel convention as Picker).
+fn handle_time_panel_key(app: &mut App, key: event::KeyEvent) {
+    use time_panel::TimePanelOutcome;
+
+    let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
+    if key.code == KeyCode::Esc || (key.code == KeyCode::Char('c') && ctrl) {
+        app.close_time_panel();
+        return;
+    }
+
+    let Some(panel) = app.time_panel.as_mut() else {
+        return;
+    };
+    match panel.handle_key(key.code) {
+        TimePanelOutcome::Continue => {}
+        TimePanelOutcome::Cancel => {
+            app.close_time_panel();
+        }
+        TimePanelOutcome::Submit(bound) => {
+            app.apply_time_bound(bound);
+        }
+        TimePanelOutcome::Flash(msg) => {
+            app.set_flash(msg);
+        }
+    }
 }
 
 fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
@@ -2069,6 +2132,36 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         }
     }
 
+    // Global time-window operator pending (`t` + s/u). File mode only.
+    // Esc clears pending only; does not resume_following.
+    if app.pending_time {
+        app.pending_time = false;
+        if app.focus == Focus::LogList {
+            match code {
+                KeyCode::Esc => {
+                    app.cancel_time_pending();
+                    return;
+                }
+                KeyCode::Char('s') => {
+                    let _ = app.open_time_panel();
+                    return;
+                }
+                KeyCode::Char('u') => {
+                    app.clear_time_bound();
+                    return;
+                }
+                KeyCode::Char(_) => {
+                    app.set_flash("未知");
+                    return;
+                }
+                _ => {
+                    app.set_flash("未知");
+                    return;
+                }
+            }
+        }
+    }
+
     // Bookmark operator pending (`m`/`M` + a/d/m). Esc clears pending only.
     // `mm` → Manage; `MM` falls through to `_ => 未知` (out of scope, F-doc).
     if app.pending_m {
@@ -2148,6 +2241,9 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (Focus::LogList, KeyCode::Char('f')) => {
             app.begin_lock_from_cursor();
         }
+        (Focus::LogList, KeyCode::Char('t')) if app.is_file_mode() => {
+            app.begin_time_op();
+        }
         (Focus::LogList, KeyCode::Char('m') | KeyCode::Char('M')) => {
             app.begin_bookmark_op();
         }
@@ -2155,6 +2251,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             app.pending_chip = false;
             app.pending_exclude = false;
             app.pending_lock = false;
+            app.pending_time = false;
             app.pending_m = false;
             app.pending_leader = false;
             app.pending_yank = true;
@@ -2355,7 +2452,6 @@ mod dispatch_tests {
             label: "g".into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         });
         app.highlight_groups
@@ -2527,10 +2623,7 @@ mod dispatch_tests {
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("error").unwrap());
         app.open_unified_picker();
 
-        handle_picker_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
-        );
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         assert!(app.picker.as_ref().unwrap().confirm.is_some());
         handle_picker_key(
             &mut app,
@@ -2563,14 +2656,12 @@ mod dispatch_tests {
             label: "first".into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         });
         app.groups.groups.push(Group {
             label: "second".into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         });
         app.open_unified_picker();
@@ -2592,7 +2683,6 @@ mod dispatch_tests {
             label: "f1".into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         });
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("h1").unwrap());
@@ -2675,10 +2765,7 @@ mod dispatch_tests {
 
         let mut app = App::new(100);
         app.open_picker_new(crate::picker::PickerKind::Highlight);
-        assert!(matches!(
-            app.picker.as_ref().unwrap().mode,
-            PickerMode::New
-        ));
+        assert!(matches!(app.picker.as_ref().unwrap().mode, PickerMode::New));
         for c in "foo bar".chars() {
             handle_picker_key(
                 &mut app,
@@ -3136,10 +3223,8 @@ mod dispatch_tests {
         app.focus = app::Focus::LogList;
         app.mode = app::Mode::Normal;
         let (tx, rx) = mpsc::channel();
-        tx.send(
-            model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap(),
-        )
-        .unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap())
+            .unwrap();
         drop(tx);
         app.drain(&rx);
         assert_eq!(app.rows.len(), 1);
@@ -3158,10 +3243,8 @@ mod dispatch_tests {
         let mut app = App::new(100);
         app.export_source = ExportSource::File("app.log".into());
         let (tx, rx) = mpsc::channel();
-        tx.send(
-            model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap(),
-        )
-        .unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap())
+            .unwrap();
         drop(tx);
         app.drain(&rx);
         try_handle_ctrl_l(&mut app);
@@ -3177,10 +3260,8 @@ mod dispatch_tests {
         let mut app = App::new(100);
         app.export_source = ExportSource::Hdc { device: None };
         let (tx, rx) = mpsc::channel();
-        tx.send(
-            model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap(),
-        )
-        .unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap())
+            .unwrap();
         drop(tx);
         app.drain(&rx);
         app.toggle_detail_fields();
@@ -3386,7 +3467,6 @@ mod dispatch_tests {
             label: "g".into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         });
         assert!(app
@@ -3486,7 +3566,6 @@ mod dispatch_tests {
             label: "g0".into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         });
         app.focus = app::Focus::ChipStrip;
@@ -3505,7 +3584,6 @@ mod dispatch_tests {
             label: "g0".into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         });
         app.focus = app::Focus::ChipStrip;
@@ -4470,6 +4548,86 @@ mod dispatch_tests {
         let cmd = app.last_yanked.as_deref().unwrap();
         assert!(cmd.starts_with("aloggrep -f 'demo.log' -i -e "));
         assert!(cmd.contains(r#"tag ~ "MyTag""#), "{cmd}");
+    }
+
+    #[test]
+    fn test_ts_opens_panel_in_file_mode_and_tu_clears() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.export_source = export::ExportSource::File("demo.log".into());
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : a",
+                "04-02 12:00:00.000  1  1 I Tag     : b",
+            ],
+        );
+        app.following = true;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert!(app.pending_time);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+        assert!(app.time_panel.is_some());
+        assert!(!app.following, "ts opens with following=false");
+        assert!(!app.pending_time);
+
+        // Submit a one-sided since window via panel API (key path covered above).
+        app.apply_time_bound(crate::filter_model::TimeBound {
+            since: Some("04-02 11:00:00".into()),
+            until: None,
+        });
+        assert!(app.filter_active());
+        assert_eq!(app.visible.len(), 1);
+        assert!(app.export_cli_command().contains("--since "));
+
+        app.following = true;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('u'));
+        assert!(app.time_bound.is_none());
+        assert!(!app.following);
+        assert_eq!(app.visible.len(), 2);
+        assert_eq!(app.status_msg.as_deref(), Some("TIME CLEARED"));
+    }
+
+    #[test]
+    fn test_ts_empty_candidates_flashes_and_hdc_hides_t() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.export_source = export::ExportSource::File("demo.log".into());
+        // No rows → no date candidates.
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+        assert!(app.time_panel.is_none());
+        assert_eq!(app.status_msg.as_deref(), Some("无可用日期"));
+
+        // --hdc: bare `t` must not arm time operator.
+        app.export_source = export::ExportSource::Hdc { device: None };
+        app.status_msg = None;
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : a"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert!(!app.pending_time);
+        assert!(app.time_panel.is_none());
+    }
+
+    #[test]
+    fn test_time_panel_ctrl_c_cancels_without_apply() {
+        let mut app = App::new(100);
+        app.export_source = export::ExportSource::File("demo.log".into());
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : a"]);
+        app.time_bound = Some(crate::filter_model::TimeBound {
+            since: Some("04-02 10:00:00".into()),
+            until: None,
+        });
+        assert!(app.open_time_panel());
+        handle_time_panel_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(app.time_panel.is_none());
+        assert_eq!(
+            app.time_bound.as_ref().and_then(|t| t.since.as_deref()),
+            Some("04-02 10:00:00"),
+            "Ctrl+C must not clear the already-applied bound"
+        );
     }
 
     #[test]

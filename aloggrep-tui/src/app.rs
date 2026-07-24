@@ -6,9 +6,10 @@ use aloggrep::crash::CrashDetector;
 use aloggrep::parser::Level;
 
 use crate::bookmark::{bookmark_label, AddError, Bookmark, BookmarkList, JumpResult};
-use crate::filter_model::{ExcludeEntry, Group, GroupList};
+use crate::filter_model::{ExcludeEntry, Group, GroupList, TimeBound};
 use crate::highlight_model::{HighlightBox, HighlightGroup, HighlightGroupList};
 use crate::model::EntryRow;
+use crate::time_panel::TimePanel;
 use crate::vocab::Vocab;
 
 /// Hard cap on the matched-rows buffer (OOM safety). When a filter is active,
@@ -168,6 +169,8 @@ pub struct App {
     pub pending_exclude: bool,
     /// Armed by `f` on LogList; second key locks pid/tid or clears (H8).
     pub pending_lock: bool,
+    /// Armed by `t` on LogList (file mode); second key opens/clears time window.
+    pub pending_time: bool,
     /// Armed by `m` on LogList; second key is `a`/`d` (M2).
     pub pending_m: bool,
     /// Armed by leader key (`Space`); second key opens fzf-style picker (Task 5).
@@ -183,6 +186,10 @@ pub struct App {
     /// Session lock: at most one of pid/tid is set (H8; AND after chip filter).
     pub lock_pid: Option<String>,
     pub lock_tid: Option<String>,
+    /// Global session time window (AND after lock). Not stored on Filter groups.
+    pub time_bound: Option<TimeBound>,
+    /// Open `ts` time-window editor (`None` when closed).
+    pub time_panel: Option<TimePanel>,
     /// When `Some`, LogList is in visual-line mode; value is the anchor
     /// index into `visible` (same coordinate space as `cursor`).
     pub visual_anchor: Option<usize>,
@@ -240,6 +247,7 @@ impl App {
             pending_chip: false,
             pending_exclude: false,
             pending_lock: false,
+            pending_time: false,
             pending_m: false,
             pending_leader: false,
             picker: None,
@@ -248,6 +256,8 @@ impl App {
             next_row_id: 1,
             lock_pid: None,
             lock_tid: None,
+            time_bound: None,
+            time_panel: None,
             visual_anchor: None,
             following: true,
             list_offset: 0,
@@ -289,6 +299,7 @@ impl App {
         self.pending_chip = false;
         self.pending_exclude = false;
         self.pending_lock = false;
+        self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
         let mut session = PickerSession::open(kind);
@@ -313,7 +324,13 @@ impl App {
             &self.groups,
             self.lock_pid.as_deref(),
             self.lock_tid.as_deref(),
+            self.time_bound.as_ref(),
         )
+    }
+
+    /// File-mode sessions may interactively edit the global time window.
+    pub fn is_file_mode(&self) -> bool {
+        matches!(self.export_source, crate::export::ExportSource::File(_))
     }
 
     pub fn detail_open(&self) -> bool {
@@ -342,21 +359,29 @@ impl App {
         self.detail = DetailView::Closed;
     }
 
-    /// Chip filter then session lock (H8). Used by drain and rebuild.
+    /// Chip filter → session lock (H8) → global time window. Used by drain/rebuild.
     pub fn row_passes_filters(&self, row: &EntryRow) -> bool {
         if !self.groups.matches(row) {
             return false;
         }
         if let Some(pid) = &self.lock_pid {
-            return row.pid == *pid;
+            if row.pid != *pid {
+                return false;
+            }
+        } else if let Some(tid) = &self.lock_tid {
+            if row.tid != *tid {
+                return false;
+            }
         }
-        if let Some(tid) = &self.lock_tid {
-            return row.tid == *tid;
+        if let Some(bound) = &self.time_bound {
+            if bound.is_active() && !bound.matches(&row.as_log_entry()) {
+                return false;
+            }
         }
         true
     }
 
-    /// Whether any include/exclude/lock filter is currently active. When false,
+    /// Whether any include/exclude/lock/time filter is currently active. When false,
     /// `visible` indexes `rows` directly (every row shown); when true, `visible`
     /// indexes `matched` (only filter-passing rows, retained across `rows` churn).
     pub fn filter_active(&self) -> bool {
@@ -364,6 +389,7 @@ impl App {
             || self.groups.excludes.iter().any(|e| e.enabled)
             || self.lock_pid.is_some()
             || self.lock_tid.is_some()
+            || self.time_bound.as_ref().is_some_and(|t| t.is_active())
     }
 
     /// The buffer `visible` currently indexes: `matched` when a filter is
@@ -552,6 +578,7 @@ impl App {
         self.pending_chip = false;
         self.pending_exclude = false;
         self.pending_lock = false;
+        self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
         self.cursor = 0;
@@ -778,6 +805,7 @@ impl App {
         self.pending_chip = false;
         self.pending_exclude = false;
         self.pending_lock = false;
+        self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
         self.pending_m = true;
@@ -877,6 +905,7 @@ impl App {
         self.pending_chip = false;
         self.pending_exclude = false;
         self.pending_lock = false;
+        self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
         self.following = false;
@@ -889,6 +918,7 @@ impl App {
         self.pending_yank = false;
         self.pending_d = false;
         self.pending_lock = false;
+        self.pending_time = false;
         self.pending_exclude = false;
         self.pending_leader = false;
         self.pending_chip = true;
@@ -900,6 +930,7 @@ impl App {
         self.pending_yank = false;
         self.pending_d = false;
         self.pending_lock = false;
+        self.pending_time = false;
         self.pending_chip = false;
         self.pending_leader = false;
         self.pending_exclude = true;
@@ -926,6 +957,7 @@ impl App {
         self.pending_d = false;
         self.pending_chip = false;
         self.pending_exclude = false;
+        self.pending_time = false;
         self.pending_leader = false;
         self.pending_lock = true;
     }
@@ -934,6 +966,87 @@ impl App {
     pub fn cancel_lock_pending(&mut self) {
         self.pending_lock = false;
         self.pending_leader = false;
+    }
+
+    /// Arm `t` operator-pending (global time window; file mode only).
+    pub fn begin_time_op(&mut self) {
+        self.clear_visual();
+        self.pending_yank = false;
+        self.pending_d = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.pending_m = false;
+        self.pending_leader = false;
+        self.pending_time = true;
+    }
+
+    /// Cancel `t` pending without touching the bound or `following`.
+    pub fn cancel_time_pending(&mut self) {
+        self.pending_time = false;
+        self.pending_leader = false;
+    }
+
+    /// `ts`: open time panel from current `rows`. Returns false when refused
+    /// (empty date candidates). Sets `following=false` on success.
+    pub fn open_time_panel(&mut self) -> bool {
+        self.pending_time = false;
+        match TimePanel::open(&self.rows, self.time_bound.as_ref()) {
+            Some(panel) => {
+                self.following = false;
+                self.time_panel = Some(panel);
+                true
+            }
+            None => {
+                self.set_flash("无可用日期");
+                false
+            }
+        }
+    }
+
+    /// Close time panel without applying (Esc). Does not resume following.
+    pub fn close_time_panel(&mut self) {
+        self.time_panel = None;
+        self.pending_time = false;
+    }
+
+    /// Apply a submitted bound from the panel.
+    pub fn apply_time_bound(&mut self, bound: TimeBound) {
+        self.time_panel = None;
+        self.pending_time = false;
+        self.following = false;
+        self.time_bound = Some(bound);
+        self.rebuild_visible();
+        self.clear_flash();
+    }
+
+    /// `tu`: clear global time window and rebuild.
+    pub fn clear_time_bound(&mut self) {
+        self.pending_time = false;
+        self.time_panel = None;
+        self.following = false;
+        let had = self.time_bound.as_ref().is_some_and(|t| t.is_active());
+        self.time_bound = None;
+        if had {
+            self.rebuild_visible();
+            self.set_flash("TIME CLEARED");
+        } else {
+            self.set_flash("无时间窗");
+        }
+    }
+
+    /// Status-bar label when a global time window is active.
+    pub fn time_badge_label(&self) -> Option<String> {
+        let bound = self.time_bound.as_ref()?;
+        if !bound.is_active() {
+            return None;
+        }
+        match (&bound.since, &bound.until) {
+            (Some(s), Some(u)) => Some(format!("TIME {s}…{u}")),
+            (Some(s), None) => Some(format!("TIME ≥{s}")),
+            (None, Some(u)) => Some(format!("TIME ≤{u}")),
+            (None, None) => None,
+        }
     }
 
     /// `f` `u`: clear session lock and rebuild.
@@ -1061,8 +1174,10 @@ impl App {
             let crate::picker::PickerKind::MsgChip { exclude } = picker.kind else {
                 return None;
             };
-            let visible =
-                crate::picker::PickerSession::filtered_indices(&picker.choices, picker.draft.as_str());
+            let visible = crate::picker::PickerSession::filtered_indices(
+                &picker.choices,
+                picker.draft.as_str(),
+            );
             let value = visible
                 .get(picker.selected)
                 .and_then(|&index| picker.choices.get(index))
@@ -1549,7 +1664,6 @@ mod tests {
             label: label.into(),
             chips: Vec::new(),
             expr,
-            time: None,
             enabled: true,
         }
     }
@@ -1569,6 +1683,108 @@ mod tests {
     fn test_new_app_has_zero_list_offset() {
         let app = App::new(100);
         assert_eq!(app.list_offset, 0);
+    }
+
+    #[test]
+    fn test_time_bound_alone_activates_filter_and_matches() {
+        let mut app = App::new(100);
+        assert!(!app.filter_active());
+        app.time_bound = Some(TimeBound {
+            since: Some("10:00:00".into()),
+            until: Some("10:00:00".into()),
+        });
+        assert!(app.filter_active());
+        let keep = row("A");
+        let late = EntryRow::from_line("04-02 11:00:00.000  1  1 I B   : m").unwrap();
+        assert!(app.row_passes_filters(&keep));
+        assert!(!app.row_passes_filters(&late));
+        let (tx, rx) = mpsc::channel();
+        tx.send(keep).unwrap();
+        tx.send(late).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.view_source()[app.visible[0]].tag, "A");
+        assert_eq!(
+            app.time_badge_label().as_deref(),
+            Some("TIME 10:00:00…10:00:00")
+        );
+        assert!(app.export_cli_command().contains("--since '10:00:00'"));
+    }
+
+    #[test]
+    fn test_clear_time_bound_restores_visibility() {
+        let mut app = App::new(100);
+        app.time_bound = Some(TimeBound {
+            since: Some("11:00:00".into()),
+            until: None,
+        });
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert!(app.visible.is_empty());
+        app.clear_time_bound();
+        assert!(app.time_bound.is_none());
+        assert!(!app.filter_active());
+        assert_eq!(app.visible.len(), 1);
+    }
+
+    #[test]
+    fn test_time_badge_label() {
+        let mut app = App::new(100);
+        assert!(app.time_badge_label().is_none());
+        app.time_bound = Some(TimeBound {
+            since: Some("04-02 10:00:00".into()),
+            until: None,
+        });
+        assert_eq!(
+            app.time_badge_label().as_deref(),
+            Some("TIME ≥04-02 10:00:00")
+        );
+    }
+
+    #[test]
+    fn test_di_group_zero_does_not_clear_time_bound() {
+        use crate::input::{Chip, ChipField};
+        use aloggrep::expr::Expr;
+
+        let mut app = App::new(100);
+        app.time_bound = Some(TimeBound {
+            since: Some("10:30:00".into()),
+            until: None,
+        });
+        app.groups.groups.push(Group {
+            label: "tag:A".into(),
+            chips: vec![Chip {
+                field: ChipField::Tag,
+                value: "A".into(),
+            }],
+            expr: Some(Expr::parse("tag~A", true).unwrap()),
+            enabled: true,
+        });
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap(); // 10:00:00 — excluded by since
+        tx.send(EntryRow::from_line("04-02 11:00:00.000  1  1 I A   : late").unwrap())
+            .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(
+            app.view_source()[app.visible[0]].as_log_entry().time_hms(),
+            Some("11:00:00")
+        );
+
+        app.groups.groups[0].enabled = false;
+        app.rebuild_visible();
+        // Group disabled → include vacuous, but global time window still AND.
+        assert!(app.time_bound.is_some());
+        assert!(app.filter_active());
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(
+            app.view_source()[app.visible[0]].as_log_entry().time_hms(),
+            Some("11:00:00")
+        );
     }
 
     #[test]
@@ -1815,7 +2031,6 @@ mod focus_tests {
             label: label.into(),
             chips: Vec::new(),
             expr: None,
-            time: None,
             enabled: true,
         }
     }
@@ -1889,7 +2104,6 @@ mod focus_tests {
             label: "a".into(),
             chips: Vec::new(),
             expr: Some(Expr::parse("tag~A", false).unwrap()),
-            time: None,
             enabled: true,
         });
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1986,7 +2200,6 @@ mod follow_tests {
                 label: "a".into(),
                 chips: Vec::new(),
                 expr: Some(Expr::parse("tag~A", false).unwrap()),
-                time: None,
                 enabled: true,
             }],
             excludes: Vec::new(),
@@ -2436,7 +2649,6 @@ mod severe_tests {
             label: label.into(),
             chips: Vec::new(),
             expr,
-            time: None,
             enabled: true,
         }
     }

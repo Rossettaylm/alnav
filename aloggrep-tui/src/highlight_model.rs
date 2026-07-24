@@ -141,7 +141,10 @@ impl HighlightBox {
     /// Enter/Tab: empty draft → no-op; non-empty with candidates → selected
     /// pattern; non-empty without candidates → compile draft.
     /// `Ok(None)` = empty (stay editing). `Err` = bad regex.
-    pub fn confirm_or_submit(&mut self, groups: &[HighlightGroup]) -> Result<Option<HighlightGroup>, ()> {
+    pub fn confirm_or_submit(
+        &mut self,
+        groups: &[HighlightGroup],
+    ) -> Result<Option<HighlightGroup>, ()> {
         if self.draft.is_empty() {
             return Ok(None);
         }
@@ -253,7 +256,8 @@ mod tests {
     #[test]
     fn test_find_equivalent_ignore_case() {
         let mut list = HighlightGroupList::default();
-        list.groups.push(HighlightGroup::from_pattern("Error").unwrap());
+        list.groups
+            .push(HighlightGroup::from_pattern("Error").unwrap());
         assert_eq!(list.find_equivalent("error"), Some(0));
         assert_eq!(list.find_equivalent("other"), None);
     }

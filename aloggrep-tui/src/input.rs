@@ -1,6 +1,6 @@
-use aloggrep::expr::{Expr, SameFieldOp};
 use crate::filter_model::Group;
 use crate::text_field::TextField;
+use aloggrep::expr::{Expr, SameFieldOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChipField {
@@ -26,7 +26,12 @@ impl ChipField {
 }
 
 pub const CHIP_FIELDS: [ChipField; 6] = [
-    ChipField::Tag, ChipField::Msg, ChipField::Pkg, ChipField::Pid, ChipField::Tid, ChipField::Level,
+    ChipField::Tag,
+    ChipField::Msg,
+    ChipField::Pkg,
+    ChipField::Pid,
+    ChipField::Tid,
+    ChipField::Level,
 ];
 
 #[derive(Debug, Clone)]
@@ -200,7 +205,14 @@ pub fn build_group_from_chips(
         }
     }
     let expr = Expr::from_filters(
-        &tag, &msg, &pkg, &pid, &tid, level, case_insensitive, SameFieldOp::And,
+        &tag,
+        &msg,
+        &pkg,
+        &pid,
+        &tid,
+        level,
+        case_insensitive,
+        SameFieldOp::And,
     )?;
     let label = chips
         .iter()
@@ -211,7 +223,6 @@ pub fn build_group_from_chips(
         label,
         chips,
         expr,
-        time: None,
         enabled: true,
     }))
 }
@@ -389,7 +400,10 @@ mod field_popup_tests {
         assert!(input.draft.is_empty());
         assert!(!input.field_popup_visible());
         input.push_char('x');
-        assert!(!input.field_popup_visible(), "value typing must not show field popup");
+        assert!(
+            !input.field_popup_visible(),
+            "value typing must not show field popup"
+        );
     }
 
     #[test]
@@ -452,7 +466,10 @@ mod build_group_tests {
     use crate::model::EntryRow;
 
     fn row(tag: &str, msg: &str, level_line: &str) -> EntryRow {
-        EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 {level_line} {tag}   : {msg}")).unwrap()
+        EntryRow::from_line(&format!(
+            "04-02 10:00:00.000  1  1 {level_line} {tag}   : {msg}"
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -516,13 +533,21 @@ mod build_group_tests {
     #[test]
     fn test_build_group_handles_value_with_both_quote_characters() {
         let mut input = InputBox::default();
-        input.push_char('c'); input.push_char('a'); input.push_char('n');
-        input.push_char('\''); input.push_char('t'); input.push_char(' ');
-        input.push_char('"'); input.push_char('h'); input.push_char('i'); input.push_char('"');
+        input.push_char('c');
+        input.push_char('a');
+        input.push_char('n');
+        input.push_char('\'');
+        input.push_char('t');
+        input.push_char(' ');
+        input.push_char('"');
+        input.push_char('h');
+        input.push_char('i');
+        input.push_char('"');
         // draft is now: can't "hi"  (defaults to msg field)
         input.commit_draft_as_chip();
         let group = input.build_group(false).unwrap().unwrap();
-        let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag   : can't \"hi\" there").unwrap();
+        let row =
+            EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag   : can't \"hi\" there").unwrap();
         assert!(group.matches(&row));
     }
 

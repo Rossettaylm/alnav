@@ -1335,11 +1335,12 @@ pub fn render_input_modal(
         "Input"
     };
     let inner = render_modal_shell(title, frame, area);
-    let (spans, caret_col) =
-        input_content_spans(input, mode == Mode::Insert, Some(inner.width));
+    let (spans, caret_col) = input_content_spans(input, mode == Mode::Insert, Some(inner.width));
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     caret_col.map(|col| Position {
-        x: inner.x.saturating_add(col.min(inner.width.saturating_sub(1))),
+        x: inner
+            .x
+            .saturating_add(col.min(inner.width.saturating_sub(1))),
         y: inner.y,
     })
 }
@@ -1356,11 +1357,12 @@ pub fn render_input_box(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
-    let (spans, caret_col) =
-        input_content_spans(input, mode == Mode::Insert, Some(inner.width));
+    let (spans, caret_col) = input_content_spans(input, mode == Mode::Insert, Some(inner.width));
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     caret_col.map(|col| Position {
-        x: inner.x.saturating_add(col.min(inner.width.saturating_sub(1))),
+        x: inner
+            .x
+            .saturating_add(col.min(inner.width.saturating_sub(1))),
         y: inner.y,
     })
 }
@@ -1380,7 +1382,9 @@ pub fn render_highlight_modal(
     );
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     Some(Position {
-        x: inner.x.saturating_add(caret_col.min(inner.width.saturating_sub(1))),
+        x: inner
+            .x
+            .saturating_add(caret_col.min(inner.width.saturating_sub(1))),
         y: inner.y,
     })
 }
@@ -1564,6 +1568,172 @@ pub fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(shown), inner);
 }
 
+/// Outer height for the global time-window panel (`ts`).
+pub fn time_panel_height(frame: Rect) -> u16 {
+    // border(2) + 4 field rows + section labels(2) + up to 5 candidate rows
+    let desired = 13u16;
+    let max = frame.height.saturating_mul(3) / 5;
+    let max = max.max(8).min(frame.height.saturating_sub(1));
+    desired.min(max).max(8)
+}
+
+/// Render `ts` time panel. Returns hardware cursor for the focused field.
+pub fn render_time_panel(app: &App, frame: &mut Frame, area: Rect) -> Option<Position> {
+    use crate::time_panel::TimeField;
+
+    let panel = app.time_panel.as_ref()?;
+    if area.height == 0 {
+        return None;
+    }
+    let inner = render_modal_shell("Time", frame, area);
+    if inner.height == 0 || inner.width == 0 {
+        return None;
+    }
+
+    let focus = panel.focus;
+    let cand_budget = inner
+        .height
+        .saturating_sub(6) // 2 labels + 4 field rows
+        .min(5) as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut caret_row: u16 = 0;
+    let mut caret_col: u16 = 0;
+    let mut row: u16 = 0;
+
+    let push_label = |lines: &mut Vec<Line<'static>>, text: &str, row: &mut u16| {
+        lines.push(Line::from(Span::styled(
+            text.to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+        *row = row.saturating_add(1);
+    };
+
+    let push_field = |lines: &mut Vec<Line<'static>>,
+                      label: &str,
+                      value: &str,
+                      caret: usize,
+                      active: bool,
+                      row: &mut u16,
+                      caret_row: &mut u16,
+                      caret_col: &mut u16,
+                      inner_w: u16| {
+        let prefix = format!("{label} ");
+        let prefix_w = UnicodeWidthStr::width(prefix.as_str()) as u16;
+        let style = if active {
+            Style::default().fg(theme::accent())
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        let budget = inner_w.saturating_sub(prefix_w).max(1);
+        let (value_spans, col) = editable_text_spans(value, caret, Some(budget));
+        let mut spans = vec![Span::styled(prefix, style)];
+        spans.extend(value_spans);
+        lines.push(Line::from(spans));
+        if active {
+            *caret_row = *row;
+            *caret_col = prefix_w.saturating_add(col);
+        }
+        *row = row.saturating_add(1);
+    };
+
+    push_label(&mut lines, "since", &mut row);
+    push_field(
+        &mut lines,
+        "日期",
+        panel.since_date_query(),
+        panel.since_date_cursor(),
+        focus == TimeField::SinceDate,
+        &mut row,
+        &mut caret_row,
+        &mut caret_col,
+        inner.width,
+    );
+    if focus == TimeField::SinceDate {
+        let filtered = panel.filtered_dates(true);
+        let hl = panel.since_date_highlight();
+        for (i, stats) in filtered.into_iter().take(cand_budget).enumerate() {
+            let selected = hl == Some(i);
+            let marker = if selected { ">" } else { " " };
+            let style = if selected {
+                theme::candidate_selected_style()
+            } else {
+                theme::candidate_unselected_style()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {}", stats.date),
+                style,
+            )));
+            row = row.saturating_add(1);
+        }
+    }
+    push_field(
+        &mut lines,
+        "时间",
+        panel.since_time(),
+        panel.since_time_cursor(),
+        focus == TimeField::SinceTime,
+        &mut row,
+        &mut caret_row,
+        &mut caret_col,
+        inner.width,
+    );
+
+    push_label(&mut lines, "until", &mut row);
+    push_field(
+        &mut lines,
+        "日期",
+        panel.until_date_query(),
+        panel.until_date_cursor(),
+        focus == TimeField::UntilDate,
+        &mut row,
+        &mut caret_row,
+        &mut caret_col,
+        inner.width,
+    );
+    if focus == TimeField::UntilDate {
+        let filtered = panel.filtered_dates(false);
+        let hl = panel.until_date_highlight();
+        for (i, stats) in filtered.into_iter().take(cand_budget).enumerate() {
+            let selected = hl == Some(i);
+            let marker = if selected { ">" } else { " " };
+            let style = if selected {
+                theme::candidate_selected_style()
+            } else {
+                theme::candidate_unselected_style()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {}", stats.date),
+                style,
+            )));
+            row = row.saturating_add(1);
+        }
+    }
+    push_field(
+        &mut lines,
+        "时间",
+        panel.until_time(),
+        panel.until_time_cursor(),
+        focus == TimeField::UntilTime,
+        &mut row,
+        &mut caret_row,
+        &mut caret_col,
+        inner.width,
+    );
+
+    let max_rows = inner.height as usize;
+    lines.truncate(max_rows);
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    let y = inner
+        .y
+        .saturating_add(caret_row.min(inner.height.saturating_sub(1)));
+    let x = inner
+        .x
+        .saturating_add(caret_col.min(inner.width.saturating_sub(1)));
+    Some(Position { x, y })
+}
+
 /// H1 Preview window: sampled result lines (Filter) or faint-highlighted hits (Search).
 pub fn render_preview(
     title: &str,
@@ -1648,8 +1818,12 @@ pub fn render_picker_search_line(
     frame.render_widget(Paragraph::new(lines), area);
     let x_off = (prefix_w as u16).saturating_add(caret_col);
     Some(Position {
-        x: area.x.saturating_add(x_off.min(area.width.saturating_sub(1))),
-        y: area.y.saturating_add(prompt_row.min(area.height.saturating_sub(1))),
+        x: area
+            .x
+            .saturating_add(x_off.min(area.width.saturating_sub(1))),
+        y: area
+            .y
+            .saturating_add(prompt_row.min(area.height.saturating_sub(1))),
     })
 }
 
@@ -1865,6 +2039,10 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge(theme::GLYPH_LOCK, &lock, theme::lock()));
     }
+    if let Some(time) = app.time_badge_label() {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_badge(theme::GLYPH_TIME, &time, theme::lock()));
+    }
     if app.visual_anchor.is_some() {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge(
@@ -1881,6 +2059,9 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     } else if app.pending_lock {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge("", "f…", theme::warning()));
+    } else if app.pending_time {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_badge("", "t…", theme::warning()));
     } else if app.pending_m {
         spans.push(Span::raw(" "));
         spans.push(theme::status_badge("", "m…", theme::warning()));
@@ -2455,7 +2636,6 @@ mod tests {
                 value: "A".into(),
             }],
             expr: None,
-            time: None,
             enabled: true,
         });
         app.groups.groups.push(Group {
@@ -2465,7 +2645,6 @@ mod tests {
                 value: "B".into(),
             }],
             expr: None,
-            time: None,
             enabled: true,
         });
         app.focus = Focus::ChipStrip;
@@ -2514,7 +2693,6 @@ mod tests {
                     value: label.into(),
                 }],
                 expr: None,
-                time: None,
                 enabled: true,
             });
         }
@@ -2750,7 +2928,10 @@ mod tests {
     fn editable_text_spans_follow_caret_when_truncated() {
         let (spans, caret_col) = editable_text_spans("abcdefghij", 10, Some(5));
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(joined.contains('j'), "end char must remain visible: {joined:?}");
+        assert!(
+            joined.contains('j'),
+            "end char must remain visible: {joined:?}"
+        );
         assert!(
             !joined.contains('a'),
             "start char should scroll off: {joined:?}"

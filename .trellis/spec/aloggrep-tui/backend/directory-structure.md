@@ -17,21 +17,29 @@ pipeline, or input dispatch. Cross-module state flows through `App`.
 ```
 aloggrep-tui/src/
 ├── main.rs         # CLI entry, terminal lifecycle, event loop, key dispatch
-├── app.rs          # App state machine: rows/visible/groups/bookmarks/picker/focus
+├── app.rs          # App state machine: rows/visible/groups/time_bound/bookmarks/picker/focus
 ├── model.rs        # EntryRow: owned line model, from_line()/as_log_entry()
-├── filter_model.rs # Group/GroupList (chip filter, AND-inside / OR-across)
+├── filter_model.rs # Group/GroupList + TimeBound (global window matching)
+├── time_panel.rs   # `-f` ts panel: date candidates from rows + HH:MM:SS clamp
 ├── highlight_model.rs # HighlightGroup/HighlightGroupList
 ├── picker.rs       # PickerSession/PickerKind/PickerMode/UnifiedKind/UnifiedItem
 ├── input.rs        # ChipField/Chip/InputBox/Popup (Enter two-phase)
-├── ui.rs           # Render: log list, strips, picker, minimap, modals
+├── ui.rs           # Render: log list, strips, picker, minimap, modals, time panel
 ├── theme.rs        # SINGLE color source (UiTokens + logcolor derivation)
 ├── bookmark.rs     # Bookmark/BookmarkList/JumpResult/label helpers
 ├── help.rs         # L1/L2 context help strings
-├── export.rs       # H10 yc CLI export
+├── export.rs       # H10 yc CLI export (filters + lock + time_bound)
 ├── config.rs       # theme.toml/config.toml loading
 ├── preview.rs      # H1 preview sampling
 └── ingest.rs       # spawn_file_ingest / spawn_hdc_ingest
 ```
+
+### Global time window module
+
+`time_panel.rs` owns the `ts` editor only. Matching and persistence live on
+`App.time_bound` (`TimeBound` in `filter_model.rs`). See
+[session-filters.md](./session-filters.md).
+
 
 ---
 

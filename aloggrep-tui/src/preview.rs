@@ -3,9 +3,9 @@
 
 use crate::app::App;
 use crate::filter_model::{ExcludeEntry, Group, GroupList};
+use crate::highlight_model::HighlightGroup;
 use crate::input::{build_group_from_chips, Chip, ChipField, InputBox};
 use crate::model::EntryRow;
-use crate::highlight_model::HighlightGroup;
 
 /// Max rows shown in the Preview window.
 pub const PREVIEW_LIMIT: usize = 10;
@@ -93,7 +93,11 @@ fn row_passes_preview(
 
 fn format_preview_line(row: &EntryRow) -> String {
     let tag = if row.tag.is_empty() { "-" } else { &row.tag };
-    let msg = if row.msg.is_empty() { &row.raw } else { &row.msg };
+    let msg = if row.msg.is_empty() {
+        &row.raw
+    } else {
+        &row.msg
+    };
     let line = format!("{} {} {}", row.level.as_char(), tag, msg);
     // Keep preview rows short for the narrow modal width.
     if line.chars().count() > 72 {
@@ -207,13 +211,9 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
             .unwrap_or(app.rows.len().saturating_sub(1))
     };
 
-    let indices = sample_near_anchor(
-        &app.rows,
-        anchor,
-        PREVIEW_SCAN_CAP,
-        PREVIEW_LIMIT,
-        |row| row_passes_preview(app, row, temp_include.as_ref(), &extra_excludes),
-    );
+    let indices = sample_near_anchor(&app.rows, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
+        row_passes_preview(app, row, temp_include.as_ref(), &extra_excludes)
+    });
     indices
         .into_iter()
         .map(|i| PreviewLine {
@@ -230,10 +230,7 @@ pub fn preview_search_lines(app: &App) -> Result<Vec<PreviewLine>, ()> {
 }
 
 /// Search preview for a caller-owned draft (for example the unified picker).
-pub fn preview_highlight_pattern_lines(
-    app: &App,
-    pattern: &str,
-) -> Result<Vec<PreviewLine>, ()> {
+pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<PreviewLine>, ()> {
     let draft = pattern.trim();
     if draft.is_empty() {
         return Ok(Vec::new());
@@ -248,15 +245,9 @@ pub fn preview_highlight_pattern_lines(
             .unwrap_or(app.rows.len().saturating_sub(1))
     };
 
-    let indices = sample_near_anchor(
-        &app.rows,
-        anchor,
-        PREVIEW_SCAN_CAP,
-        PREVIEW_LIMIT,
-        |row| {
-            app.row_passes_filters(row) && group.matches_row(&row.tag, &row.msg)
-        },
-    );
+    let indices = sample_near_anchor(&app.rows, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
+        app.row_passes_filters(row) && group.matches_row(&row.tag, &row.msg)
+    });
 
     let mut out = Vec::with_capacity(indices.len());
     for i in indices {

@@ -123,8 +123,7 @@ mod tests {
 
     #[test]
     fn lru_evicts_when_full() {
-        let mut tag_cache: LruCache<String, u32> =
-            LruCache::new(NonZeroUsize::new(2).unwrap());
+        let mut tag_cache: LruCache<String, u32> = LruCache::new(NonZeroUsize::new(2).unwrap());
         increment(&mut tag_cache, "A".into());
         increment(&mut tag_cache, "B".into());
         increment(&mut tag_cache, "C".into());

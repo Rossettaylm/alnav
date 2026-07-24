@@ -1,1 +1,5 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "TUI package pre-development checklist entry"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared thinking guides before implementation"}
+{"file": ".trellis/tasks/07-23-tui-time-window/prd.md", "reason": "Requirements and acceptance criteria"}
+{"file": ".trellis/tasks/07-23-tui-time-window/design.md", "reason": "Architecture and file touch list"}
+{"file": ".trellis/tasks/07-23-tui-time-window/implement.md", "reason": "Execution order and validation"}

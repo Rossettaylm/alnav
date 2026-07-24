@@ -101,8 +101,15 @@ mod hdc_ingest_tests {
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();
-        let lines = HdcLiveFilter { inner: std::io::BufReader::new(stdout).lines(), start_marker: None };
-        let session = HdcSession { child, lines, used_history_fallback: true };
+        let lines = HdcLiveFilter {
+            inner: std::io::BufReader::new(stdout).lines(),
+            start_marker: None,
+        };
+        let session = HdcSession {
+            child,
+            lines,
+            used_history_fallback: true,
+        };
 
         let (rx, mut real_child) = spawn_hdc_ingest(session);
         let row = rx.recv_timeout(Duration::from_secs(2)).unwrap();

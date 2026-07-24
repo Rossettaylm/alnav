@@ -41,6 +41,18 @@ Do not re-add `enabled` to a model unless a real consumer gates on it.
 Manage panel (e.g. Bookmark) keys off `session.kind` + a `*_visible_indices`
 helper, never `unified_selected_id`/`UnifiedId`.
 
+### Don't: put session time bounds on `Group`
+
+Global `--since`/`--until` and interactive `ts` live on `App.time_bound`.
+Re-attaching time to `Group` makes `di`/`dd` accidentally disable the window
+and diverges from CLI global-AND semantics. See
+[session-filters.md](./session-filters.md).
+
+### Don't: let modal Ctrl+C fall through as a typed character
+
+When a top modal owns key routing (Time panel, etc.), Ctrl+C must cancel like
+Esc at the `KeyEvent` layer — otherwise `Char('c')` is inserted into the draft.
+
 ---
 
 ## Required Patterns

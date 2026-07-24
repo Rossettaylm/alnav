@@ -1,6 +1,6 @@
 //! H10: export current TUI filter state as a one-line `aloggrep` CLI command.
 
-use crate::filter_model::{ExcludeEntry, Group, GroupList};
+use crate::filter_model::{ExcludeEntry, Group, GroupList, TimeBound};
 use crate::input::{Chip, ChipField};
 
 /// How the TUI session was started (mirrored into the exported command).
@@ -16,7 +16,8 @@ impl Default for ExportSource {
     }
 }
 
-/// Build `aloggrep …` from enabled filter groups, excludes, and session lock.
+/// Build `aloggrep …` from enabled filter groups, excludes, session lock, and
+/// the global time window.
 ///
 /// Search chips are never included. Disabled (`di`) groups/excludes are skipped.
 /// Values are regex-escaped so CLI `-e` matches TUI literal chip semantics.
@@ -26,6 +27,7 @@ pub fn build_cli_command(
     groups: &GroupList,
     lock_pid: Option<&str>,
     lock_tid: Option<&str>,
+    time_bound: Option<&TimeBound>,
 ) -> String {
     let mut parts: Vec<String> = vec!["aloggrep".into()];
 
@@ -47,14 +49,14 @@ pub fn build_cli_command(
 
     parts.push("-i".into());
 
-    if let Some((since, until)) = shared_time_bound(groups) {
-        if let Some(s) = since {
+    if let Some(bound) = time_bound.filter(|t| t.is_active()) {
+        if let Some(s) = &bound.since {
             parts.push("--since".into());
-            parts.push(shell_quote(&s));
+            parts.push(shell_quote(s));
         }
-        if let Some(u) = until {
+        if let Some(u) = &bound.until {
             parts.push("--until".into());
-            parts.push(shell_quote(&u));
+            parts.push(shell_quote(u));
         }
     }
 
@@ -72,24 +74,6 @@ pub fn build_cli_command(
     }
 
     parts.join(" ")
-}
-
-fn shared_time_bound(groups: &GroupList) -> Option<(Option<String>, Option<String>)> {
-    let times: Vec<_> = groups
-        .groups
-        .iter()
-        .filter(|g| g.enabled)
-        .filter_map(|g| g.time.as_ref())
-        .collect();
-    let first = times.first()?;
-    if times
-        .iter()
-        .all(|t| t.since == first.since && t.until == first.until)
-    {
-        Some((first.since.clone(), first.until.clone()))
-    } else {
-        None
-    }
 }
 
 fn filter_expr(groups: &GroupList) -> Option<String> {
@@ -215,6 +199,7 @@ mod tests {
             &GroupList::default(),
             None,
             None,
+            None,
         );
         assert_eq!(cmd, "aloggrep -f 'app.log' -i");
     }
@@ -226,6 +211,7 @@ mod tests {
                 device: Some("XYZ".into()),
             },
             &GroupList::default(),
+            None,
             None,
             None,
         );
@@ -245,9 +231,13 @@ mod tests {
             &list,
             Some("1234"),
             None,
+            None,
         );
         assert!(cmd.starts_with("aloggrep -f 'a.log' -i -e "));
-        assert!(cmd.contains(r#"tag ~ "OkHttp" and msg ~ "timeout""#), "{cmd}");
+        assert!(
+            cmd.contains(r#"tag ~ "OkHttp" and msg ~ "timeout""#),
+            "{cmd}"
+        );
         assert!(cmd.contains(r#"not (tag ~ "Noise")"#), "{cmd}");
         assert!(cmd.ends_with("--pid '1234'"));
     }
@@ -255,9 +245,11 @@ mod tests {
     #[test]
     fn or_between_groups() {
         let mut list = GroupList::default();
-        list.groups.push(group_from(vec![chip(ChipField::Tag, "A")]));
-        list.groups.push(group_from(vec![chip(ChipField::Tag, "B")]));
-        let cmd = build_cli_command(&ExportSource::File("f".into()), &list, None, None);
+        list.groups
+            .push(group_from(vec![chip(ChipField::Tag, "A")]));
+        list.groups
+            .push(group_from(vec![chip(ChipField::Tag, "B")]));
+        let cmd = build_cli_command(&ExportSource::File("f".into()), &list, None, None, None);
         assert!(cmd.contains(r#"(tag ~ "A") or (tag ~ "B")"#), "{cmd}");
     }
 
@@ -272,7 +264,7 @@ mod tests {
         list.groups.push(off);
         assert!(list.push_exclude(chip(ChipField::Msg, "x")).unwrap());
         list.excludes[0].enabled = false;
-        let cmd = build_cli_command(&ExportSource::File("f".into()), &list, None, None);
+        let cmd = build_cli_command(&ExportSource::File("f".into()), &list, None, None, None);
         assert!(cmd.contains(r#"tag ~ "Keep""#), "{cmd}");
         assert!(!cmd.contains("Off"));
         assert!(!cmd.contains("not "));
@@ -283,20 +275,23 @@ mod tests {
         let mut list = GroupList::default();
         list.groups
             .push(group_from(vec![chip(ChipField::Msg, "(0)")]));
-        let cmd = build_cli_command(&ExportSource::File("f".into()), &list, None, None);
+        let cmd = build_cli_command(&ExportSource::File("f".into()), &list, None, None, None);
         assert!(cmd.contains(r#"msg ~ "\(0\)""#), "{cmd}");
     }
 
     #[test]
-    fn exports_shared_since_until() {
-        let mut list = GroupList::default();
-        let mut g = group_from(vec![chip(ChipField::Tag, "T")]);
-        g.time = Some(TimeBound {
+    fn exports_global_since_until() {
+        let bound = TimeBound {
             since: Some("10:00:00".into()),
             until: Some("11:00:00".into()),
-        });
-        list.groups.push(g);
-        let cmd = build_cli_command(&ExportSource::File("f".into()), &list, None, None);
+        };
+        let cmd = build_cli_command(
+            &ExportSource::File("f".into()),
+            &GroupList::default(),
+            None,
+            None,
+            Some(&bound),
+        );
         assert!(cmd.contains("--since '10:00:00'"));
         assert!(cmd.contains("--until '11:00:00'"));
     }

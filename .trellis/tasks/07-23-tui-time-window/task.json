@@ -3,7 +3,7 @@
   "name": "tui-time-window",
   "title": "TUI global time window (-f only)",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": "aloggrep-tui",
   "package": "aloggrep-core",

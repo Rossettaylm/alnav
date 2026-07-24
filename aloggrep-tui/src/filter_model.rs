@@ -3,15 +3,13 @@ use aloggrep::expr::Expr;
 use crate::input::{Chip, ChipField};
 use crate::model::EntryRow;
 
-/// One AND-combined filter clause plus an optional read-only time bound
-/// (from `--since`/`--until`, which `expr::Expr` can't express — see design
-/// doc "过滤条件的整体语义"). `label` is precomputed display text; `chips`
-/// drives pill rendering and dedup (time-only groups may have empty chips).
+/// One AND-combined filter clause. `label` is precomputed display text; `chips`
+/// drives pill rendering and dedup. Session time window lives on [`crate::app::App`],
+/// not on groups.
 pub struct Group {
     pub label: String,
     pub chips: Vec<Chip>,
     pub expr: Option<Expr>,
-    pub time: Option<TimeBound>,
     /// When false, the group is ignored by `GroupList::matches` (soft disable
     /// via `di`; distinct from deleting with `dd`).
     pub enabled: bool,
@@ -20,16 +18,11 @@ pub struct Group {
 impl Group {
     pub fn matches(&self, row: &EntryRow) -> bool {
         let le = row.as_log_entry();
-        let expr_ok = self.expr.as_ref().map_or(true, |e| e.matches(&le));
-        let time_ok = self.time.as_ref().map_or(true, |t| t.matches(&le));
-        expr_ok && time_ok
+        self.expr.as_ref().map_or(true, |e| e.matches(&le))
     }
 
-    /// Chip multiset equality (field + ignore-case value) plus identical time bound.
+    /// Chip multiset equality (field + ignore-case value).
     pub fn same_as(&self, other: &Group) -> bool {
-        if !time_bound_eq(&self.time, &other.time) {
-            return false;
-        }
         if self.chips.len() != other.chips.len() {
             return false;
         }
@@ -48,25 +41,23 @@ fn normalize_chips(chips: &[Chip]) -> Vec<(ChipField, String)> {
         .collect()
 }
 
-fn time_bound_eq(a: &Option<TimeBound>, b: &Option<TimeBound>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => a.since == b.since && a.until == b.until,
-        _ => false,
-    }
-}
-
 /// Mirrors `filter::TimeFilter`'s auto-detect-format comparison using only
 /// `LogEntry`'s public `time_hms`/`time_full` accessors (that private enum
 /// isn't exposed from `aloggrep-core`, and this is the only piece needed).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeBound {
     pub since: Option<String>,
     pub until: Option<String>,
 }
 
 impl TimeBound {
-    fn is_time_only(s: &str) -> bool {
+    pub(crate) fn is_time_only(s: &str) -> bool {
         s.len() == 8 && s.as_bytes().get(2) == Some(&b':') && s.as_bytes().get(5) == Some(&b':')
+    }
+
+    /// True when at least one endpoint is set.
+    pub fn is_active(&self) -> bool {
+        self.since.is_some() || self.until.is_some()
     }
 
     pub fn matches(&self, entry: &aloggrep::parser::LogEntry) -> bool {
@@ -105,8 +96,7 @@ pub struct ExcludeEntry {
 impl ExcludeEntry {
     /// Ignore-case field+value equality (for dedup).
     pub fn same_chip_as(&self, chip: &Chip) -> bool {
-        self.chip.field == chip.field
-            && self.chip.value.eq_ignore_ascii_case(&chip.value)
+        self.chip.field == chip.field && self.chip.value.eq_ignore_ascii_case(&chip.value)
     }
 }
 
@@ -190,7 +180,6 @@ mod tests {
             label: label.into(),
             chips: Vec::new(),
             expr,
-            time: None,
             enabled: true,
         }
     }
@@ -232,17 +221,14 @@ mod tests {
             since: Some("10:00:00".into()),
             until: Some("10:00:00".into()),
         };
-        let list = GroupList {
-            groups: vec![Group {
-                label: "since/until".into(),
-                chips: Vec::new(),
-                expr: None,
-                time: Some(bound),
-                enabled: true,
-            }],
-            ..Default::default()
+        let r = row("A", "m", "I");
+        let entry = r.as_log_entry();
+        assert!(bound.matches(&entry)); // entry ts is exactly 10:00:00.000
+        let early = TimeBound {
+            since: Some("10:00:01".into()),
+            until: None,
         };
-        assert!(list.matches(&row("A", "m", "I"))); // entry ts is exactly 10:00:00.000
+        assert!(!early.matches(&entry));
     }
 
     #[test]
@@ -253,7 +239,6 @@ mod tests {
                 label: "tag:A".into(),
                 chips: Vec::new(),
                 expr: Some(expr),
-                time: None,
                 enabled: false,
             }],
             ..Default::default()
@@ -270,14 +255,12 @@ mod tests {
                     label: "tag:A".into(),
                     chips: Vec::new(),
                     expr: Some(Expr::parse("tag~A", false).unwrap()),
-                    time: None,
                     enabled: false,
                 },
                 Group {
                     label: "tag:B".into(),
                     chips: Vec::new(),
                     expr: Some(Expr::parse("tag~B", false).unwrap()),
-                    time: None,
                     enabled: true,
                 },
             ],
@@ -290,10 +273,7 @@ mod tests {
     #[test]
     fn test_exclude_and_not_after_include() {
         let mut list = GroupList {
-            groups: vec![group(
-                "tag:A",
-                Some(Expr::parse("tag~A", true).unwrap()),
-            )],
+            groups: vec![group("tag:A", Some(Expr::parse("tag~A", true).unwrap()))],
             excludes: Vec::new(),
         };
         assert!(list
