@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "TUI package quality check entry"}
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "Review checklist"}
+{"file": ".trellis/spec/aloggrep-tui/backend/session-filters.md", "reason": "Verify filter/matched/following contracts"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared guides for review mindset"}
+{"file": ".trellis/tasks/07-24-tui-hdc-stream-visible/prd.md", "reason": "Acceptance criteria"}
+{"file": ".trellis/tasks/07-24-tui-hdc-stream-visible/design.md", "reason": "Design contracts to verify"}
+{"file": ".trellis/tasks/07-24-tui-hdc-stream-visible/implement.md", "reason": "Validation commands and phase gates"}

@@ -1,0 +1,30 @@
+{
+  "id": "tui-hdc-stream-visible",
+  "name": "tui-hdc-stream-visible",
+  "title": "TUI --hdc Visible::All + drop-oldest ingest ring",
+  "description": "Stream path: Visible::All (no identity Vec shift), P-after bounded ring dropping oldest undrained EntryRows. Precedes mmap file backend.",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": "aloggrep-tui",
+  "priority": "P1",
+  "creator": "lymanyang",
+  "assignee": "lymanyang",
+  "createdAt": "2026-07-24",
+  "completedAt": "2026-07-24",
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "aloggrep-tui/src/app.rs",
+    "aloggrep-tui/src/ingest.rs",
+    "aloggrep-tui/src/main.rs"
+  ],
+  "notes": "First of two split perf tasks (2026-07-24 grilling). Sibling: 07-24-tui-mmap-file-backend depends on this.",
+  "meta": {}
+}

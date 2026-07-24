@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "TUI package pre-development checklist entry"}
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "Forbidden patterns and cache sync expectations"}
+{"file": ".trellis/spec/aloggrep-tui/backend/session-filters.md", "reason": "Filter/matched/visible semantics must hold under Visible::All"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Shared thinking guides before implementation"}
+{"file": ".trellis/tasks/07-24-tui-hdc-stream-visible/prd.md", "reason": "Requirements and acceptance criteria"}
+{"file": ".trellis/tasks/07-24-tui-hdc-stream-visible/design.md", "reason": "Visible::All + P-after ring contracts"}
+{"file": ".trellis/tasks/07-24-tui-hdc-stream-visible/implement.md", "reason": "Phased execution and validation"}
+{"file": "aloggrep-tui/src/app.rs", "reason": "push_row / shift_visible / visible / drain hot path"}
+{"file": "aloggrep-tui/src/ingest.rs", "reason": "spawn_hdc_ingest channel → drop-oldest ring"}
