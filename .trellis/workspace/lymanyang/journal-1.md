@@ -106,3 +106,37 @@ Grilled mmap perf task; chose S1+P-after drop-oldest for hdc; B-gate for file; s
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: HDC Visible::All + drop-oldest ring
+
+**Date**: 2026-07-24
+**Task**: HDC Visible::All + drop-oldest ring
+**Package**: aloggrep-core
+**Branch**: `master`
+
+### Summary
+
+Implemented and checked Visible::All (O(1) eviction) plus P-after hdc DropOldestRing CAP=8192; committed; archived tui-hdc-stream-visible; mmap sibling remains planning.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `95a701f` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
