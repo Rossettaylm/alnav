@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 2
+- **Total Sessions**: 3
 - **Last Active**: 2026-07-24
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~76 | Active |
+| `journal-1.md` | ~108 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 3 | 2026-07-24 | Grill split hdc/mmap Trellis plans | - | `master` |
 | 2 | 2026-07-24 | TUI global time window (-f) | `fcded9b` | `master` |
 | 1 | 2026-07-23 | Picker mid-cursor editing + hardware caret | `37007f0`, `b7fe30b` | `master` |
 <!-- @@@/auto:session-history -->

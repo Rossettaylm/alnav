@@ -74,3 +74,35 @@ Grilled and shipped App.time_bound with ts/tu panel (date candidates from rows, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Grill split hdc/mmap Trellis plans
+
+**Date**: 2026-07-24
+**Task**: Grill split hdc/mmap Trellis plans
+**Package**: aloggrep-core
+**Branch**: `master`
+
+### Summary
+
+Grilled mmap perf task; chose S1+P-after drop-oldest for hdc; B-gate for file; split into 07-24-tui-hdc-stream-visible then 07-24-tui-mmap-file-backend; planning artifacts written; not started.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
