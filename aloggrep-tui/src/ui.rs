@@ -33,6 +33,14 @@ const PICKER_LR_MIN_WIDTH: u16 = 10;
 const PICKER_SEARCH_HEIGHT: u16 = 3;
 /// Gap between adjacent popup surfaces (Picker L/R, modal → candidates → Preview).
 const POPUP_GAP: u16 = 1;
+/// LogList tag column width (display columns); short tags pad, long tags truncate.
+const TAG_COL_WIDTH: usize = 20;
+/// Floor for the tag column when the pane is narrow (still may shrink further).
+const TAG_COL_MIN: usize = 4;
+/// Gap between level badge and tag column (outside badge fill).
+const LEVEL_TAG_GAP: usize = 1;
+/// Gap between the fixed tag column and the message.
+const TAG_MSG_GAP: usize = 1;
 /// Per-row action icon for candidate lists (F3). `None` = no icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
@@ -603,11 +611,97 @@ fn spans_for_range(
     spans
 }
 
+/// Choose tag column width: prefer [`TAG_COL_WIDTH`], shrink on narrow panes so
+/// the message still gets at least 8 columns.
+fn tag_col_for_area(area_width: usize, prefix_without_tag: usize) -> usize {
+    let reserved = prefix_without_tag + TAG_MSG_GAP + 8;
+    let available = area_width.saturating_sub(reserved);
+    if available == 0 {
+        return 0;
+    }
+    TAG_COL_WIDTH
+        .min(available)
+        .max(TAG_COL_MIN.min(available))
+}
+
+/// Fit `tag` into a fixed display-column width: right-pad with spaces, or
+/// truncate with `…`. Returns `(display, visible_byte_end)` where
+/// `visible_byte_end` is the end of the prefix of `tag` shown before `…`
+/// (equals `tag.len()` when not truncated).
+fn fit_tag_column(tag: &str, width: usize) -> (String, usize) {
+    if width == 0 {
+        return (String::new(), 0);
+    }
+    let tag_w = UnicodeWidthStr::width(tag);
+    if tag_w <= width {
+        let mut out = tag.to_string();
+        out.push_str(&" ".repeat(width - tag_w));
+        return (out, tag.len());
+    }
+    if width == 1 {
+        return ("…".to_string(), 0);
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    let mut byte_end = 0usize;
+    for (i, ch) in tag.char_indices() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > width - 1 {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+        byte_end = i + ch.len_utf8();
+    }
+    out.push('…');
+    used += 1;
+    if used < width {
+        out.push_str(&" ".repeat(width - used));
+    }
+    (out, byte_end)
+}
+
+/// Append tag-column spans (highlights on the visible prefix only) + trailing pad.
+fn push_tag_column_spans(
+    spans: &mut Vec<Span<'static>>,
+    tag: &str,
+    tag_col: usize,
+    tag_matches: &[ColoredMatch],
+    tag_style: Style,
+) {
+    if tag_col == 0 {
+        return;
+    }
+    let (fitted, visible_end) = fit_tag_column(tag, tag_col);
+    let truncated = visible_end < tag.len();
+    if tag_matches.is_empty() || visible_end == 0 {
+        spans.push(Span::styled(fitted, tag_style));
+        return;
+    }
+    spans.extend(spans_for_range(
+        tag,
+        (0, visible_end),
+        tag_matches,
+        tag_style,
+    ));
+    let mut used = UnicodeWidthStr::width(&tag[..visible_end]);
+    if truncated {
+        spans.push(Span::styled("…", tag_style));
+        used += 1;
+    }
+    if used < tag_col {
+        spans.push(Span::styled(
+            " ".repeat(tag_col - used),
+            tag_style,
+        ));
+    }
+}
+
 /// Renders one log entry as one or more physical `Line`s: a header
-/// (visible lineno/timestamp/level/tag) followed by the message, word-wrapped
-/// to `area_width` instead of being truncated. Fields use natural character
-/// widths (no fixed column padding); continuation lines indent with spaces
-/// matching the header width so the message column stays aligned.
+/// (lineno/timestamp/level/fixed tag column) followed by the message,
+/// word-wrapped to `area_width`. The tag field uses a fixed column (pad /
+/// truncate with `…`) so messages align; continuation lines indent with
+/// spaces matching the header width.
 /// `lineno` is 1-based within the visible set; `lineno_width` is the digit
 /// width used for right-aligned padding.
 fn render_entry_lines(
@@ -620,11 +714,12 @@ fn render_entry_lines(
     let lineno_s = format!("{lineno:>lineno_width$} ");
     let ts = format!("{} ", row.timestamp);
     let level_badge = format!(" {} ", row.level.as_char());
-    let tag_display = format!("{} ", row.tag);
-    let header_width = lineno_s.chars().count()
+    let prefix_without_tag = lineno_s.chars().count()
         + ts.chars().count()
         + level_badge.chars().count()
-        + tag_display.chars().count();
+        + LEVEL_TAG_GAP;
+    let tag_col = tag_col_for_area(area_width, prefix_without_tag);
+    let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
     let cont_prefix: String = " ".repeat(header_width);
 
     let first_width = area_width.saturating_sub(header_width).max(8);
@@ -660,17 +755,21 @@ fn render_entry_lines(
                     level_badge.clone(),
                     theme::level_badge_style(row.level),
                 ));
-                if tag_matches.is_empty() {
-                    spans.push(Span::styled(tag_display.clone(), tag_style));
-                } else {
-                    spans.extend(spans_for_range(
-                        &row.tag,
-                        (0, row.tag.len()),
-                        &tag_matches,
-                        tag_style,
-                    ));
-                    spans.push(Span::styled(" ", tag_style));
-                }
+                spans.push(Span::styled(
+                    " ".repeat(LEVEL_TAG_GAP),
+                    Style::default(),
+                ));
+                push_tag_column_spans(
+                    &mut spans,
+                    &row.tag,
+                    tag_col,
+                    &tag_matches,
+                    tag_style,
+                );
+                spans.push(Span::styled(
+                    " ".repeat(TAG_MSG_GAP),
+                    Style::default(),
+                ));
             } else {
                 spans.push(Span::styled(
                     cont_prefix.clone(),
@@ -2615,7 +2714,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_entry_lines_uses_natural_tag_width_no_fixed_padding() {
+    fn test_render_entry_lines_pads_short_tag_to_fixed_column() {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I Ab   : msg").unwrap();
         let lines = render_entry_lines(&row, &[], 200, 1, 1);
         let tag_span = lines[0]
@@ -2625,8 +2724,53 @@ mod tests {
             .expect("tag span");
         assert_eq!(
             tag_span.content.as_ref(),
-            "Ab ",
-            "short tag must not be padded to 16 columns"
+            format!("{:width$}", "Ab", width = TAG_COL_WIDTH),
+            "short tag must pad to fixed tag column"
+        );
+        // level badge then a plain gap (no badge fill) before the tag column
+        let contents: Vec<&str> = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let level_idx = contents
+            .iter()
+            .position(|c| *c == " I ")
+            .expect("level badge");
+        assert_eq!(contents[level_idx + 1], " ", "gap after level badge");
+        assert!(
+            contents[level_idx + 2].starts_with("Ab"),
+            "tag column follows the gap"
+        );
+    }
+
+    #[test]
+    fn test_render_entry_lines_truncates_long_tag_in_fixed_column() {
+        let long = "A".repeat(TAG_COL_WIDTH + 8);
+        let row = EntryRow::from_line(&format!(
+            "04-02 10:00:00.000  1  1 I {long}   : msg"
+        ))
+        .unwrap();
+        let lines = render_entry_lines(&row, &[], 200, 1, 1);
+        let tag_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains('…'))
+            .expect("truncated tag span");
+        assert_eq!(
+            UnicodeWidthStr::width(tag_span.content.as_ref()),
+            TAG_COL_WIDTH
+        );
+        assert!(
+            tag_span.content.as_ref().ends_with('…')
+                || tag_span.content.as_ref().contains('…'),
+            "long tag must use ellipsis"
+        );
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("msg"), "message must still be visible");
+        assert!(
+            !text.contains(&long),
+            "full long tag must not spill into the line"
         );
     }
 
@@ -2636,21 +2780,32 @@ mod tests {
             "04-02 10:00:00.000  1  1 I Short : this message is long enough that it must wrap across more than one physical line when the column width is narrow",
         )
         .unwrap();
-        let lines = render_entry_lines(&row, &[], 40, 1, 1);
+        let area_width = 40;
+        let lines = render_entry_lines(&row, &[], area_width, 1, 1);
         assert!(lines.len() > 1);
-        // lineno + timestamp + level + tag
-        let header_width: usize = lines[0]
-            .spans
-            .iter()
-            .take(4)
-            .map(|s| s.content.chars().count())
-            .sum();
+        let lineno_s = "1 ";
+        let ts = "04-02 10:00:00.000 ";
+        let level = " I ";
+        let prefix_without_tag =
+            lineno_s.chars().count() + ts.chars().count() + level.chars().count() + LEVEL_TAG_GAP;
+        let tag_col = tag_col_for_area(area_width, prefix_without_tag);
+        let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
         let cont = lines[1].spans[0].content.as_ref();
         assert!(
             cont.chars().all(|c| c == ' '),
             "continuation prefix should be spaces"
         );
         assert_eq!(cont.chars().count(), header_width);
+    }
+
+    #[test]
+    fn test_fit_tag_column_pads_and_truncates() {
+        let (short, end) = fit_tag_column("Ab", 6);
+        assert_eq!(short, "Ab    ");
+        assert_eq!(end, 2);
+        let (long, end) = fit_tag_column("abcdefghij", 6);
+        assert_eq!(long, "abcde…");
+        assert_eq!(end, 5);
     }
 
     #[test]
