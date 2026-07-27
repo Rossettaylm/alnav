@@ -208,3 +208,37 @@ Background Vis+Inc highlight hits, filter UI-parse reinforcement, severe prefetc
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: TUI popup rounded borders + compact picker
+
+**Date**: 2026-07-27
+**Task**: TUI popup rounded borders + compact picker
+**Package**: aloggrep-core
+**Branch**: `master`
+
+### Summary
+
+Restored rounded four-sided popup chrome (modal/candidate/preview) with 1-cell gaps; half-width picker when preview hidden; confirm dialog anchors to actual picker frame. Spec: popup vs strip chrome contract.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c895275` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
