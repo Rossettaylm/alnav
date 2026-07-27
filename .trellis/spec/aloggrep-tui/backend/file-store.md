@@ -45,7 +45,7 @@ pub enum FileEvent {
 | Visible | inactive → `Visible::All { len }`; filter → `Visible::Subset(line indices)` |
 | Filter | Background, cancellable (`gen`); incremental `FilterBatch`; UI must not O(n) `row_at` on each batch |
 | Unparseable | `from_line_or_raw` — show raw line (delta vs stream drop) |
-| `--max-lines` | hdc/stream only |
+| `--max-lines` | live stream (`--hdc` / `--adb`) only |
 | Vocab | Sampled + hard cap after IndexDone; not full-file parse on UI |
 
 ### 4. Validation & Error Matrix

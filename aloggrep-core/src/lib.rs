@@ -1,3 +1,4 @@
+pub mod adb;
 pub mod clearkey;
 pub mod crash;
 pub mod dedupe;
@@ -6,6 +7,7 @@ pub mod filter;
 pub mod formatter;
 pub mod hdc;
 pub mod histogram;
+pub mod live;
 pub mod logcolor;
 pub mod multiline;
 pub mod parser;
@@ -170,7 +172,11 @@ pub struct Cli {
     #[arg(long)]
     pub hdc: bool,
 
-    /// Device serial number (for --hdc with multiple devices)
+    /// Capture logs directly from adb logcat (Android device)
+    #[arg(long)]
+    pub adb: bool,
+
+    /// Device serial number (for --hdc or --adb with multiple devices)
     #[arg(long, value_name = "SERIAL")]
     pub device: Option<String>,
 }

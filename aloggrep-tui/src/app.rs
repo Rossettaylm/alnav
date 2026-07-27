@@ -26,7 +26,7 @@ const DRAIN_BUDGET_PER_FRAME: usize = 4096;
 
 /// Visible-row index set into the active row source.
 ///
-/// Stream path (`--hdc`) always uses [`Visible::All`]: an identity mapping
+/// Stream path (`--hdc` / `--adb`) always uses [`Visible::All`]: an identity mapping
 /// `0..len` — never a materialised `Vec<usize>`. File path uses [`Visible::All`]
 /// when unfiltered and [`Visible::Subset`] (hit line numbers) when filtered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +177,7 @@ pub enum DetailView {
 }
 
 pub struct App {
-    /// Stream (`--hdc`/tests) or mmap file (`-f`) row backend.
+    /// Stream (live/tests) or mmap file (`-f`) row backend.
     pub store: RowStore,
     /// Hard cap on stream `matched` (OOM safety). Defaults to
     /// [`MATCHED_HARD_CAP`]; tests override. Ignored for File.
@@ -246,7 +246,7 @@ pub struct App {
     pub help_open: bool,
     /// Scroll offset (lines) inside the Help body.
     pub help_scroll: usize,
-    /// Session source for H10 `yc` CLI export (`-f` / `--hdc`).
+    /// Session source for H10 `yc` CLI export (`-f` / live backend).
     pub export_source: crate::export::ExportSource,
     /// App settings loaded from config.toml (picker layout, etc.).
     pub config: crate::config::AppConfig,
@@ -268,7 +268,7 @@ pub struct App {
     /// Jump to first hit of this highlight group once the async scan yields a hit.
     pending_jump_first: Option<usize>,
     /// Set to true the first time `drain` finds the ingest channel disconnected
-    /// (file fully read or --hdc session ended). Used by P4 draw throttle.
+    /// (file fully read or live session ended). Used by P4 draw throttle.
     pub ingest_done: bool,
 }
 
@@ -347,7 +347,7 @@ impl App {
         self.restart_highlight_scan();
     }
 
-    /// Stream rolling buffer (tests / hdc). Empty static for File.
+    /// Stream rolling buffer (tests / live). Empty static for File.
     pub fn rows(&self) -> &VecDeque<EntryRow> {
         static EMPTY: std::sync::OnceLock<VecDeque<EntryRow>> = std::sync::OnceLock::new();
         match &self.store {
@@ -356,7 +356,7 @@ impl App {
         }
     }
 
-    /// Stream matched buffer (tests / hdc). Empty static for File.
+    /// Stream matched buffer (tests / live). Empty static for File.
     pub fn matched(&self) -> &VecDeque<EntryRow> {
         static EMPTY: std::sync::OnceLock<VecDeque<EntryRow>> = std::sync::OnceLock::new();
         match &self.store {
@@ -434,7 +434,7 @@ impl App {
 
     /// File-mode sessions may interactively edit the global time window.
     pub fn is_file_mode(&self) -> bool {
-        matches!(self.export_source, crate::export::ExportSource::File(_))
+        self.export_source.is_file()
     }
 
     pub fn detail_open(&self) -> bool {
@@ -1033,7 +1033,7 @@ impl App {
         self.jump_bottom();
     }
 
-    /// Clear buffered log rows for `--hdc` Ctrl-L: drops `rows` / `matched` /
+    /// Clear buffered live log rows for Ctrl-L: drops `rows` / `matched` /
     /// `visible` and bookmarks, keeps filter/highlight/exclude/lock, resumes
     /// following, and flashes `CLEARED`.
     pub fn clear_buffered_logs(&mut self) {
@@ -3523,7 +3523,11 @@ mod file_store_tests {
             app.poll_file_store();
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(app.visible_len(), 0, "unparsed must not pass any active filter");
+        assert_eq!(
+            app.visible_len(),
+            0,
+            "unparsed must not pass any active filter"
+        );
 
         // Clear include; time window alone must also drop unparsed
         app.groups.groups.clear();

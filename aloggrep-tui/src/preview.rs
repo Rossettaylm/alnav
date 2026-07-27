@@ -81,9 +81,7 @@ fn row_passes_preview(
     extra_excludes: &[ExcludeEntry],
 ) -> bool {
     // Draft or committed filters both count: unparsed never survives (CLI-aligned).
-    let filtering = app.filter_active()
-        || temp_include.is_some()
-        || !extra_excludes.is_empty();
+    let filtering = app.filter_active() || temp_include.is_some() || !extra_excludes.is_empty();
     if filtering && !row.is_parsed() {
         return false;
     }

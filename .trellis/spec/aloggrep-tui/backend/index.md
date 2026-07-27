@@ -17,7 +17,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | Module layout + picker/time_panel ownership | Active |
 | [Session Filters](./session-filters.md) | Lock + global `App.time_bound` contracts | Active |
-| [Stream Visible + HDC Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest hdc ring | Active |
+| [Stream Visible + Live Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest ADB/HDC ring | Active |
 | [FileStore mmap](./file-store.md) | `-f` mmap + lazy parse + bg filter | Active |
 | [Async Vis Scans](./async-scans.md) | Highlight Inc / severe prefetch / LogList loading | Active |
 | [Status Bar + Help](./status-help.md) | English status bar, `?` Help, `FAST_SCROLL_STEP` | Active |
@@ -31,7 +31,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 ## Pre-Development Checklist
 
 - [ ] Read [session-filters.md](./session-filters.md) before changing filter/lock/time matching or `yc` export.
-- [ ] Read [stream-visible-ingest.md](./stream-visible-ingest.md) before changing `visible`, `push_row` eviction, or hdc ingest.
+- [ ] Read [stream-visible-ingest.md](./stream-visible-ingest.md) before changing `visible`, `push_row` eviction, or live ingest.
 - [ ] Read [file-store.md](./file-store.md) before changing `-f` ingest, `RowStore`, or file filter scanning.
 - [ ] Read [async-scans.md](./async-scans.md) before changing File highlight/`nN`/severe/minimap cache paths or LogList loading.
 - [ ] Read [quality-guidelines.md](./quality-guidelines.md) Forbidden Patterns (theme colors, Group.time, modal Ctrl+C) and "Popup chrome vs strip chrome".
@@ -44,7 +44,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Interactive time keys gated on `is_file_mode()`.
 - [ ] Stream `visible` is `Visible::All` (no identity `Vec` + per-row index shift).
 - [ ] File filter hits use `Visible::Subset` (line numbers); no full-file owned `EntryRow` / `matched`.
-- [ ] `--hdc` ingest uses drop-oldest ring (`INGEST_RING_CAP`), not a blocking/unbounded channel.
+- [ ] `--hdc` and `--adb` ingest use the same drop-oldest ring (`INGEST_RING_CAP`), not a blocking/unbounded channel.
 - [ ] File highlight stats / `n`/`N` use hit index (no UI O(visible) `row_at`); FilterBatch does not full-parse.
 - [ ] New modal key paths handle Ctrl+C as cancel when appropriate.
 - [ ] Popup shells stay rounded; strips stay divider; confirm uses the same `picker_area` as the picker.

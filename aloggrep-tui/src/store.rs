@@ -67,7 +67,7 @@ impl RowRef<'_> {
     }
 }
 
-/// Live / channel ingest buffer (`--hdc` and tests).
+/// Live / channel ingest buffer (`--hdc`, `--adb`, and tests).
 #[derive(Debug)]
 pub struct StreamStore {
     pub rows: VecDeque<EntryRow>,

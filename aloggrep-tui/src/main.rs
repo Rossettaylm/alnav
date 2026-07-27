@@ -83,7 +83,7 @@ struct Cli {
     #[arg(short = 'i', long)]
     ignore_case: bool,
 
-    /// Max in-memory lines before the oldest are evicted (`--hdc` only; ignored for `-f`)
+    /// Max in-memory lines before the oldest are evicted (live mode only; ignored for `-f`)
     #[arg(long, default_value_t = 500_000)]
     max_lines: usize,
 
@@ -91,13 +91,33 @@ struct Cli {
     #[arg(long)]
     hdc: bool,
 
-    /// Device serial number (for --hdc with multiple devices)
+    /// Capture logs directly from adb logcat (Android device)
+    #[arg(long)]
+    adb: bool,
+
+    /// Device serial number (for --hdc or --adb with multiple devices)
     #[arg(long, value_name = "SERIAL")]
     device: Option<String>,
 
     /// Config directory override (reads `theme.toml`; default: `$ALOGGREP_HOME` or `~/.config/aloggrep`)
     #[arg(long, value_name = "DIR")]
     config_path: Option<PathBuf>,
+}
+
+fn validate_source(cli: &Cli) -> Result<(), String> {
+    if cli.hdc && cli.adb {
+        return Err("--hdc and --adb are mutually exclusive".into());
+    }
+    if (cli.hdc || cli.adb) && cli.file.is_some() {
+        return Err("--hdc/--adb cannot be combined with -f".into());
+    }
+    if cli.device.is_some() && !cli.hdc && !cli.adb {
+        return Err("--device requires --hdc or --adb".into());
+    }
+    if !cli.hdc && !cli.adb && cli.file.is_none() {
+        return Err("one of -f FILE, --hdc, or --adb is required".into());
+    }
+    Ok(())
 }
 
 /// Startup chip/expr Filter group (no time — time goes to [`App::time_bound`]).
@@ -225,6 +245,30 @@ mod tests {
     }
 
     #[test]
+    fn adb_source_is_accepted() {
+        let cli = cli(&["--adb", "--device", "ANDROID"]);
+        assert!(cli.adb);
+        assert!(!cli.hdc);
+        assert_eq!(cli.device.as_deref(), Some("ANDROID"));
+    }
+
+    #[test]
+    fn live_source_validation_rejects_conflicts() {
+        assert_eq!(
+            validate_source(&cli(&["--adb", "--hdc"])).unwrap_err(),
+            "--hdc and --adb are mutually exclusive"
+        );
+        assert_eq!(
+            validate_source(&cli(&["--adb", "-f", "app.log"])).unwrap_err(),
+            "--hdc/--adb cannot be combined with -f"
+        );
+        assert_eq!(
+            validate_source(&cli(&["--device", "ANDROID"])).unwrap_err(),
+            "--device requires --hdc or --adb"
+        );
+    }
+
+    #[test]
     fn test_initial_group_pid_only_label_contains_pid() {
         let c = cli(&["-f", "app.log", "--pid", "1234"]);
         let groups = initial_group(&c).unwrap();
@@ -286,14 +330,14 @@ mod tests {
     }
 }
 
-/// Ensures the `--hdc` child process is killed no matter which exit path
+/// Ensures the live child process is killed no matter which exit path
 /// `main()` takes, including an early `?` bail-out between binding this
 /// guard and the end of `main()`. Manual kill/wait calls threaded into every
 /// fallible line are easy to miss when new fallible calls are added later;
 /// `Drop` closes that gap structurally instead.
-struct HdcChildGuard(Option<std::process::Child>);
+struct LiveChildGuard(Option<std::process::Child>);
 
-impl Drop for HdcChildGuard {
+impl Drop for LiveChildGuard {
     fn drop(&mut self) {
         if let Some(child) = &mut self.0 {
             let _ = child.kill();
@@ -316,12 +360,8 @@ fn main() -> Result<(), String> {
 
     let cli = Cli::parse();
 
-    if cli.hdc && cli.file.is_some() {
-        eprintln!("aloggrep-tui: --hdc cannot be combined with -f");
-        std::process::exit(2);
-    }
-    if !cli.hdc && cli.file.is_none() {
-        eprintln!("aloggrep-tui: either -f FILE or --hdc is required");
+    if let Err(error) = validate_source(&cli) {
+        eprintln!("aloggrep-tui: {error}");
         std::process::exit(2);
     }
 
@@ -344,6 +384,10 @@ fn main() -> Result<(), String> {
         export::ExportSource::Hdc {
             device: cli.device.clone(),
         }
+    } else if cli.adb {
+        export::ExportSource::Adb {
+            device: cli.device.clone(),
+        }
     } else {
         export::ExportSource::File(cli.file.clone().unwrap())
     };
@@ -354,9 +398,20 @@ fn main() -> Result<(), String> {
         app.set_flash(hint);
     }
 
-    let (ingest, hdc_child) = if cli.hdc {
-        let session = aloggrep::hdc::spawn_hilog(cli.device.as_deref())?;
-        let (ring, child) = ingest::spawn_hdc_ingest(session);
+    let (ingest, live_child) = if cli.hdc || cli.adb {
+        let session = if cli.hdc {
+            aloggrep::hdc::spawn_hilog(cli.device.as_deref())
+        } else {
+            aloggrep::adb::spawn_logcat(cli.device.as_deref())
+        };
+        let session = match session {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("aloggrep-tui: {error}");
+                std::process::exit(2);
+            }
+        };
+        let (ring, child) = ingest::spawn_live_ingest(session);
         (Some(ingest::IngestHandle::Ring(ring)), Some(child))
     } else {
         let path = cli.file.clone().unwrap();
@@ -364,7 +419,7 @@ fn main() -> Result<(), String> {
         app.set_file_store(file_store);
         (None, None)
     };
-    let _hdc_child_guard = HdcChildGuard(hdc_child);
+    let _live_child_guard = LiveChildGuard(live_child);
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let setup: Result<Terminal<CrosstermBackend<io::Stdout>>, String> = (|| {
@@ -390,7 +445,7 @@ fn main() -> Result<(), String> {
                 LeaveAlternateScreen,
                 event::DisableMouseCapture
             );
-            return Err(e); // _hdc_child_guard drops here, killing the child if any
+            return Err(e); // _live_child_guard drops here, killing the child if any
         }
     };
 
@@ -408,7 +463,7 @@ fn main() -> Result<(), String> {
     disable_result.and(leave_result)?;
 
     result
-    // _hdc_child_guard drops here at end of main(), killing the child if not already killed
+    // _live_child_guard drops here, killing the child if not already killed
 }
 
 /// Anchors the candidate dropdown just below the centered Input/Search modal.
@@ -656,7 +711,7 @@ fn run<B: ratatui::backend::Backend>(
         }
 
         // Ctrl-d/Ctrl-u page the log list when it has focus in Normal mode.
-        // Ctrl-L clears buffered logs in --hdc (see `try_handle_ctrl_l`).
+        // Ctrl-L clears buffered live logs (see `try_handle_ctrl_l`).
         // Intercepted here (like Ctrl+C above) rather than threading the full
         // KeyEvent into `handle_normal_key`, which deliberately only takes a
         // bare `KeyCode`.
@@ -1757,13 +1812,11 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     }
 }
 
-/// `--hdc` Ctrl-L: clear buffered logs when no detail overlay is open.
+/// Live-mode Ctrl-L: clear buffered logs when no detail overlay is open.
 /// File mode and detail-open are silent no-ops. Caller must already gate on
 /// Normal + LogList (and Picker / HighlightBox are handled earlier in the loop).
 fn try_handle_ctrl_l(app: &mut App) {
-    use crate::export::ExportSource;
-
-    if !matches!(app.export_source, ExportSource::Hdc { .. }) || app.detail_open() {
+    if !app.export_source.is_live() || app.detail_open() {
         return;
     }
     app.clear_buffered_logs();
@@ -3364,6 +3417,24 @@ mod dispatch_tests {
     }
 
     #[test]
+    fn ctrl_l_clears_buffers_in_adb_loglist() {
+        use crate::export::ExportSource;
+        use std::sync::mpsc;
+
+        let mut app = App::new(100);
+        app.export_source = ExportSource::Adb { device: None };
+        let (tx, rx) = mpsc::channel();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap())
+            .unwrap();
+        drop(tx);
+        app.drain(&rx);
+
+        try_handle_ctrl_l(&mut app);
+        assert!(app.rows().is_empty());
+        assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
+    }
+
+    #[test]
     fn ctrl_l_noop_in_file_mode() {
         use crate::export::ExportSource;
         use std::sync::mpsc;
@@ -4724,7 +4795,7 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_ts_empty_candidates_flashes_and_hdc_hides_t() {
+    fn test_ts_empty_candidates_flashes_and_live_modes_hide_t() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         app.export_source = export::ExportSource::File("demo.log".into());
@@ -4734,10 +4805,15 @@ mod dispatch_tests {
         assert!(app.time_panel.is_none());
         assert_eq!(app.status_msg.as_deref(), Some("NO DATES"));
 
-        // --hdc: bare `t` must not arm time operator.
+        // Live modes: bare `t` must not arm time operator.
         app.export_source = export::ExportSource::Hdc { device: None };
         app.status_msg = None;
         drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : a"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        assert!(!app.pending_time);
+        assert!(app.time_panel.is_none());
+
+        app.export_source = export::ExportSource::Adb { device: None };
         handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
         assert!(!app.pending_time);
         assert!(app.time_panel.is_none());

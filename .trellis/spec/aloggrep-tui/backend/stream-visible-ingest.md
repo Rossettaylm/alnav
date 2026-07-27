@@ -1,6 +1,6 @@
-# Stream Visible + HDC Ingest Ring
+# Stream Visible + Live Ingest Ring
 
-> Executable contracts for `Visible::All` and `--hdc` drop-oldest ingest (task `07-24-tui-hdc-stream-visible`).
+> Executable contracts for `Visible::All` and `--hdc`/`--adb` drop-oldest ingest.
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### 1. Scope / Trigger
 
-- Trigger: any owned `VecDeque` Stream path (`--hdc`, and `-f` until mmap).
+- Trigger: any owned `VecDeque` Stream path (`--hdc`, `--adb`, and tests).
 - Cross-module: `app::Visible`, `App::push_row` / `rebuild_visible` / `drain`, ui/preview readers via `source_idx_for_visible`.
 
 ### 2. Signatures
@@ -70,12 +70,12 @@ pub fn source_idx_for_visible(&self, vis_i: usize) -> Option<usize>;
 
 ---
 
-## Scenario: HDC P-after drop-oldest ring
+## Scenario: Live P-after drop-oldest ring
 
 ### 1. Scope / Trigger
 
-- Trigger: `--hdc` live ingest backpressure.
-- Cross-module: `ingest::{DropOldestRing, IngestHandle, TryRecvRow, INGEST_RING_CAP}`, `App::drain`, `main` event loop.
+- Trigger: `--hdc` or `--adb` live ingest backpressure.
+- Cross-module: `live::LiveSession`, `ingest::{DropOldestRing, IngestHandle, TryRecvRow, INGEST_RING_CAP}`, `App::drain`, `main` event loop.
 
 ### 2. Signatures
 
@@ -89,7 +89,7 @@ pub trait TryRecvRow {
 }
 pub enum IngestHandle {
     Channel(Receiver<EntryRow>), // legacy/tests; production `-f` uses FileStore
-    Ring(Arc<DropOldestRing>),   // hdc
+    Ring(Arc<DropOldestRing>),   // hdc / adb
 }
 pub struct DropOldestRing { /* ... */ }
 impl DropOldestRing {
@@ -99,6 +99,10 @@ impl DropOldestRing {
     pub fn disconnect(&self);
 }
 
+pub fn spawn_live_ingest(
+    session: aloggrep::live::LiveSession,
+) -> (Arc<DropOldestRing>, std::process::Child);
+
 // app.rs
 const DRAIN_BUDGET_PER_FRAME: usize = 4096;
 pub fn drain(&mut self, ingest: &impl TryRecvRow);
@@ -106,8 +110,8 @@ pub fn drain(&mut self, ingest: &impl TryRecvRow);
 
 ### 3. Contracts
 
-- **P-after**: producer thread still `EntryRow::from_line`, then `ring.push`.
-- Full ring: `pop_front` oldest undrained row, then push — **never** block `hilog`.
+- **P-after**: producer thread still `EntryRow::from_line`, then `ring.push`, for both live backends.
+- Full ring: `pop_front` oldest undrained row, then push — **never** block the live device logger.
 - `Disconnected` only when producer finished **and** ring empty (partial drain must not set `ingest_done` early).
 - `drain` stops at Empty, Disconnected, or `DRAIN_BUDGET_PER_FRAME`.
 - Dropped undrained rows are intentional; no status badge required.
@@ -123,7 +127,7 @@ pub fn drain(&mut self, ingest: &impl TryRecvRow);
 ### 5. Good / Base / Bad
 
 - **Good**: UI lag under flood; newest lines still arrive; hilog thread not blocked.
-- **Base**: production `-f` uses `FileStore` (mmap); `IngestHandle::Channel` remains for tests.
+- **Base**: production `-f` uses `FileStore` (mmap); `IngestHandle::Channel` remains for tests. HDC and ADB both pass a `LiveSession` to `spawn_live_ingest`.
 - **Bad**: `sync_channel` that blocks producer, or `try_send` drop-newest.
 
 ### 6. Tests Required
@@ -135,6 +139,6 @@ pub fn drain(&mut self, ingest: &impl TryRecvRow);
 
 | Wrong | Correct |
 |-------|---------|
-| unbounded `mpsc` for hdc | `DropOldestRing` + `IngestHandle::Ring` |
+| unbounded `mpsc` for live sources | `DropOldestRing` + `IngestHandle::Ring` |
 | block on full | drop oldest undrained |
-| parse on UI thread for hdc (P-late) | P-after on producer (until a future task) |
+| parse on UI thread for a live backend (P-late) | P-after on producer (until a future task) |

@@ -61,7 +61,7 @@ pub fn build_cli_command(
 |-------------|--------|
 | Ownership | Time lives on `App.time_bound` only. **Never** on `Group`. |
 | Startup CLI | `--since`/`--until` → `initial_time_bound()` → `App.time_bound`; `initial_group` has chips/expr only. |
-| Mode gate | Interactive `t`/`ts`/`tu` only when `ExportSource::File`. `--hdc`: hard no-op (do not arm `pending_time`). |
+| Mode gate | Interactive `t`/`ts`/`tu` only when `ExportSource::File`. `--hdc` and `--adb`: hard no-op (do not arm `pending_time`). |
 | Date candidates | Dedup from current `rows` via `time_full()` date prefix (`MM-DD` or `YYYY-MM-DD`). Empty → refuse `ts`. |
 | Date input | Typeahead filter; select only from candidates; no custom dates. |
 | Time input | `HH:MM:SS`; normalize then clamp to that date’s min/max in buffer; both sides set → clamp **current** side so since ≤ until. |
@@ -80,14 +80,14 @@ pub fn build_cli_command(
 | Submit with both sides empty | Flash `未设置时间窗`; panel stays open |
 | `tu` with no active bound | Flash `无时间窗` |
 | `tu` with active bound | Clear, `rebuild_visible`, flash `TIME CLEARED` |
-| `--hdc` + `t` | No pending; key ignored (file-mode match arm) |
+| live source + `t` | No pending; key ignored (file-mode match arm) |
 | Panel Ctrl+C | Same as Esc cancel (must not insert `c` into draft) |
 
 ### 5. Good / Base / Bad Cases
 
 - **Good**: `-f` log with dates → `ts` → select date → type HMS → Enter through fields → `TIME` badge + filtered `visible`; `yc` contains `--since`.
 - **Base**: Startup `aloggrep-tui -f f --since 10:00:00` → `App.time_bound` set, groups empty or chip-only; `di` on group 0 does not clear time.
-- **Bad**: Putting `time` back on `Group` so `di` disables the window; opening `ts` under `--hdc`; allowing typed dates outside candidates.
+- **Bad**: Putting `time` back on `Group` so `di` disables the window; opening `ts` under `--hdc` or `--adb`; allowing typed dates outside candidates.
 
 ### 6. Tests Required
 
@@ -95,7 +95,7 @@ pub fn build_cli_command(
 - `time_panel`: catalog extract, normalize/clamp, one-sided submit, partial flash, prefill
 - `app`: `filter_active` with time only; `di` does not clear `time_bound`; badge label
 - `export`: global bound → `--since`/`--until`
-- `main` dispatch: `ts`/`tu`, empty catalog flash, hdc hard-hide, panel Ctrl+C cancel
+- `main` dispatch: `ts`/`tu`, empty catalog flash, both live backends hard-hide, panel Ctrl+C cancel
 - `help`: `pending_time` → L2_TIME
 
 Assertion points: `Group` has no `time` field; `row_passes_filters` ANDs time after lock.

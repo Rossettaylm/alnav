@@ -5,11 +5,11 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use aloggrep::hdc::HdcSession;
+use aloggrep::live::LiveSession;
 
 use crate::model::EntryRow;
 
-/// Capacity of the `--hdc` ingest drop-oldest ring (P-after backpressure).
+/// Capacity of the live ingest drop-oldest ring (P-after backpressure).
 /// When full, the producer pops the oldest undrained row before pushing —
 /// never blocks reading `hilog`.
 pub const INGEST_RING_CAP: usize = 8192;
@@ -21,7 +21,7 @@ pub enum TryRecvKind {
     Disconnected,
 }
 
-/// Unified non-blocking row source for channel (file) and drop-oldest ring (hdc).
+/// Unified non-blocking row source for channel (tests) and live drop-oldest ring.
 pub trait TryRecvRow {
     fn try_recv_row(&self) -> Result<EntryRow, TryRecvKind>;
 }
@@ -51,7 +51,7 @@ impl TryRecvRow for Arc<DropOldestRing> {
 /// Owned ingest handle for the main event loop.
 ///
 /// `-f` now uses [`crate::store::FileStore`] (no row channel). `Channel` remains
-/// for unit tests and any transitional callers; `--hdc` uses [`Self::Ring`].
+/// for unit tests and any transitional callers; live sources use [`Self::Ring`].
 pub enum IngestHandle {
     Channel(Receiver<EntryRow>),
     Ring(Arc<DropOldestRing>),
@@ -68,12 +68,12 @@ impl TryRecvRow for IngestHandle {
 
 struct RingInner {
     buf: VecDeque<EntryRow>,
-    /// Producer finished (hilog ended). Drain reports Disconnected only when
+    /// Producer finished. Drain reports Disconnected only when
     /// this is set **and** the buffer is empty.
     disconnected: bool,
 }
 
-/// Bounded drop-oldest queue shared by the hdc producer thread and the UI.
+/// Bounded drop-oldest queue shared by a live producer thread and the UI.
 ///
 /// Not a `sync_channel`: on full we discard the oldest undrained row so the
 /// producer never blocks.
@@ -161,8 +161,8 @@ pub fn spawn_file_ingest(path: String) -> io::Result<Receiver<EntryRow>> {
 
 /// Continuously read `session.lines`, parse each line (P-after), and push into
 /// a bounded drop-oldest ring until the iterator ends or the process exits.
-/// Used by `--hdc`. The ring never blocks the producer when full.
-pub fn spawn_hdc_ingest(mut session: HdcSession) -> (Arc<DropOldestRing>, std::process::Child) {
+/// Used by both live backends. The ring never blocks the producer when full.
+pub fn spawn_live_ingest(mut session: LiveSession) -> (Arc<DropOldestRing>, std::process::Child) {
     let ring = DropOldestRing::new(INGEST_RING_CAP);
     let child = session.child;
     let producer = Arc::clone(&ring);
@@ -241,14 +241,14 @@ mod tests {
 }
 
 #[cfg(test)]
-mod hdc_ingest_tests {
+mod live_ingest_tests {
     use super::*;
-    use aloggrep::hdc::{HdcLiveFilter, HdcSession};
+    use aloggrep::live::{LiveFilter, LiveSession};
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
     #[test]
-    fn test_spawn_hdc_ingest_forwards_parsed_lines() {
+    fn test_spawn_live_ingest_forwards_parsed_lines() {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("printf '04-02 10:00:00.000  1  1 I TagA    : hello\\n'; sleep 0.2")
@@ -256,24 +256,24 @@ mod hdc_ingest_tests {
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();
-        let lines = HdcLiveFilter {
+        let lines = LiveFilter {
             inner: std::io::BufReader::new(stdout).lines(),
             start_marker: None,
         };
-        let session = HdcSession {
+        let session = LiveSession {
             child,
             lines,
             used_history_fallback: true,
         };
 
-        let (ring, mut real_child) = spawn_hdc_ingest(session);
+        let (ring, mut real_child) = spawn_live_ingest(session);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let row = loop {
             match ring.try_pop() {
                 Ok(row) => break row,
                 Err(TryRecvKind::Empty) => {
                     if std::time::Instant::now() > deadline {
-                        panic!("timed out waiting for hdc ingest row");
+                        panic!("timed out waiting for live ingest row");
                     }
                     thread::sleep(Duration::from_millis(10));
                 }

@@ -484,6 +484,33 @@ fn test_cli_exit_code_bad_args() {
     assert_eq!(output.status.code(), Some(2));
 }
 
+#[test]
+fn test_cli_rejects_adb_with_file() {
+    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    cmd.args(["--adb", "-f", "/dev/null"]);
+    let output = cmd.output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be combined with -f"));
+}
+
+#[test]
+fn test_cli_rejects_adb_with_hdc() {
+    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    cmd.args(["--adb", "--hdc"]);
+    let output = cmd.output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("mutually exclusive"));
+}
+
+#[test]
+fn test_cli_device_requires_live_source() {
+    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    cmd.args(["--device", "SERIAL"]);
+    let output = cmd.output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--hdc or --adb"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Stdin input
 // ═══════════════════════════════════════════════════════════════════════

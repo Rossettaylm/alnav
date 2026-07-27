@@ -32,6 +32,36 @@ fn use_context(cli: &Cli) -> bool {
     (b > 0 || a > 0) && !cli.count && !cli.summary && !cli.crashes
 }
 
+fn validate_source(cli: &Cli) -> Result<(), String> {
+    let live = cli.hdc || cli.adb;
+    if cli.hdc && cli.adb {
+        return Err("--hdc and --adb are mutually exclusive".into());
+    }
+    if live && !cli.file.is_empty() {
+        return Err("--hdc/--adb cannot be combined with -f (file input)".into());
+    }
+    if live && cli.time_context.is_some() {
+        return Err(
+            "--hdc/--adb cannot be combined with --time-context (requires two-pass)".into(),
+        );
+    }
+    if live && (cli.follow_pid || cli.follow_tid) {
+        return Err(
+            "--hdc/--adb cannot be combined with --follow-pid/--follow-tid (requires two-pass)"
+                .into(),
+        );
+    }
+    if live && cli.sort_time {
+        return Err(
+            "--hdc/--adb cannot be combined with --sort-time (requires all lines in memory)".into(),
+        );
+    }
+    if cli.device.is_some() && !live {
+        return Err("--device requires --hdc or --adb".into());
+    }
+    Ok(())
+}
+
 /// Read all lines from files matching glob patterns into a Vec.
 fn collect_file_lines(patterns: &[String]) -> Vec<String> {
     let mut all_lines = Vec::new();
@@ -578,6 +608,11 @@ fn main() {
         return;
     }
 
+    if let Err(error) = validate_source(&cli) {
+        eprintln!("loggrep: {error}");
+        process::exit(2);
+    }
+
     let filter_chain = match FilterChain::from_cli(&cli) {
         Ok(f) => f,
         Err(e) => {
@@ -621,26 +656,6 @@ fn main() {
     }
     if (cli.follow_pid || cli.follow_tid) && cli.time_context.is_some() {
         eprintln!("loggrep: --follow-pid/--follow-tid cannot be combined with --time-context");
-        process::exit(2);
-    }
-    if cli.hdc && !cli.file.is_empty() {
-        eprintln!("loggrep: --hdc cannot be combined with -f (file input)");
-        process::exit(2);
-    }
-    if cli.hdc && cli.time_context.is_some() {
-        eprintln!("loggrep: --hdc cannot be combined with --time-context (requires two-pass)");
-        process::exit(2);
-    }
-    if cli.hdc && (cli.follow_pid || cli.follow_tid) {
-        eprintln!("loggrep: --hdc cannot be combined with --follow-pid/--follow-tid (requires two-pass)");
-        process::exit(2);
-    }
-    if cli.hdc && cli.sort_time {
-        eprintln!("loggrep: --hdc cannot be combined with --sort-time (requires all lines in memory)");
-        process::exit(2);
-    }
-    if cli.device.is_some() && !cli.hdc {
-        eprintln!("loggrep: --device requires --hdc");
         process::exit(2);
     }
     let mut sampler = Sampler::new(cli.tail, cli.sample, cli.limit);
@@ -708,9 +723,14 @@ fn main() {
         };
     }
 
-    // --hdc mode: spawn hdc hilog and read from child stdout
-    if cli.hdc {
-        let mut session = match aloggrep::hdc::spawn_hilog(cli.device.as_deref()) {
+    // Live mode: spawn the selected device logger and read from child stdout.
+    if cli.hdc || cli.adb {
+        let session = if cli.hdc {
+            aloggrep::hdc::spawn_hilog(cli.device.as_deref())
+        } else {
+            aloggrep::adb::spawn_logcat(cli.device.as_deref())
+        };
+        let mut session = match session {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("loggrep: {e}");
@@ -718,7 +738,10 @@ fn main() {
             }
         };
         if session.used_history_fallback {
-            eprintln!("loggrep: warning: could not query device time, --hdc will include hilogd's buffered history");
+            let source = if cli.hdc { "--hdc" } else { "--adb" };
+            eprintln!(
+                "loggrep: warning: could not query device time, {source} will include buffered history"
+            );
         }
 
         let lines = &mut session.lines;
@@ -824,6 +847,23 @@ mod tests {
     use super::*;
     use aloggrep::formatter::FieldSet;
     use clap::Parser;
+
+    #[test]
+    fn live_sources_are_mutually_exclusive() {
+        let cli = Cli::parse_from(["aloggrep", "--hdc", "--adb"]);
+        assert_eq!(
+            validate_source(&cli).unwrap_err(),
+            "--hdc and --adb are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn device_accepts_either_live_source() {
+        let adb = Cli::parse_from(["aloggrep", "--adb", "--device", "A"]);
+        let hdc = Cli::parse_from(["aloggrep", "--hdc", "--device", "H"]);
+        assert!(validate_source(&adb).is_ok());
+        assert!(validate_source(&hdc).is_ok());
+    }
 
     #[test]
     fn test_follow_pid_basic() {

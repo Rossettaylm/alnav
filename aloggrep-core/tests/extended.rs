@@ -201,6 +201,7 @@ fn make_cli_full(
         example: false,
         highlight: vec![],
         hdc: false,
+        adb: false,
         device: None,
     }
 }

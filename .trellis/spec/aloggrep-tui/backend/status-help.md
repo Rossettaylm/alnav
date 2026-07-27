@@ -98,7 +98,7 @@ English. Prefer short uppercase tokens (`EXISTS`, `NO ROW`, `UNKNOWN FIELD`).
 
 ## 6. Tests Required
 
-- `help::` — context kind priority, hdc L1 (no `t`, has `^L`), spans without `:`, `? help` present, catalog includes Active + Navigation, `FAST_SCROLL_STEP` matches catalog text.
+- `help::` — context kind priority, live L1 for HDC and ADB (no `t`, has `^L`), spans without `:`, `? help` present, catalog includes Active + Navigation, `FAST_SCROLL_STEP` matches catalog text.
 - `dispatch_tests` — `?` open/Esc no-follow; `?` ignored when pending; `/` still Highlight New; Help `J`/`K` ±7; `j`/`k` ±1.
 - `ui::` status bar — match stats without `[]`; wide shows help; narrow keeps follow glyph and hides `j/k`.
 

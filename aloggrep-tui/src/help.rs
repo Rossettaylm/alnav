@@ -59,7 +59,7 @@ pub enum ContextKind {
     ExcludeStrip,
     HighlightStrip,
     LogList,
-    LogListHdc,
+    LogListLive,
 }
 
 impl ContextKind {
@@ -82,7 +82,7 @@ impl ContextKind {
             Self::ExcludeStrip => "Exclude strip",
             Self::HighlightStrip => "Highlight strip",
             Self::LogList => "Log list",
-            Self::LogListHdc => "Log list (live)",
+            Self::LogListLive => "Log list (live)",
         }
     }
 }
@@ -129,7 +129,7 @@ const L1_LOGLIST: &[HintEntry] = &[
     HintEntry::new("p/P", "detail", "fields / pretty"),
 ];
 
-const L1_LOGLIST_HDC: &[HintEntry] = &[
+const L1_LOGLIST_LIVE: &[HintEntry] = &[
     HintEntry::short("j/k", "move"),
     HintEntry::new("Esc", "follow", "resume following"),
     HintEntry::new("?", "help", "open help"),
@@ -258,7 +258,7 @@ const L2_STRIP_D: &[HintEntry] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Full catalog (file mode). Hdc omits time-interactive entries via filter.
+// Full catalog (file mode). Live sources omit interactive time entries.
 // ---------------------------------------------------------------------------
 
 const CAT_NAVIGATION: &[HintEntry] = &[
@@ -309,7 +309,7 @@ const CAT_SESSION: &[HintEntry] = &[
         "yank field",
         "yank tag/msg/pkg/pid/tid/level/raw/line/time",
     ),
-    HintEntry::new("^L", "clear", "clear buffered logs (--hdc)"),
+    HintEntry::new("^L", "clear", "clear buffered live logs"),
 ];
 
 const CAT_OVERLAYS: &[HintEntry] = &[
@@ -410,8 +410,8 @@ pub fn context_kind(app: &App) -> ContextKind {
         Focus::ExcludeStrip => ContextKind::ExcludeStrip,
         Focus::HighlightStrip => ContextKind::HighlightStrip,
         Focus::LogList => {
-            if matches!(app.export_source, crate::export::ExportSource::Hdc { .. }) {
-                ContextKind::LogListHdc
+            if app.export_source.is_live() {
+                ContextKind::LogListLive
             } else {
                 ContextKind::LogList
             }
@@ -439,7 +439,7 @@ pub fn context_entries(app: &App) -> &'static [HintEntry] {
         ContextKind::ExcludeStrip => L1_EXCLUDE_STRIP,
         ContextKind::HighlightStrip => L1_HIGHLIGHT_STRIP,
         ContextKind::LogList => L1_LOGLIST,
-        ContextKind::LogListHdc => L1_LOGLIST_HDC,
+        ContextKind::LogListLive => L1_LOGLIST_LIVE,
     }
 }
 
@@ -460,11 +460,11 @@ pub fn active_section_id(kind: ContextKind) -> SectionId {
             SectionId::Session
         }
         ContextKind::Detail | ContextKind::TimePanel => SectionId::Overlays,
-        ContextKind::LogList | ContextKind::LogListHdc => SectionId::Navigation,
+        ContextKind::LogList | ContextKind::LogListLive => SectionId::Navigation,
     }
 }
 
-/// Full catalog sections (hdc hides interactive time entry detail via filter in UI).
+/// Full catalog sections (live modes hide interactive time entry detail in UI).
 pub fn catalog_sections() -> &'static [HintSection] {
     CATALOG
 }
@@ -553,8 +553,7 @@ pub fn context_hint_spans(app: &App, max_chars: usize) -> Option<Vec<Span<'stati
 pub fn help_body_lines(app: &App) -> Vec<Line<'static>> {
     let kind = context_kind(app);
     let active_id = active_section_id(kind);
-    let hdc = matches!(kind, ContextKind::LogListHdc)
-        || matches!(app.export_source, crate::export::ExportSource::Hdc { .. });
+    let live = matches!(kind, ContextKind::LogListLive) || app.export_source.is_live();
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
@@ -590,10 +589,10 @@ pub fn help_body_lines(app: &App) -> Vec<Line<'static>> {
             theme::help_section_style(is_active),
         )));
         for entry in section.entries {
-            if hdc && entry.key.starts_with("t s") {
+            if live && entry.key.starts_with("t s") {
                 continue;
             }
-            if !hdc && entry.key == "^L" {
+            if !live && entry.key == "^L" {
                 continue;
             }
             lines.push(detail_line(entry));
@@ -654,20 +653,23 @@ mod tests {
     }
 
     #[test]
-    fn context_loglist_hdc_appends_clear_hint() {
+    fn context_loglist_live_appends_clear_hint() {
         let mut app = app_with_focus(Focus::LogList);
         assert_eq!(context_kind(&app), ContextKind::LogList);
         app.export_source = crate::export::ExportSource::Hdc { device: None };
-        assert_eq!(context_kind(&app), ContextKind::LogListHdc);
+        assert_eq!(context_kind(&app), ContextKind::LogListLive);
         let entries = context_entries(&app);
         assert!(
             entries.iter().any(|e| e.key == "^L"),
-            "hdc LogList hint must expose Ctrl-L clear"
+            "live LogList hint must expose Ctrl-L clear"
         );
         assert!(
             !entries.iter().any(|e| e.key == "t"),
-            "hdc LogList must not expose interactive time"
+            "live LogList must not expose interactive time"
         );
+
+        app.export_source = crate::export::ExportSource::Adb { device: None };
+        assert_eq!(context_kind(&app), ContextKind::LogListLive);
     }
 
     #[test]
@@ -794,6 +796,21 @@ mod tests {
         assert!(text.contains("Active"), "{text}");
         assert!(text.contains("All commands"), "{text}");
         assert!(text.contains("Navigation"), "{text}");
+    }
+
+    #[test]
+    fn adb_help_hides_time_and_shows_clear() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.export_source = crate::export::ExportSource::Adb { device: None };
+        let lines = help_body_lines(&app);
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(!text.contains("set / clear global time window"), "{text}");
+        assert!(text.contains("clear buffered live logs"), "{text}");
     }
 
     #[test]

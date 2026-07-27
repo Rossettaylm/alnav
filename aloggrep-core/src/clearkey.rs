@@ -1,7 +1,7 @@
-//! Ctrl-L 清屏支持（仅 `--hdc` 实时抓取模式使用）。
+//! Ctrl-L 清屏支持（`--hdc` / `--adb` 实时抓取模式使用）。
 //!
 //! Unix 下把 stdin 切到 cbreak 模式：关闭 `ICANON`（行缓冲）和 `ECHO`，
-//! 保留 `ISIG`，所以 Ctrl+C 仍由内核转换成 `SIGINT`，现有的 `--hdc`
+//! 保留 `ISIG`，所以 Ctrl+C 仍由内核转换成 `SIGINT`，现有的实时抓取
 //! 中断逻辑不受影响。切换后逐字节读 stdin，通过 channel 上报给
 //! `KeypressGate`，由它在两条日志之间检查并分发。非 Unix 平台整体是
 //! 空实现：`CbreakGuard::enable()` 直接成功但什么也不做，
@@ -21,7 +21,7 @@ pub fn disabled_listener() -> Receiver<u8> {
 }
 
 /// 直接把 [`CLEAR_SCREEN`] 写到 fd 1，绕过 `io::Stdout` 的内部锁——
-/// `--hdc` 的写循环在运行期间一直持有那把锁，同线程重复获取会死锁。
+/// 实时抓取写循环在运行期间一直持有那把锁，同线程重复获取会死锁。
 /// 忽略错误：清屏失败不是致命问题。
 #[cfg(unix)]
 pub fn write_clear_screen() {

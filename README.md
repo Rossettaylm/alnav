@@ -47,6 +47,9 @@ alg --version
 # 管道模式（配合 adb logcat）
 adb logcat | alg --tag "OkHttp" --level W
 
+# Android 实时抓取（自动使用 threadtime 并跳过历史缓冲）
+alg --adb --tag "OkHttp" --level W
+
 # 文件模式
 alg -f app.log --tag "MyApp" --level E
 
@@ -146,6 +149,15 @@ alg -f app.log --highlight timeout --highlight "error|failed"      # 多关键�
 
 > `--highlight` 接受正则（大小写不敏感），可重复传入，每个关键词使用不同背景色，仅在终端彩色输出下生效。
 
+### Android 实时抓取（`--adb`）
+
+```bash
+alg --adb --tag OkHttp                    # 通过 adb logcat 实时抓取当前设备日志
+alg --adb --device <serial> --level E     # 多设备时指定序列号
+```
+
+`--adb` 固定运行 `adb logcat -v threadtime`，先查询设备时间，再跳过更早的 logcat 历史缓冲记录。若设备时间查询失败，会继续抓取并提示历史缓冲回退。
+
 ### HarmonyOS 实时抓取（`--hdc`）
 
 ```bash
@@ -153,7 +165,18 @@ alg --hdc --tag AppFreeze                 # 通过 hdc hilog 实时抓取当前�
 alg --hdc --device <serial> --level E     # 多设备时指定序列号
 ```
 
-> `--hdc` 跳过 hilogd 的历史缓冲区，只输出从命令启动那一刻起的新日志；不可与 `-f`、`--time-context`、`--follow-pid`/`--follow-tid` 同时使用（这些依赖两遍扫描）。
+> `--adb` 与 `--hdc` 都只输出从命令启动时刻起的新日志，并支持 `--device`。二者互斥，且不可与 `-f`、`--time-context`、`--follow-pid`/`--follow-tid` 或 `--sort-time` 同时使用。
+
+### 交互式 TUI
+
+```bash
+aloggrep-tui -f app.log                  # 浏览静态日志文件
+aloggrep-tui --adb                       # Android adb logcat 实时流
+aloggrep-tui --adb --device <serial>     # 指定 Android 设备
+aloggrep-tui --hdc --device <serial>     # 指定 HarmonyOS 设备
+```
+
+ADB 与 HDC 实时模式共用有界的 drop-oldest 缓冲、`Ctrl-L` 本地清屏和子进程清理逻辑；实时模式不提供交互式时间窗，`yc` 导出会保留 `--adb` / `--hdc` 与设备序列号。
 
 ## 过滤逻辑速查
 
@@ -234,6 +257,9 @@ Skill 引导 agent 按 **全局概览 → 定位问题区域 → 深入追踪 �
 ```
 src/
 ├── main.rs        # CLI 入口（clap derive），输入调度，主循环
+├── live.rs        # 后端无关的实时会话与启动时间过滤
+├── adb.rs         # adb 设备时间查询与 logcat 命令
+├── hdc.rs         # hdc 设备时间查询与 hilog 命令
 ├── parser.rs      # LogEntry 解析（hilog / threadtime / xlog / brief）
 ├── filter.rs      # FilterChain：多条件组合过滤，支持 pid/tid
 ├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
@@ -249,7 +275,7 @@ src/
 **数据流：**
 
 ```
-stdin/file → 逐行读取 → [MultilineMerger] → LogEntry::parse()
+stdin/file/adb/hdc → 逐行读取 → [MultilineMerger] → LogEntry::parse()
   → FilterChain::matches() → [CrashDetector]
   → Formatter::write_entry() / Summary::record()
 ```

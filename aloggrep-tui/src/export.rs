@@ -8,11 +8,22 @@ use crate::input::{Chip, ChipField};
 pub enum ExportSource {
     File(String),
     Hdc { device: Option<String> },
+    Adb { device: Option<String> },
 }
 
 impl Default for ExportSource {
     fn default() -> Self {
         Self::File(String::new())
+    }
+}
+
+impl ExportSource {
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File(_))
+    }
+
+    pub fn is_live(&self) -> bool {
+        matches!(self, Self::Hdc { .. } | Self::Adb { .. })
     }
 }
 
@@ -38,6 +49,15 @@ pub fn build_cli_command(
         }
         ExportSource::Hdc { device } => {
             parts.push("--hdc".into());
+            if let Some(serial) = device {
+                if !serial.is_empty() {
+                    parts.push("--device".into());
+                    parts.push(shell_quote(serial));
+                }
+            }
+        }
+        ExportSource::Adb { device } => {
+            parts.push("--adb".into());
             if let Some(serial) = device {
                 if !serial.is_empty() {
                     parts.push("--device".into());
@@ -216,6 +236,20 @@ mod tests {
             None,
         );
         assert_eq!(cmd, "aloggrep --hdc --device 'XYZ' -i");
+    }
+
+    #[test]
+    fn empty_filter_exports_adb() {
+        let cmd = build_cli_command(
+            &ExportSource::Adb {
+                device: Some("ANDROID".into()),
+            },
+            &GroupList::default(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(cmd, "aloggrep --adb --device 'ANDROID' -i");
     }
 
     #[test]

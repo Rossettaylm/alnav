@@ -33,7 +33,7 @@ aloggrep-tui/src/
 ├── export.rs       # H10 yc CLI export (filters + lock + time_bound)
 ├── config.rs       # theme.toml/config.toml loading
 ├── preview.rs      # H1 preview sampling (stream rows or file lazy parse)
-└── ingest.rs       # spawn_hdc_ingest (DropOldestRing) / IngestHandle; spawn_file_ingest tests-only
+└── ingest.rs       # spawn_live_ingest (ADB/HDC DropOldestRing) / IngestHandle; file ingest tests-only
 ```
 
 ### Global time window module

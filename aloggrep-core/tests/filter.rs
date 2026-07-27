@@ -49,6 +49,7 @@ fn build_chain_with(
         example: false,
         highlight: vec![],
         hdc: false,
+        adb: false,
         device: None,
     };
     FilterChain::from_cli(&cli).unwrap()
@@ -118,7 +119,7 @@ fn build_chain_time(since: Option<&str>, until: Option<&str>) -> FilterChain {
         pid: vec![], tid: vec![], histogram: None, fields: None,
         sort_time: false, time_context: None,
         follow_pid: false, follow_tid: false, example: false,
-        highlight: vec![], hdc: false, device: None,
+        highlight: vec![], hdc: false, adb: false, device: None,
     };
     FilterChain::from_cli(&cli).unwrap()
 }
@@ -186,7 +187,7 @@ fn test_pid_filter() {
         pid: vec!["1234".to_string()], tid: vec![],
         histogram: None, fields: None, sort_time: false, time_context: None,
         follow_pid: false, follow_tid: false, example: false,
-        highlight: vec![], hdc: false, device: None,
+        highlight: vec![], hdc: false, adb: false, device: None,
     };
     let chain = FilterChain::from_cli(&cli).unwrap();
     let hit = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
@@ -207,7 +208,7 @@ fn test_tid_filter() {
         pid: vec![], tid: vec!["5678".to_string()],
         histogram: None, fields: None, sort_time: false, time_context: None,
         follow_pid: false, follow_tid: false, example: false,
-        highlight: vec![], hdc: false, device: None,
+        highlight: vec![], hdc: false, adb: false, device: None,
     };
     let chain = FilterChain::from_cli(&cli).unwrap();
     let hit = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
