@@ -1,0 +1,32 @@
+{
+  "id": "tui-status-help-panel",
+  "name": "tui-status-help-panel",
+  "title": "TUI status bar + help panel",
+  "description": "English status bar (icon badges + dim-key L1/L2 hints) and read-only Help panel on ?",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": "aloggrep-tui",
+  "priority": "P2",
+  "creator": "lymanyang",
+  "assignee": "lymanyang",
+  "createdAt": "2026-07-27",
+  "completedAt": "2026-07-27",
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "aloggrep-tui/src/help.rs",
+    "aloggrep-tui/src/ui.rs",
+    "aloggrep-tui/src/theme.rs",
+    "aloggrep-tui/src/app.rs",
+    "aloggrep-tui/src/main.rs"
+  ],
+  "notes": "",
+  "meta": {}
+}
