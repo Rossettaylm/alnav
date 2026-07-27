@@ -50,8 +50,19 @@ and diverges from CLI global-AND semantics. See
 
 ### Don't: let modal Ctrl+C fall through as a typed character
 
-When a top modal owns key routing (Time panel, etc.), Ctrl+C must cancel like
-Esc at the `KeyEvent` layer — otherwise `Char('c')` is inserted into the draft.
+When a top modal owns key routing (Time panel, Help, etc.), Ctrl+C must cancel
+like Esc at the `KeyEvent` layer — otherwise `Char('c')` is inserted into the
+draft or quits the app while a modal is open.
+
+### Don't: duplicate keybinding copy outside `help.rs`
+
+Status-bar L1/L2 and the Help panel share `HintEntry` data in `help.rs`. Do
+not reintroduce Chinese `key:label` string constants or a second Help
+paragraph table in `ui.rs`. See [status-help.md](./status-help.md).
+
+### Don't: resume following when closing Help
+
+`close_help()` must not call `resume_following` — same as Detail Esc.
 
 ---
 

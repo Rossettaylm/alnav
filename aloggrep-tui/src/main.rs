@@ -584,6 +584,11 @@ fn run<B: ratatui::backend::Backend>(
                         let h = ui::time_panel_height(frame_area);
                         let area = ui::top_modal_rect(frame_area, modal_w.max(56), h);
                         hw_cursor = ui::render_time_panel(app, frame, area);
+                    } else if app.help_open {
+                        let content_rows = crate::help::help_body_lines(app).len().max(1);
+                        let h = ui::help_modal_height(frame_area, content_rows);
+                        let area = ui::top_modal_rect(frame_area, modal_w.max(56), h);
+                        ui::render_help_panel(app, frame, area);
                     } else if app.detail_open() {
                         let inner_w = modal_w.saturating_sub(2).max(1);
                         let content_rows = ui::detail_content_lines(app, inner_w).len().max(1);
@@ -636,6 +641,10 @@ fn run<B: ratatui::backend::Backend>(
         }
         if app.highlight_box.editing {
             handle_highlight_box_key(app, key);
+            continue;
+        }
+        if app.help_open {
+            handle_help_key(app, key);
             continue;
         }
         // Ctrl+C: quit from Normal (like `q`), but only cancel in-progress
@@ -1114,7 +1123,7 @@ fn submit_highlight_picker(app: &mut App) {
         PickerMode::New => app.push_or_find_highlight_group(group),
         PickerMode::Edit { index } => {
             if !app.update_search_group(index, &group.pattern) {
-                app.set_flash("已存在");
+                app.set_flash("EXISTS");
                 return;
             }
             app.active_highlight = Some(index);
@@ -1164,7 +1173,7 @@ fn submit_filter_picker(app: &mut App) {
             .and_then(|session| session.input.as_ref())
             .is_some_and(|input| input.chips.len() != 1)
     {
-        app.set_flash("排除条件仅支持一个 chip");
+        app.set_flash("EXCLUDE NEEDS ONE CHIP");
         return;
     }
 
@@ -1202,7 +1211,7 @@ fn submit_filter_picker(app: &mut App) {
                 }
             };
             if !app.update_filter_group(index, group) {
-                app.set_flash("已存在");
+                app.set_flash("EXISTS");
                 return;
             }
             index
@@ -1238,7 +1247,7 @@ fn submit_filter_picker(app: &mut App) {
                 }
             };
             if !app.update_exclude_group(index, group) {
-                app.set_flash("已存在");
+                app.set_flash("EXISTS");
                 return;
             }
             index
@@ -1315,7 +1324,7 @@ fn manage_request_delete_selected(app: &mut App) {
 
 fn manage_enter_edit_selected(app: &mut App) {
     if app.picker.as_ref().is_some_and(|s| s.checked.len() > 1) {
-        app.set_flash("不支持批量编辑");
+        app.set_flash("NO BULK EDIT");
         return;
     }
     let Some(id) = (|| {
@@ -1413,7 +1422,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                     }
                     KeyCode::Tab => { /* no-op: bookmark panel has no multi-select */ }
                     KeyCode::Char('x') if ctrl => {
-                        app.set_flash("书签不支持编辑");
+                        app.set_flash("BOOKMARKS NOT EDITABLE");
                     }
                     _ if is_delete => {
                         if let Some(&idx) = vis.get(app.picker.as_ref().unwrap().selected) {
@@ -1429,10 +1438,10 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                                     app.close_picker();
                                 }
                                 crate::bookmark::JumpResult::Evicted => {
-                                    app.set_flash("书签行已淘汰");
+                                    app.set_flash("BOOKMARK EVICTED");
                                 }
                                 crate::bookmark::JumpResult::Filtered => {
-                                    app.set_flash("书签行不在当前视图");
+                                    app.set_flash("BOOKMARK NOT VISIBLE");
                                 }
                             }
                         }
@@ -1673,7 +1682,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         .and_then(|session| session.input.as_ref())
                         .is_some_and(|input| !input.chips.is_empty());
                 if exclude_has_chip {
-                    app.set_flash("排除条件仅支持一个 chip");
+                    app.set_flash("EXCLUDE NEEDS ONE CHIP");
                 } else if let Some(input) = app.picker.as_mut().unwrap().input.as_mut() {
                     input.push_char(c);
                 }
@@ -1785,6 +1794,9 @@ fn focus_input_insert(app: &mut App) {
 /// (Ctrl-d/Ctrl-u) and the `Shift+J`/`Shift+K` fast-move binding — a wheel
 /// "notch" is a smaller, more frequent unit than either of those.
 const MOUSE_SCROLL_STEP: isize = 3;
+
+/// LogList / Help `J`/`K` step — keep in sync via `help::FAST_SCROLL_STEP`.
+const FAST_SCROLL_STEP: isize = help::FAST_SCROLL_STEP;
 
 /// Only scroll wheel events move the log list; clicks/drags/moves are
 /// ignored in this pass (no click-to-focus yet — see the design doc's
@@ -1900,7 +1912,7 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
             // Leader+Leader → unified Manage search panel
             KeyCode::Char(' ') => app.open_unified_picker(),
             KeyCode::Esc => {}
-            _ => app.set_flash("未知 Leader"),
+            _ => app.set_flash("UNKNOWN LEADER"),
         }
         return true;
     }
@@ -1918,6 +1930,25 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
         return true;
     }
     false
+}
+
+/// Read-only Help panel keys. Esc / `?` / Ctrl+C close without resuming follow.
+fn handle_help_key(app: &mut App, key: event::KeyEvent) {
+    let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') => app.close_help(),
+        KeyCode::Char('c') if ctrl => app.close_help(),
+        KeyCode::Char('j') | KeyCode::Down => app.scroll_help(1),
+        KeyCode::Char('k') | KeyCode::Up => app.scroll_help(-1),
+        KeyCode::Char('J') => app.scroll_help(FAST_SCROLL_STEP),
+        KeyCode::Char('K') => app.scroll_help(-FAST_SCROLL_STEP),
+        KeyCode::Char('G') => {
+            let n = crate::help::help_body_lines(app).len();
+            app.help_scroll = n.saturating_sub(1);
+        }
+        KeyCode::Char('g') => app.help_scroll = 0,
+        _ => {}
+    }
 }
 
 /// Route keys to the open `ts` time panel. Esc / Ctrl+C cancel without applying
@@ -1963,11 +1994,11 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                 return;
             }
             KeyCode::Char('J') => {
-                app.move_cursor_manual(7);
+                app.move_cursor_manual(FAST_SCROLL_STEP);
                 return;
             }
             KeyCode::Char('K') => {
-                app.move_cursor_manual(-7);
+                app.move_cursor_manual(-FAST_SCROLL_STEP);
                 return;
             }
             KeyCode::Char('y') => {
@@ -2054,16 +2085,16 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                             let _ = app.push_chip_from_field(field);
                         }
                         ChipFieldKey::Unsupported => {
-                            app.set_flash("不支持 raw/timestamp");
+                            app.set_flash("NO RAW/TIMESTAMP");
                         }
                         ChipFieldKey::Unknown => {
-                            app.set_flash("未知字段");
+                            app.set_flash("UNKNOWN FIELD");
                         }
                     }
                     return;
                 }
                 _ => {
-                    app.set_flash("未知字段");
+                    app.set_flash("UNKNOWN FIELD");
                     return;
                 }
             }
@@ -2090,16 +2121,16 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                             let _ = app.push_exclude_from_field(field);
                         }
                         ChipFieldKey::Unsupported => {
-                            app.set_flash("不支持 raw/timestamp");
+                            app.set_flash("NO RAW/TIMESTAMP");
                         }
                         ChipFieldKey::Unknown => {
-                            app.set_flash("未知字段");
+                            app.set_flash("UNKNOWN FIELD");
                         }
                     }
                     return;
                 }
                 _ => {
-                    app.set_flash("未知字段");
+                    app.set_flash("UNKNOWN FIELD");
                     return;
                 }
             }
@@ -2129,11 +2160,11 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                     return;
                 }
                 KeyCode::Char(_) => {
-                    app.set_flash("未知");
+                    app.set_flash("UNKNOWN");
                     return;
                 }
                 _ => {
-                    app.set_flash("未知");
+                    app.set_flash("UNKNOWN");
                     return;
                 }
             }
@@ -2159,11 +2190,11 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                     return;
                 }
                 KeyCode::Char(_) => {
-                    app.set_flash("未知");
+                    app.set_flash("UNKNOWN");
                     return;
                 }
                 _ => {
-                    app.set_flash("未知");
+                    app.set_flash("UNKNOWN");
                     return;
                 }
             }
@@ -2182,7 +2213,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                 KeyCode::Char('m') => {
                     app.open_picker(crate::picker::PickerKind::Bookmark);
                 }
-                _ => app.set_flash("未知"),
+                _ => app.set_flash("UNKNOWN"),
             }
         }
         return;
@@ -2224,8 +2255,8 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         }
         (Focus::LogList, KeyCode::Char('j')) => app.move_cursor_manual(1),
         (Focus::LogList, KeyCode::Char('k')) => app.move_cursor_manual(-1),
-        (Focus::LogList, KeyCode::Char('J')) => app.move_cursor_manual(7),
-        (Focus::LogList, KeyCode::Char('K')) => app.move_cursor_manual(-7),
+        (Focus::LogList, KeyCode::Char('J')) => app.move_cursor_manual(FAST_SCROLL_STEP),
+        (Focus::LogList, KeyCode::Char('K')) => app.move_cursor_manual(-FAST_SCROLL_STEP),
         (Focus::LogList, KeyCode::Char('g')) => {
             app.following = false;
             app.jump_top();
@@ -2306,6 +2337,12 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         (_, KeyCode::Char('`')) => {
             app.open_picker_new(crate::picker::PickerKind::Exclude);
         }
+        (
+            Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip,
+            KeyCode::Char('?'),
+        ) if crate::help::help_available(app) => {
+            app.open_help();
+        }
         _ => {}
     }
 }
@@ -2376,7 +2413,7 @@ fn handle_insert_key(
                 }
                 input.exclude_mode = false;
                 if !any && app.status_msg.is_none() {
-                    app.set_flash("已存在");
+                    app.set_flash("EXISTS");
                 }
                 app.mode = app::Mode::Normal;
                 focus_loglist_and_follow(app);
@@ -2408,6 +2445,89 @@ fn handle_insert_key(
 mod dispatch_tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
+
+    #[test]
+    fn question_opens_help_and_esc_closes_without_follow() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        assert!(app.help_open);
+        handle_help_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.help_open);
+        assert!(!app.following, "closing help must not resume following");
+    }
+
+    #[test]
+    fn help_shift_jk_scrolls_by_fast_step() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        assert!(app.help_open);
+        let body_len = crate::help::help_body_lines(&app).len();
+        assert!(
+            body_len > FAST_SCROLL_STEP as usize,
+            "help body needs more than {FAST_SCROLL_STEP} lines, got {body_len}"
+        );
+        assert_eq!(app.help_scroll, 0);
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.help_scroll, FAST_SCROLL_STEP as usize);
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn help_jk_scrolls_one_line_and_question_closes_without_follow() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        assert!(app.help_open);
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.help_scroll, 1);
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.help_scroll, 0);
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert!(!app.help_open);
+        assert!(
+            !app.following,
+            "closing help with ? must not resume following"
+        );
+    }
+
+    #[test]
+    fn question_ignored_while_operator_pending() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.pending_yank = true;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn slash_still_opens_highlight_new() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
+        let picker = app.picker.as_ref().expect("highlight picker");
+        assert_eq!(picker.kind, crate::picker::PickerKind::Highlight);
+        assert!(matches!(picker.mode, crate::picker::PickerMode::New));
+    }
 
     #[test]
     fn space_f_no_longer_opens_filter_picker() {
@@ -4057,7 +4177,7 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
         assert_eq!(app.groups.groups.len(), 1);
-        assert_eq!(app.status_msg.as_deref(), Some("已存在"));
+        assert_eq!(app.status_msg.as_deref(), Some("EXISTS"));
     }
 
     #[test]
@@ -4204,10 +4324,10 @@ mod dispatch_tests {
         drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
-        assert_eq!(app.status_msg.as_deref(), Some("不支持 raw/timestamp"));
+        assert_eq!(app.status_msg.as_deref(), Some("NO RAW/TIMESTAMP"));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('x'));
-        assert_eq!(app.status_msg.as_deref(), Some("未知字段"));
+        assert_eq!(app.status_msg.as_deref(), Some("UNKNOWN FIELD"));
         assert!(app.groups.groups.is_empty());
     }
 
@@ -4232,7 +4352,7 @@ mod dispatch_tests {
         assert!(app.lock_tid.is_none());
         assert_eq!(app.visible.len(), 2);
         assert!(app.following, "lock coexists with following");
-        assert_eq!(app.lock_badge_label().as_deref(), Some("LOCK pid=111"));
+        assert_eq!(app.lock_badge_label().as_deref(), Some("pid=111"));
 
         app.cursor = 0; // still on a pid=111 row after rebuild+follow
                         // switch to tid lock on current row (tid=1 on first visible)
@@ -4612,7 +4732,7 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
         assert!(app.time_panel.is_none());
-        assert_eq!(app.status_msg.as_deref(), Some("无可用日期"));
+        assert_eq!(app.status_msg.as_deref(), Some("NO DATES"));
 
         // --hdc: bare `t` must not arm time operator.
         app.export_source = export::ExportSource::Hdc { device: None };
@@ -4662,11 +4782,11 @@ mod dispatch_tests {
         assert!(app.pending_m);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         assert_eq!(app.bookmarks.len(), 1);
-        assert_eq!(app.status_msg.as_deref(), Some("已收藏"));
+        assert_eq!(app.status_msg.as_deref(), Some("BOOKMARKED"));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
         assert_eq!(app.bookmarks.len(), 1);
-        assert_eq!(app.status_msg.as_deref(), Some("已存在"));
+        assert_eq!(app.status_msg.as_deref(), Some("EXISTS"));
         app.cursor = 1;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
@@ -4688,7 +4808,7 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
         assert!(app.bookmarks.is_empty());
-        assert_eq!(app.status_msg.as_deref(), Some("已删除"));
+        assert_eq!(app.status_msg.as_deref(), Some("REMOVED"));
     }
 
     #[test]
@@ -4783,7 +4903,7 @@ mod dispatch_tests {
         );
         // Still Manage (no Edit transition).
         assert_eq!(app.picker.as_ref().unwrap().mode, mode_before);
-        assert_eq!(app.status_msg.as_deref(), Some("书签不支持编辑"));
+        assert_eq!(app.status_msg.as_deref(), Some("BOOKMARKS NOT EDITABLE"));
     }
 
     #[test]

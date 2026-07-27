@@ -29,7 +29,7 @@ aloggrep-tui/src/
 ├── ui.rs           # Render: log list, strips, picker, minimap, modals, time panel
 ├── theme.rs        # SINGLE color source (UiTokens + logcolor derivation)
 ├── bookmark.rs     # Bookmark/BookmarkList/JumpResult/label helpers
-├── help.rs         # L1/L2 context help strings
+├── help.rs         # HintEntry L1/L2 + Help catalog; FAST_SCROLL_STEP; help_available
 ├── export.rs       # H10 yc CLI export (filters + lock + time_bound)
 ├── config.rs       # theme.toml/config.toml loading
 ├── preview.rs      # H1 preview sampling (stream rows or file lazy parse)

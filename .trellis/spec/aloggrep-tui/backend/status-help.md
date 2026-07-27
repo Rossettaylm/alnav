@@ -1,0 +1,136 @@
+# Status Bar + Help Panel
+
+> Executable contracts for the English status bar and read-only Help (`?`).
+
+---
+
+## Overview
+
+`help.rs` owns keybinding copy as structured `HintEntry` data. The status
+bar and Help panel both render from that source — do not maintain a second
+Chinese/`key:label` string table.
+
+---
+
+## 1. Scope / Trigger
+
+Update this spec when changing:
+
+- Status-bar left icons / right L1–L2 hints
+- Help panel open/close/scroll keys
+- Flash toast language on the status bar
+- `?` keybinding availability
+
+---
+
+## 2. Signatures
+
+| Item | Location | Contract |
+|------|----------|----------|
+| `HintEntry { key, label, detail }` | `help.rs` | Status uses `key`+`label`; Help Active/catalog uses `detail` |
+| `context_kind(app) -> ContextKind` | `help.rs` | modal/confirm > pending > focus |
+| `context_entries(app) -> &[HintEntry]` | `help.rs` | Current L1 or L2 set |
+| `context_hint_spans(app, max)` | `help.rs` | Dim key + normal label; gap `"  "`; no `:`/`\|` |
+| `help_available(app) -> bool` | `help.rs` | Gate for opening Help |
+| `help_body_lines(app)` | `help.rs` | Active block + fixed catalog |
+| `FAST_SCROLL_STEP` | `help.rs` (`pub const`, value `7`) | Shared by LogList `J`/`K` and Help `J`/`K` |
+| `App.help_open` / `help_scroll` | `app.rs` | Panel state; `close_help` does **not** `resume_following` |
+| `handle_help_key` | `main.rs` | Esc/`?`/Ctrl+C close; `j`/`k` ±1; `J`/`K` ±`FAST_SCROLL_STEP` |
+| `status_icon` / `status_icon_value` / `status_soft` | `theme.rs` | Left cluster rendering helpers |
+
+---
+
+## 3. Contracts
+
+### Status bar left cluster
+
+| State | Render |
+|-------|--------|
+| follow / visual | Glyph only (`status_icon`) — no FOLLOWING/VISUAL words |
+| lock / time / progress | Glyph + short value (`status_icon_value`) — no LOCK/TIME word prefix |
+| highlight hits | Search glyph + `k/total` — **no** `[brackets]` |
+| pending / flash | Soft non-inverse text (`status_soft`), English |
+
+### Status bar right hints
+
+- English only; key dim, label normal weight; entries separated by spaces only.
+- L1 when idle; L2 when operator-pending; modal L1 overrides pending.
+- LogList L1 must include `? help` early enough to survive moderate truncation.
+
+### Help panel (`?`)
+
+- **Read-only** — never executes commands / never replaces Picker.
+- Open when: focus ∈ {LogList, ChipStrip, ExcludeStrip, HighlightStrip} AND no picker/time/detail/highlight edit AND no `pending_*` / `pending_leader`.
+- Content: top **Active** (current context detailed) + **All commands** catalog; active catalog section emphasized.
+- Close: Esc / `?` / Ctrl+C → `close_help()`; does **not** resume following.
+- Scroll: `j`/`k` (and arrows) = 1 line; `J`/`K` = `FAST_SCROLL_STEP` (7), same as LogList.
+
+### Keybinding note
+
+- `?` opens Help. `/` remains Highlight New (`open_picker_new`).
+- Do **not** rebind `?` to Highlight New.
+
+### Flash language
+
+All `set_flash` / TimePanel flash strings that appear on the status bar are
+English. Prefer short uppercase tokens (`EXISTS`, `NO ROW`, `UNKNOWN FIELD`).
+
+---
+
+## 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|-----------|----------|
+| `?` while `pending_yank` (etc.) | Help does not open (pending handler consumes key) |
+| `?` while Picker/Time/Detail open | Help does not open |
+| Help Esc | Close only; `following` unchanged |
+| Narrow terminal | Right hints hide when budget `< MIN_HELP_WIDTH` (8); left icons win |
+
+---
+
+## 5. Good / Base / Bad Cases
+
+- **Good**: LogList Normal `?` → Help; `J` scrolls +7; Esc closes; still not following.
+- **Base**: Wide status shows `j/k move  Esc follow  ? help …` without colons.
+- **Bad**: Reintroducing `j/k:移` Chinese colon strings, or `FOLLOWING` word badges, or `?` → Highlight New.
+
+---
+
+## 6. Tests Required
+
+- `help::` — context kind priority, hdc L1 (no `t`, has `^L`), spans without `:`, `? help` present, catalog includes Active + Navigation, `FAST_SCROLL_STEP` matches catalog text.
+- `dispatch_tests` — `?` open/Esc no-follow; `?` ignored when pending; `/` still Highlight New; Help `J`/`K` ±7; `j`/`k` ±1.
+- `ui::` status bar — match stats without `[]`; wide shows help; narrow keeps follow glyph and hides `j/k`.
+
+---
+
+## 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// Separate Chinese status string + hard-coded Help paragraphs
+const L1: &str = "j/k:移 Esc:随";
+app.set_flash("已存在");
+theme::status_badge(GLYPH_FOLLOWING, "FOLLOWING", success());
+```
+
+#### Correct
+
+```rust
+// Shared HintEntry; English flash; icon-only follow
+context_hint_spans(app, avail);
+app.set_flash("EXISTS");
+theme::status_icon(GLYPH_FOLLOWING, success());
+// Help J/K shares help::FAST_SCROLL_STEP with LogList
+```
+
+---
+
+## Design Decision: Single Hint Source
+
+**Context**: Status bar and Help must stay consistent after English redesign.
+
+**Decision**: `help.rs` is the only keybinding copy source; UI only styles/spans.
+
+**Why**: Prevents L1 drift from the Help catalog and keeps dim-key rendering data-driven.

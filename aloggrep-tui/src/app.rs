@@ -242,6 +242,10 @@ pub struct App {
     pub last_yanked: Option<String>,
     /// H4 field detail overlay (same shell reserved for H5 Pretty).
     pub detail: DetailView,
+    /// Read-only Help panel (`?`); Esc/`?` close without resuming follow.
+    pub help_open: bool,
+    /// Scroll offset (lines) inside the Help body.
+    pub help_scroll: usize,
     /// Session source for H10 `yc` CLI export (`-f` / `--hdc`).
     pub export_source: crate::export::ExportSource,
     /// App settings loaded from config.toml (picker layout, etc.).
@@ -310,6 +314,8 @@ impl App {
             status_flash_until: None,
             last_yanked: None,
             detail: DetailView::Closed,
+            help_open: false,
+            help_scroll: 0,
             export_source: crate::export::ExportSource::default(),
             config: crate::config::AppConfig::default_config(),
             vocab: Vocab::default(),
@@ -433,6 +439,31 @@ impl App {
 
     pub fn detail_open(&self) -> bool {
         !matches!(self.detail, DetailView::Closed)
+    }
+
+    /// Open the read-only Help panel. Does not change `following`.
+    pub fn open_help(&mut self) {
+        self.help_open = true;
+        self.help_scroll = 0;
+    }
+
+    /// Close Help without resuming follow (same as Detail Esc).
+    pub fn close_help(&mut self) {
+        self.help_open = false;
+        self.help_scroll = 0;
+    }
+
+    pub fn scroll_help(&mut self, delta: isize) {
+        if !self.help_open {
+            return;
+        }
+        let lines = crate::help::help_body_lines(self).len();
+        if delta < 0 {
+            self.help_scroll = self.help_scroll.saturating_sub((-delta) as usize);
+        } else {
+            let max = lines.saturating_sub(1);
+            self.help_scroll = (self.help_scroll + delta as usize).min(max);
+        }
     }
 
     /// Toggle overlay with `p`: open → Fields; any open mode → Closed.
@@ -1251,7 +1282,7 @@ impl App {
         self.pending_m = false;
         self.pending_leader = false;
         let Some(row) = self.current_row() else {
-            self.set_flash("无选中行");
+            self.set_flash("NO ROW");
             return;
         };
         let row_id = row.row_id;
@@ -1262,10 +1293,10 @@ impl App {
         match self.bookmarks.try_add(bm) {
             Ok(()) => {
                 self.bookmark_row_ids.insert(row_id);
-                self.set_flash("已收藏");
+                self.set_flash("BOOKMARKED");
             }
-            Err(AddError::Duplicate) => self.set_flash("已存在"),
-            Err(AddError::Full) => self.set_flash("书签已满"),
+            Err(AddError::Duplicate) => self.set_flash("EXISTS"),
+            Err(AddError::Full) => self.set_flash("BOOKMARKS FULL"),
         }
     }
 
@@ -1274,15 +1305,15 @@ impl App {
         self.pending_m = false;
         self.pending_leader = false;
         let Some(row) = self.current_row() else {
-            self.set_flash("无选中行");
+            self.set_flash("NO ROW");
             return;
         };
         let row_id = row.row_id;
         if self.bookmarks.remove_id(row_id) {
             self.bookmark_row_ids.remove(&row_id);
-            self.set_flash("已删除");
+            self.set_flash("REMOVED");
         } else {
-            self.set_flash("未收藏");
+            self.set_flash("NOT BOOKMARKED");
         }
     }
 
@@ -1451,7 +1482,7 @@ impl App {
                 true
             }
             None => {
-                self.set_flash("无可用日期");
+                self.set_flash("NO DATES");
                 false
             }
         }
@@ -1484,7 +1515,7 @@ impl App {
             self.rebuild_visible();
             self.set_flash("TIME CLEARED");
         } else {
-            self.set_flash("无时间窗");
+            self.set_flash("NO TIME WINDOW");
         }
     }
 
@@ -1495,9 +1526,9 @@ impl App {
             return None;
         }
         match (&bound.since, &bound.until) {
-            (Some(s), Some(u)) => Some(format!("TIME {s}…{u}")),
-            (Some(s), None) => Some(format!("TIME ≥{s}")),
-            (None, Some(u)) => Some(format!("TIME ≤{u}")),
+            (Some(s), Some(u)) => Some(format!("{s}…{u}")),
+            (Some(s), None) => Some(format!("≥{s}")),
+            (None, Some(u)) => Some(format!("≤{u}")),
             (None, None) => None,
         }
     }
@@ -1513,14 +1544,14 @@ impl App {
             self.rebuild_visible();
             self.set_flash("UNLOCK");
         } else {
-            self.set_flash("无锁定");
+            self.set_flash("NO LOCK");
         }
     }
 
     /// `f` `p` / `f` `t`: set, toggle-clear, or switch lock target.
     pub fn apply_session_lock(&mut self, kind: LockKind) {
         let Some(row) = self.current_row() else {
-            self.set_flash("无选中行");
+            self.set_flash("NO ROW");
             return;
         };
         let value = match kind {
@@ -1529,8 +1560,8 @@ impl App {
         };
         if value.is_empty() {
             self.set_flash(match kind {
-                LockKind::Pid => "空 pid",
-                LockKind::Tid => "空 tid",
+                LockKind::Pid => "EMPTY pid",
+                LockKind::Tid => "EMPTY tid",
             });
             return;
         }
@@ -1561,12 +1592,13 @@ impl App {
     }
 
     /// Status-bar label when a session lock is active.
+    /// Short value for the lock icon (no "LOCK" word — glyph carries the meaning).
     pub fn lock_badge_label(&self) -> Option<String> {
         if let Some(pid) = &self.lock_pid {
-            return Some(format!("LOCK pid={pid}"));
+            return Some(format!("pid={pid}"));
         }
         if let Some(tid) = &self.lock_tid {
-            return Some(format!("LOCK tid={tid}"));
+            return Some(format!("tid={tid}"));
         }
         None
     }
@@ -1576,7 +1608,7 @@ impl App {
     pub fn push_chip_from_field(&mut self, field: crate::input::ChipField) -> bool {
         use crate::input::{Chip, ChipField};
         let Some(row) = self.current_row() else {
-            self.set_flash("无选中行");
+            self.set_flash("NO ROW");
             return false;
         };
         let yank = match field {
@@ -1589,7 +1621,7 @@ impl App {
         };
         let value = Self::field_text(&row, yank);
         if value.is_empty() {
-            self.set_flash(format!("空 {}", field.keyword()));
+            self.set_flash(format!("EMPTY {}", field.keyword()));
             return false;
         }
         self.push_single_chip_filter(Chip { field, value })
@@ -1598,7 +1630,7 @@ impl App {
     /// Open msg token picker for the current row (`c`/`C`+`m`).
     pub fn begin_msg_chip_picker(&mut self, as_exclude: bool) {
         let Some(row) = self.current_row() else {
-            self.set_flash("无选中行");
+            self.set_flash("NO ROW");
             return;
         };
         let tokens = crate::input::msg_token_candidates(&row.msg);
@@ -1606,7 +1638,7 @@ impl App {
             self.pending_chip = false;
             self.pending_exclude = false;
             self.pending_leader = false;
-            self.set_flash("无可选片段");
+            self.set_flash("NO TOKENS");
         } else {
             self.pending_chip = false;
             self.pending_exclude = false;
@@ -1638,7 +1670,7 @@ impl App {
                 .or_else(|| (!picker.draft.is_empty()).then(|| picker.draft.to_string()))?;
             Some((exclude, value))
         }) else {
-            self.set_flash("无可选片段");
+            self.set_flash("NO TOKENS");
             return false;
         };
         self.close_picker();
@@ -1657,7 +1689,7 @@ impl App {
     pub fn push_exclude_from_field(&mut self, field: crate::input::ChipField) -> bool {
         use crate::input::{Chip, ChipField};
         let Some(row) = self.current_row() else {
-            self.set_flash("无选中行");
+            self.set_flash("NO ROW");
             return false;
         };
         let yank = match field {
@@ -1670,7 +1702,7 @@ impl App {
         };
         let value = Self::field_text(&row, yank);
         if value.is_empty() {
-            self.set_flash(format!("空 {}", field.keyword()));
+            self.set_flash(format!("EMPTY {}", field.keyword()));
             return false;
         }
         self.push_exclude_chip(Chip { field, value })
@@ -1685,7 +1717,7 @@ impl App {
                 true
             }
             Ok(false) => {
-                self.set_flash("已存在");
+                self.set_flash("EXISTS");
                 false
             }
             Err(e) => {
@@ -1706,7 +1738,7 @@ impl App {
             }
         };
         if !self.push_filter_group(group) {
-            self.set_flash("已存在");
+            self.set_flash("EXISTS");
             return false;
         }
         self.following = false;
@@ -2229,10 +2261,7 @@ mod tests {
             app.view_source()[app.source_idx_for_visible(0).unwrap()].tag,
             "A"
         );
-        assert_eq!(
-            app.time_badge_label().as_deref(),
-            Some("TIME 10:00:00…10:00:00")
-        );
+        assert_eq!(app.time_badge_label().as_deref(), Some("10:00:00…10:00:00"));
         assert!(app.export_cli_command().contains("--since '10:00:00'"));
     }
 
@@ -2262,10 +2291,7 @@ mod tests {
             since: Some("04-02 10:00:00".into()),
             until: None,
         });
-        assert_eq!(
-            app.time_badge_label().as_deref(),
-            Some("TIME ≥04-02 10:00:00")
-        );
+        assert_eq!(app.time_badge_label().as_deref(), Some("≥04-02 10:00:00"));
     }
 
     #[test]

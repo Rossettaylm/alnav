@@ -52,6 +52,8 @@ pub const GLYPH_FIELD_PID: &str = "\u{f292}"; //
 pub const GLYPH_FIELD_TID: &str = "\u{f2bd}"; //
 pub const GLYPH_FIELD_LEVEL: &str = "\u{f0d0}"; //
 pub const GLYPH_HR: &str = "\u{2500}"; // ─
+pub const GLYPH_HELP: &str = "\u{f059}"; // nf-fa-question_circle
+pub const GLYPH_PROGRESS: &str = "\u{f110}"; // nf-fa-spinner
 
 /// Map a chip field to its nerdfont icon glyph.
 pub fn field_icon(field: ChipField) -> &'static str {
@@ -513,21 +515,42 @@ pub fn log_visual_style() -> Style {
     Style::default().bg(t().log_visual_bg)
 }
 
-/// Status badge: nerdfont glyph + label in a semantic foreground color.
-/// No reverse-color block (Q3: weakened chrome). Pass `""` for `glyph` when
-/// no icon is appropriate (pending-state shorthand, flash toasts).
-pub fn status_badge(glyph: &str, label: &str, fg: Color) -> Span<'static> {
-    let text = if glyph.is_empty() {
-        format!(" {label} ")
-    } else {
-        format!(" {glyph} {label} ")
-    };
-    Span::styled(text, Style::default().fg(fg).add_modifier(Modifier::BOLD))
+/// Icon-only status marker (follow / visual). No word label.
+pub fn status_icon(glyph: &str, fg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {glyph} "),
+        Style::default().fg(fg).add_modifier(Modifier::BOLD),
+    )
+}
+
+/// Icon + short value (lock / time / progress). Glyph carries the noun.
+pub fn status_icon_value(glyph: &str, value: &str, fg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {glyph} {value} "),
+        Style::default().fg(fg).add_modifier(Modifier::BOLD),
+    )
+}
+
+/// Soft (non-inverse) pending / flash text on the status bar.
+pub fn status_soft(text: &str, fg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {text} "),
+        Style::default().fg(fg).add_modifier(Modifier::DIM),
+    )
 }
 
 /// Dim trailing keybinding hint on the status bar (H6 context help).
 pub fn context_help_style() -> Style {
     Style::default().add_modifier(Modifier::DIM)
+}
+
+/// Help panel section title (inactive).
+pub fn help_section_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    }
 }
 
 /// Faint search-hit highlight inside the H1 Preview window (distinct from

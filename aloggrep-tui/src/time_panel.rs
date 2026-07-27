@@ -505,10 +505,10 @@ impl TimePanel {
         let s = self.side_status(true);
         let u = self.side_status(false);
         if matches!(s, SideStatus::Partial) || matches!(u, SideStatus::Partial) {
-            return TimePanelOutcome::Flash("端内需日期+时间");
+            return TimePanelOutcome::Flash("NEED DATE+TIME");
         }
         if matches!(s, SideStatus::Empty) && matches!(u, SideStatus::Empty) {
-            return TimePanelOutcome::Flash("未设置时间窗");
+            return TimePanelOutcome::Flash("NO TIME SET");
         }
 
         let since = self.compose_side(true);
@@ -688,7 +688,7 @@ mod tests {
         // time empty → partial
         panel.focus = TimeField::UntilTime;
         let out = panel.handle_key(KeyCode::Enter);
-        assert_eq!(out, TimePanelOutcome::Flash("端内需日期+时间"));
+        assert_eq!(out, TimePanelOutcome::Flash("NEED DATE+TIME"));
     }
 
     #[test]

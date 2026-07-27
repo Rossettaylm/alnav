@@ -20,6 +20,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 | [Stream Visible + HDC Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest hdc ring | Active |
 | [FileStore mmap](./file-store.md) | `-f` mmap + lazy parse + bg filter | Active |
 | [Async Vis Scans](./async-scans.md) | Highlight Inc / severe prefetch / LogList loading | Active |
+| [Status Bar + Help](./status-help.md) | English status bar, `?` Help, `FAST_SCROLL_STEP` | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Forbidden patterns, testing requirements | Active |
 | [Database Guidelines](./database-guidelines.md) | N/A for this crate | Stub |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Stub |
@@ -34,6 +35,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Read [file-store.md](./file-store.md) before changing `-f` ingest, `RowStore`, or file filter scanning.
 - [ ] Read [async-scans.md](./async-scans.md) before changing File highlight/`nN`/severe/minimap cache paths or LogList loading.
 - [ ] Read [quality-guidelines.md](./quality-guidelines.md) Forbidden Patterns (theme colors, Group.time, modal Ctrl+C) and "Popup chrome vs strip chrome".
+- [ ] Read [status-help.md](./status-help.md) before changing status-bar hints, flash language, or Help (`?`) keys/scroll.
 - [ ] Touching picker Manage: read Directory Structure "Picker session dispatch".
 
 ## Quality Check
@@ -46,6 +48,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] File highlight stats / `n`/`N` use hit index (no UI O(visible) `row_at`); FilterBatch does not full-parse.
 - [ ] New modal key paths handle Ctrl+C as cancel when appropriate.
 - [ ] Popup shells stay rounded; strips stay divider; confirm uses the same `picker_area` as the picker.
+- [ ] Status hints / Help copy stay in `help.rs` (`HintEntry`); Help Esc does not resume following; LogList/Help `J`/`K` share `FAST_SCROLL_STEP`.
 - [ ] `cargo test -p aloggrep-tui` green; `cargo fmt -p aloggrep-tui --check` clean.
 
 ---

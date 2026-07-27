@@ -619,9 +619,7 @@ fn tag_col_for_area(area_width: usize, prefix_without_tag: usize) -> usize {
     if available == 0 {
         return 0;
     }
-    TAG_COL_WIDTH
-        .min(available)
-        .max(TAG_COL_MIN.min(available))
+    TAG_COL_WIDTH.min(available).max(TAG_COL_MIN.min(available))
 }
 
 /// Fit `tag` into a fixed display-column width: right-pad with spaces, or
@@ -690,10 +688,7 @@ fn push_tag_column_spans(
         used += 1;
     }
     if used < tag_col {
-        spans.push(Span::styled(
-            " ".repeat(tag_col - used),
-            tag_style,
-        ));
+        spans.push(Span::styled(" ".repeat(tag_col - used), tag_style));
     }
 }
 
@@ -714,10 +709,8 @@ fn render_entry_lines(
     let lineno_s = format!("{lineno:>lineno_width$} ");
     let ts = format!("{} ", row.timestamp);
     let level_badge = format!(" {} ", row.level.as_char());
-    let prefix_without_tag = lineno_s.chars().count()
-        + ts.chars().count()
-        + level_badge.chars().count()
-        + LEVEL_TAG_GAP;
+    let prefix_without_tag =
+        lineno_s.chars().count() + ts.chars().count() + level_badge.chars().count() + LEVEL_TAG_GAP;
     let tag_col = tag_col_for_area(area_width, prefix_without_tag);
     let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
     let cont_prefix: String = " ".repeat(header_width);
@@ -755,21 +748,9 @@ fn render_entry_lines(
                     level_badge.clone(),
                     theme::level_badge_style(row.level),
                 ));
-                spans.push(Span::styled(
-                    " ".repeat(LEVEL_TAG_GAP),
-                    Style::default(),
-                ));
-                push_tag_column_spans(
-                    &mut spans,
-                    &row.tag,
-                    tag_col,
-                    &tag_matches,
-                    tag_style,
-                );
-                spans.push(Span::styled(
-                    " ".repeat(TAG_MSG_GAP),
-                    Style::default(),
-                ));
+                spans.push(Span::styled(" ".repeat(LEVEL_TAG_GAP), Style::default()));
+                push_tag_column_spans(&mut spans, &row.tag, tag_col, &tag_matches, tag_style);
+                spans.push(Span::styled(" ".repeat(TAG_MSG_GAP), Style::default()));
             } else {
                 spans.push(Span::styled(
                     cont_prefix.clone(),
@@ -2217,61 +2198,69 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     if let Some((current, total)) = app.highlight_match_stats() {
         let k = current.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("[{k}/{total}]"),
-            theme::highlight_match_status_style(),
+        spans.push(theme::status_icon_value(
+            theme::GLYPH_SEARCH,
+            &format!("{k}/{total}"),
+            theme::accent(),
         ));
     }
     if app.following {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge(
-            theme::GLYPH_FOLLOWING,
-            "FOLLOWING",
-            theme::success(),
-        ));
+        spans.push(theme::status_icon(theme::GLYPH_FOLLOWING, theme::success()));
     }
     if let Some(lock) = app.lock_badge_label() {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge(theme::GLYPH_LOCK, &lock, theme::lock()));
+        spans.push(theme::status_icon_value(
+            theme::GLYPH_LOCK,
+            &lock,
+            theme::lock(),
+        ));
     }
     if let Some(time) = app.time_badge_label() {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge(theme::GLYPH_TIME, &time, theme::lock()));
+        spans.push(theme::status_icon_value(
+            theme::GLYPH_TIME,
+            &time,
+            theme::lock(),
+        ));
     }
     if let Some(prog) = app.file_progress_label() {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", &prog, theme::warning()));
+        spans.push(theme::status_icon_value(
+            theme::GLYPH_PROGRESS,
+            &prog,
+            theme::warning(),
+        ));
     }
     if app.visual_anchor.is_some() {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge(
-            theme::GLYPH_VISUAL,
-            "VISUAL",
-            theme::accent(),
-        ));
+        spans.push(theme::status_icon(theme::GLYPH_VISUAL, theme::accent()));
     } else if app.pending_chip {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", "c…", theme::warning()));
+        spans.push(theme::status_soft("c…", theme::warning()));
     } else if app.pending_exclude {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", "C…", theme::warning()));
+        spans.push(theme::status_soft("C…", theme::warning()));
     } else if app.pending_lock {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", "f…", theme::warning()));
+        spans.push(theme::status_soft("f…", theme::warning()));
     } else if app.pending_time {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", "t…", theme::warning()));
+        spans.push(theme::status_soft("t…", theme::warning()));
     } else if app.pending_m {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", "m…", theme::warning()));
+        spans.push(theme::status_soft("m…", theme::warning()));
     } else if app.pending_yank {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", "y…", theme::warning()));
+        spans.push(theme::status_soft("y…", theme::warning()));
     } else if app.pending_d {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_badge("", "d…", theme::warning()));
+        spans.push(theme::status_soft("d…", theme::warning()));
+    } else if app.pending_leader {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_soft("SPC…", theme::warning()));
     }
-    // Timed flash toast (YANKED / NO ERROR / …); pending badges above are separate.
+    // Timed flash toast; pending markers above are separate.
     if let Some(msg) = &app.status_msg {
         spans.push(Span::raw(" "));
         let fg = if msg.starts_with("YANK FAILED") {
@@ -2279,18 +2268,41 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
         } else {
             theme::accent()
         };
-        spans.push(theme::status_badge("", msg, fg));
+        spans.push(theme::status_soft(msg, fg));
     }
-    // Trailing context help (H6): badges keep priority; hint truncates or hides.
+    // Trailing context help: badges keep priority; hint truncates or hides.
     let left_width: usize = spans.iter().map(span_width).sum();
     let avail = (area.width as usize)
         .saturating_sub(left_width)
         .saturating_sub(1); // leading space before the hint
-    if let Some(help) = crate::help::fit_help(crate::help::context_help(app), avail) {
+    if let Some(hint) = crate::help::context_hint_spans(app, avail) {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(help.to_string(), theme::context_help_style()));
+        spans.extend(hint);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Read-only Help panel (`?`): Active context + full catalog.
+pub fn render_help_panel(app: &App, frame: &mut Frame, area: Rect) {
+    let title = format!("{} Help", theme::GLYPH_HELP);
+    let inner = render_modal_shell(&title, frame, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let lines = crate::help::help_body_lines(app);
+    let scroll = app.help_scroll.min(lines.len().saturating_sub(1));
+    let visible: Vec<Line<'static>> = lines.into_iter().skip(scroll).collect();
+    frame.render_widget(
+        Paragraph::new(visible).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
+}
+
+/// Height for the Help modal given frame size and content.
+pub fn help_modal_height(frame: Rect, content_rows: usize) -> u16 {
+    let max = frame.height.saturating_sub(4).max(8);
+    let want = (content_rows as u16).saturating_add(2); // border
+    want.min(max).max(8)
 }
 
 #[cfg(test)]
@@ -2728,11 +2740,7 @@ mod tests {
             "short tag must pad to fixed tag column"
         );
         // level badge then a plain gap (no badge fill) before the tag column
-        let contents: Vec<&str> = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let contents: Vec<&str> = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let level_idx = contents
             .iter()
             .position(|c| *c == " I ")
@@ -2747,10 +2755,8 @@ mod tests {
     #[test]
     fn test_render_entry_lines_truncates_long_tag_in_fixed_column() {
         let long = "A".repeat(TAG_COL_WIDTH + 8);
-        let row = EntryRow::from_line(&format!(
-            "04-02 10:00:00.000  1  1 I {long}   : msg"
-        ))
-        .unwrap();
+        let row =
+            EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I {long}   : msg")).unwrap();
         let lines = render_entry_lines(&row, &[], 200, 1, 1);
         let tag_span = lines[0]
             .spans
@@ -2762,8 +2768,7 @@ mod tests {
             TAG_COL_WIDTH
         );
         assert!(
-            tag_span.content.as_ref().ends_with('…')
-                || tag_span.content.as_ref().contains('…'),
+            tag_span.content.as_ref().ends_with('…') || tag_span.content.as_ref().contains('…'),
             "long tag must use ellipsis"
         );
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -2997,8 +3002,12 @@ mod tests {
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
-            content.contains("[-/2]"),
+            content.contains("-/2"),
             "cursor not on hit: got {content:?}"
+        );
+        assert!(
+            !content.contains("[-/2]"),
+            "match stats must not use brackets: got {content:?}"
         );
 
         app.cursor = 1;
@@ -3007,7 +3016,7 @@ mod tests {
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
-            content.contains("[1/2]"),
+            content.contains("1/2"),
             "first hit ordinal: got {content:?}"
         );
     }
@@ -3025,7 +3034,7 @@ mod tests {
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
-            content.contains("j/k") && content.contains("Esc"),
+            content.contains("j/k") && content.contains("Esc") && content.contains("help"),
             "wide bar should show LogList help: got {content:?}"
         );
     }
@@ -3033,22 +3042,22 @@ mod tests {
     #[test]
     fn test_render_status_bar_hides_context_help_when_narrow() {
         let mut app = App::new(100);
-        app.following = true; // FOLLOWING badge consumes space
+        app.following = true; // follow icon consumes space
         app.focus = Focus::LogList;
 
-        // Wide enough for "1/0" + FOLLOWING badge, too tight for help (avail < 8).
-        let backend = TestBackend::new(20, 1);
+        // Wide enough for "1/0" + follow icon, too tight for help (avail < 8).
+        let backend = TestBackend::new(12, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
-            content.contains("FOLLOWING"),
-            "badges must win over help: got {content:?}"
+            content.contains(theme::GLYPH_FOLLOWING),
+            "follow icon must win over help: got {content:?}"
         );
         assert!(
-            !content.contains("下一命中") && !content.contains("j/k"),
+            !content.contains("help") && !content.contains("j/k"),
             "narrow bar should hide help entirely: got {content:?}"
         );
     }
