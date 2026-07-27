@@ -80,6 +80,13 @@ fn row_passes_preview(
     temp_include: Option<&Group>,
     extra_excludes: &[ExcludeEntry],
 ) -> bool {
+    // Draft or committed filters both count: unparsed never survives (CLI-aligned).
+    let filtering = app.filter_active()
+        || temp_include.is_some()
+        || !extra_excludes.is_empty();
+    if filtering && !row.is_parsed() {
+        return false;
+    }
     if !include_matches(&app.groups.groups, temp_include, row) {
         return false;
     }

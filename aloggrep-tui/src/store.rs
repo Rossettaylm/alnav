@@ -852,7 +852,9 @@ mod tests {
         let raw = store.row_at(0).unwrap();
         assert_eq!(raw.raw, "not a log line");
         assert!(raw.tag.is_empty());
+        assert!(!raw.is_parsed());
         assert_eq!(raw.row_id, 1);
+        assert!(store.row_at(1).unwrap().is_parsed());
         assert_eq!(store.row_at(1).unwrap().tag, "TagA");
     }
 

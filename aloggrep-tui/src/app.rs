@@ -489,20 +489,45 @@ impl App {
     }
 
     /// Chip filter → session lock (H8) → global time window. Used by drain/rebuild.
+    ///
+    /// CLI-aligned: when any filter is active, unparsed (raw-fallback) rows never pass.
     pub fn row_passes_filters(&self, row: &EntryRow) -> bool {
-        if !self.groups.matches(row) {
+        Self::row_passes_filter_parts(
+            row,
+            &self.groups,
+            self.lock_pid.as_deref(),
+            self.lock_tid.as_deref(),
+            self.time_bound.as_ref(),
+            /*reject_unparsed*/ self.filter_active(),
+        )
+    }
+
+    /// Shared predicate for stream `row_passes_filters` and file `FilterPred`.
+    /// File scans only run while filters are active → pass `reject_unparsed = true`.
+    pub(crate) fn row_passes_filter_parts(
+        row: &EntryRow,
+        groups: &crate::filter_model::GroupList,
+        lock_pid: Option<&str>,
+        lock_tid: Option<&str>,
+        time_bound: Option<&crate::filter_model::TimeBound>,
+        reject_unparsed: bool,
+    ) -> bool {
+        if reject_unparsed && !row.is_parsed() {
             return false;
         }
-        if let Some(pid) = &self.lock_pid {
+        if !groups.matches(row) {
+            return false;
+        }
+        if let Some(pid) = lock_pid {
             if row.pid != *pid {
                 return false;
             }
-        } else if let Some(tid) = &self.lock_tid {
+        } else if let Some(tid) = lock_tid {
             if row.tid != *tid {
                 return false;
             }
         }
-        if let Some(bound) = &self.time_bound {
+        if let Some(bound) = time_bound {
             if bound.is_active() && !bound.matches(&row.as_log_entry()) {
                 return false;
             }
@@ -919,24 +944,14 @@ impl App {
                 let lock_tid = self.lock_tid.clone();
                 let time_bound = self.time_bound.clone();
                 let pred: crate::store::FilterPred = Arc::new(move |row: &EntryRow| {
-                    if !groups.matches(row) {
-                        return false;
-                    }
-                    if let Some(pid) = &lock_pid {
-                        if row.pid != *pid {
-                            return false;
-                        }
-                    } else if let Some(tid) = &lock_tid {
-                        if row.tid != *tid {
-                            return false;
-                        }
-                    }
-                    if let Some(bound) = &time_bound {
-                        if bound.is_active() && !bound.matches(&row.as_log_entry()) {
-                            return false;
-                        }
-                    }
-                    true
+                    Self::row_passes_filter_parts(
+                        row,
+                        &groups,
+                        lock_pid.as_deref(),
+                        lock_tid.as_deref(),
+                        time_bound.as_ref(),
+                        true,
+                    )
                 });
                 let gen = self
                     .store
@@ -3477,7 +3492,76 @@ mod file_store_tests {
         app.set_file_store(FileStore::open_sync(f.path()).unwrap());
         assert_eq!(app.visible_len(), 2);
         assert_eq!(app.row_at(0).unwrap().raw, "not a log");
+        assert!(!app.row_at(0).unwrap().is_parsed());
         assert_eq!(app.row_at(1).unwrap().tag, "TagA");
+    }
+
+    #[test]
+    fn file_unparseable_rejected_under_any_filter() {
+        let f = write_temp(
+            "================= QQXlog open =================\n\
+             04-02 10:00:00.000  1  1 I TagA   : ok\n\
+             04-02 10:00:01.000  1  1 W TagB   : warn\n",
+        );
+        let mut app = App::new(100);
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        assert_eq!(app.visible_len(), 3);
+
+        // msg filter (would substring-match the header if unparsed were allowed)
+        app.groups.groups.push(Group {
+            label: "msg~QQXlog".into(),
+            chips: Vec::new(),
+            expr: Some(Expr::parse("msg ~ QQXlog", true).unwrap()),
+            enabled: true,
+        });
+        app.rebuild_visible();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("filter timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.visible_len(), 0, "unparsed must not pass any active filter");
+
+        // Clear include; time window alone must also drop unparsed
+        app.groups.groups.clear();
+        app.time_bound = Some(crate::filter_model::TimeBound {
+            since: Some("04-02 10:00:00".into()),
+            until: None,
+        });
+        app.rebuild_visible();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("time filter timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.visible_len(), 2);
+        assert!(app.row_at(0).unwrap().is_parsed());
+        assert_eq!(app.row_at(0).unwrap().tag, "TagA");
+    }
+
+    #[test]
+    fn row_passes_filters_rejects_unparsed_when_active() {
+        let mut app = App::new(100);
+        let raw = EntryRow::from_line_or_raw("QQXlog header");
+        assert!(!raw.is_parsed());
+        assert!(
+            app.row_passes_filters(&raw),
+            "no filter → unparsed still eligible for vacuous pass"
+        );
+        app.groups.groups.push(Group {
+            label: "level".into(),
+            chips: Vec::new(),
+            expr: Some(Expr::parse("level >= I", true).unwrap()),
+            enabled: true,
+        });
+        assert!(app.filter_active());
+        assert!(!app.row_passes_filters(&raw));
     }
 
     #[test]

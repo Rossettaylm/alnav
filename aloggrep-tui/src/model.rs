@@ -26,6 +26,9 @@ pub struct EntryRow {
     pub tag: String,
     pub pkg: String,
     pub msg: String,
+    /// `true` when [`LogEntry::parse`] succeeded; `false` for file-mode raw
+    /// fallback rows (still browsable when no filter is active).
+    pub parsed: bool,
     /// Pre-computed at ingest time by [`crate::app::App::push_row`].
     /// True when level is E/F or the message matches a crash signature.
     /// Avoids calling CrashDetector on every minimap/find-severe scan.
@@ -50,12 +53,14 @@ impl EntryRow {
             tag: entry.tag.to_string(),
             pkg: entry.pkg.to_string(),
             msg: entry.msg.to_string(),
+            parsed: true,
             severe: false, // set by App::push_row via is_severe_row()
         })
     }
 
     /// File/mmap path: parse when possible; otherwise keep a raw-only row so
     /// unparseable lines remain browsable (stream ingest still drops them).
+    /// Active filters reject these rows (CLI-aligned).
     pub fn from_line_or_raw(line: &str) -> Self {
         if let Some(row) = Self::from_line(line) {
             return row;
@@ -70,8 +75,14 @@ impl EntryRow {
             tag: String::new(),
             pkg: String::new(),
             msg: line.to_string(),
+            parsed: false,
             severe: false,
         }
+    }
+
+    /// Whether this row came from a successful log-format parse.
+    pub fn is_parsed(&self) -> bool {
+        self.parsed
     }
 
     /// Borrow this row's owned fields as a `LogEntry`, so `aloggrep_core`
@@ -115,8 +126,10 @@ mod tests {
         assert_eq!(row.raw, "not a log line at all");
         assert_eq!(row.msg, "not a log line at all");
         assert!(row.tag.is_empty());
+        assert!(!row.is_parsed());
         let parsed = EntryRow::from_line_or_raw("04-02 10:00:00.000  1  1 I TagA   : ok");
         assert_eq!(parsed.tag, "TagA");
+        assert!(parsed.is_parsed());
     }
 
     #[test]
