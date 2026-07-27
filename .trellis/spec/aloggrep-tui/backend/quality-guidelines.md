@@ -77,6 +77,26 @@ Candidate rows that have a primary action (Enter) show a right-flush
 nerdfont icon via `candidate_label_spans(action, area_width)`. Do not
 append raw icon spans in callers.
 
+### Popup chrome vs strip chrome
+
+| Surface | Chrome |
+|---------|--------|
+| Filter / Exclude / Highlight strip | `divider_block` (top+bottom only) |
+| Log region | `rounded_block` |
+| Popup shell (`render_modal_shell`) | `popup_block` → `rounded_block(..., true)` + `border_style(true)` |
+| Standalone candidate popup | `render_candidate_list(..., bordered=true)` |
+| Candidate list inside Picker left | `bordered=false` (outer shell already borders) |
+
+Adjacent popups leave `POPUP_GAP` (1 cell): vertical via
+`stack_below_rect_gapped`, Picker L/R via `split_picker_lr_gapped`.
+
+`picker_frame_rect(frame, show_preview)`: full width when preview is on;
+≈ half width (centered) when off. `render_confirm_dialog` MUST receive
+that same `picker_area` — never recompute a full-width frame on its own.
+
+Do NOT reintroduce divider-only shells for popups, or nest a bordered
+candidate list inside an already-bordered Picker pane.
+
 ---
 
 ## Testing Requirements
@@ -97,5 +117,7 @@ append raw icon spans in callers.
 - [ ] No `Color::*` literals in new render code (theme.rs only).
 - [ ] New `BookmarkList`/`HashSet` mutation sites sync the cache.
 - [ ] Picker changes branch on `session.kind` in render AND key dispatch.
+- [ ] Popup surfaces use rounded `render_modal_shell`; strips stay `divider_block`.
+- [ ] Confirm dialog anchors to the actual `picker_frame_rect(..., show_preview)`.
 - [ ] Deleted fields have no surviving references (grep).
 - [ ] `cargo test --workspace` green; `cargo fmt -p aloggrep-tui --check` clean.

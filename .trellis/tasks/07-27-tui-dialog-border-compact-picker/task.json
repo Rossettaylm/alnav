@@ -1,0 +1,30 @@
+{
+  "id": "tui-dialog-border-compact-picker",
+  "name": "tui-dialog-border-compact-picker",
+  "title": "TUI popup dialog rounded borders + compact picker",
+  "description": "Restore rounded four-sided borders on TUI popup surfaces (modal shell, candidates, preview), add 1-cell gaps between adjacent popups, and shrink picker width to ~50% when preview is hidden; confirm dialog anchors to the actual picker frame.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": "aloggrep-tui",
+  "priority": "P2",
+  "creator": "lymanyang",
+  "assignee": "lymanyang",
+  "createdAt": "2026-07-27",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "aloggrep-tui/src/ui.rs",
+    "aloggrep-tui/src/main.rs",
+    "aloggrep-tui/src/theme.rs"
+  ],
+  "notes": "Grilling consensus locked 2026-07-27. Awaiting explicit approval of final planning summary before task.py start.",
+  "meta": {}
+}

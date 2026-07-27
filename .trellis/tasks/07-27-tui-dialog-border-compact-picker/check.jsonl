@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "UI chrome must use theme::border_style; no hardcoded Color in ui.rs"}
+{"file": ".trellis/spec/aloggrep-tui/backend/directory-structure.md", "reason": "ui.rs owns modal/picker geometry; main.rs only wires confirm picker_area"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Confirm dialog must share the same picker outer rect as render_picker (L1 UI geometry contract)"}

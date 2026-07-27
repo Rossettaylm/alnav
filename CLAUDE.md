@@ -108,7 +108,7 @@ aloggrep-tui/src/
 
 配色与布局遵循以下规则；改动渲染代码前先看这里。所有颜色常量与映射函数集中在 `aloggrep-tui/src/theme.rs`——**禁止在 `ui.rs` 或其他渲染代码里直接写 `Color::*`/硬编码 `Style`**，新增语义就去 `theme.rs` 加常量或函数，保证同一语义在任何地方渲染出来的颜色都一致。
 
-- **Strip/Log 套圆角边框，未聚焦低对比度**：Filter/HighlightStrip/Log 各自一层 `BorderType::Rounded`，`theme::border_style(active)`：聚焦时 `fg(ACCENT)`，未聚焦时 `fg(DarkGray)+DIM`。边框标题用 `theme::numbered_title(1|2|3, label, active)`。Input/Search **居中模态**与字段候选浮层用 `theme::plain_title` + 同一套 `render_modal_shell`（始终 active 强调色）。
+- **Strip 弱边框 / 弹出浮层圆角描边**：Filter/Exclude/Highlight strip 用上下 `divider_block`（弱化边框）；Log 用 `rounded_block`。弹出浮层（Input/Search/Time/Detail/Confirm/Picker 壳/Preview/字段候选）走 `render_modal_shell` / bordered `render_candidate_list`：`BorderType::Rounded` + `theme::border_style(true)`（dim accent）；相邻浮层留 1 格空隙。无 Preview 时 Picker 宽约一半。边框标题：strip 用 `numbered_title`，弹出用 `plain_title`。
 - **单一强调色 + 大量 dim**：`theme::ACCENT`（Cyan）是唯一的"焦点/强调"色，非关键信息统一 `Modifier::DIM`，避免多色混战。
 - **焦点**：popup/候选 List 用 `theme` 候选行 tokens（选中/非选中背景与文字、匹配字符色、选中前缀）；Filter/Highlight strip 组选中为 Magenta（`SELECTION_FRAME`）、未选中为 dim DarkGray；`di` 禁用用 `disabled_chip_style()`。
 - **日志行选中态只在 LogList 聚焦时显示，且是柔和灰底**：经 `ListItem::style(log_selection_style())` 施加（**不用** `List::highlight_style`，以免 `Style::patch` 盖掉关键词高亮底色）；失焦时无选中底。关键词 Span 的高亮色在选中行上保持可读叠加。

@@ -31,6 +31,8 @@ const PICKER_FRAME_MIN_HEIGHT: u16 = 10;
 const PICKER_LR_MIN_WIDTH: u16 = 10;
 /// Search prompt row height at the bottom of the left pane.
 const PICKER_SEARCH_HEIGHT: u16 = 3;
+/// Gap between adjacent popup surfaces (Picker L/R, modal → candidates → Preview).
+const POPUP_GAP: u16 = 1;
 /// Per-row action icon for candidate lists (F3). `None` = no icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
@@ -130,12 +132,37 @@ pub fn stack_below_rect(anchor: Rect, frame: Rect, height: u16) -> Rect {
     }
 }
 
+/// Like [`stack_below_rect`], but leave [`POPUP_GAP`] rows when there is room;
+/// if the remaining space is ≤ gap, pack flush (no gap) so a 1-row sliver still fits.
+pub fn stack_below_rect_gapped(anchor: Rect, frame: Rect, height: u16) -> Rect {
+    let flush_y = anchor.y.saturating_add(anchor.height);
+    let frame_bottom = frame.y.saturating_add(frame.height);
+    let space_flush = frame_bottom.saturating_sub(flush_y);
+    if space_flush > POPUP_GAP {
+        let gapped_anchor = Rect {
+            x: anchor.x,
+            y: anchor.y,
+            width: anchor.width,
+            height: anchor.height.saturating_add(POPUP_GAP),
+        };
+        stack_below_rect(gapped_anchor, frame, height)
+    } else {
+        stack_below_rect(anchor, frame, height)
+    }
+}
+
 /// Horizontal center, height ≈ 75% of `frame` (clamped to a readable minimum).
-pub fn picker_frame_rect(frame: Rect) -> Rect {
-    let width = frame
+/// When `show_preview` is false, width is ≈ half of the full picker width.
+pub fn picker_frame_rect(frame: Rect, show_preview: bool) -> Rect {
+    let full_w = frame
         .width
         .saturating_sub(PICKER_FRAME_WIDTH_MARGIN)
         .max(PICKER_LR_MIN_WIDTH.saturating_mul(2));
+    let width = if show_preview {
+        full_w
+    } else {
+        (full_w / 2).max(PICKER_LR_MIN_WIDTH)
+    };
     let height = (frame.height * 3 / 4)
         .max(PICKER_FRAME_MIN_HEIGHT)
         .min(frame.height);
@@ -173,6 +200,28 @@ pub fn split_picker_lr(area: Rect, left_ratio: f32) -> (Rect, Rect) {
     (left, right)
 }
 
+/// Like [`split_picker_lr`], but leave [`POPUP_GAP`] columns between panes.
+pub fn split_picker_lr_gapped(area: Rect, left_ratio: f32) -> (Rect, Rect) {
+    let gap = POPUP_GAP.min(
+        area.width
+            .saturating_sub(PICKER_LR_MIN_WIDTH.saturating_mul(2)),
+    );
+    let usable = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(gap),
+        height: area.height,
+    };
+    let (left, right_inner) = split_picker_lr(usable, left_ratio);
+    let right = Rect {
+        x: left.x.saturating_add(left.width).saturating_add(gap),
+        y: area.y,
+        width: right_inner.width,
+        height: area.height,
+    };
+    (left, right)
+}
+
 /// Left pane vertical stack: candidates fill the top, search prompt pinned to bottom.
 pub fn picker_left_stack(left: Rect) -> (Rect, Rect) {
     let search_h = PICKER_SEARCH_HEIGHT.min(left.height);
@@ -192,14 +241,19 @@ pub fn picker_left_stack(left: Rect) -> (Rect, Rect) {
     (candidates, search)
 }
 
-/// Clear + top/bottom divider shell with a glyph-prefixed plain title.
-/// Returns the inner content rect (2 cols wider than the old rounded shell).
-pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
-    frame.render_widget(Clear, area);
-    let block = divider_block(
+/// Rounded four-sided popup shell with a glyph-prefixed plain title.
+/// Returns the inner content rect.
+fn popup_block(title: &str) -> Block<'static> {
+    rounded_block(
         theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true),
         true,
-    );
+    )
+}
+
+/// Clear + rounded full-border shell (dim accent). Returns the inner content rect.
+pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
+    frame.render_widget(Clear, area);
+    let block = popup_block(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Clear, inner);
@@ -298,6 +352,9 @@ fn candidate_label_spans(
 /// Candidate list skin shared by field popup and Highlight history completion.
 /// Selection / match colors and selected-row prefix come from [`theme`].
 /// `checked` (same length as `labels`, or empty) marks Tab multi-select rows.
+/// When `bordered` is true, draws a rounded popup shell (standalone field/history
+/// popups); when false, fills `area` with no chrome (Picker left pane already
+/// has an outer shell).
 pub fn render_candidate_list(
     title: &str,
     labels: &[String],
@@ -309,14 +366,18 @@ pub fn render_candidate_list(
     query: &str,
     frame: &mut Frame,
     area: Rect,
+    bordered: bool,
 ) {
-    let block = divider_block(
-        theme::plain_title(theme::GLYPH_TITLE_PICKER, title, true),
-        true,
-    );
-    if labels.is_empty() {
+    let inner = if bordered {
+        frame.render_widget(Clear, area);
+        let block = popup_block(title);
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        inner
+    } else {
+        area
+    };
+    if labels.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 empty_msg,
@@ -353,32 +414,31 @@ pub fn render_candidate_list(
                 is_checked,
                 base,
                 actions.get(i).copied().unwrap_or(ActionKind::None),
-                area.width,
+                inner.width,
             )))
             .style(base)
         })
         .collect();
     let list = List::new(items)
-        .block(block)
         .highlight_style(Style::default())
         .highlight_symbol("");
     let mut state = ListState::default();
     state.select(Some(sel));
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, inner, &mut state);
 }
 
 /// Candidate popup height: `clamp(count,1,8)+2` for border, clamped to
 /// space below the modal anchor (Input / Search / H7 msg share this).
 pub fn candidate_popup_rect(anchor: Rect, frame: Rect, match_count: usize) -> Rect {
     let desired = match_count.clamp(1, 8) as u16 + 2;
-    stack_below_rect(anchor, frame, desired)
+    stack_below_rect_gapped(anchor, frame, desired)
 }
 
 /// H1 Preview window height: content rows + border, clamped to space below
 /// the previous stack item (candidates or modal).
 pub fn preview_popup_rect(anchor: Rect, frame: Rect, content_rows: usize) -> Rect {
     let desired = (content_rows.clamp(1, 12) as u16).saturating_add(2);
-    stack_below_rect(anchor, frame, desired)
+    stack_below_rect_gapped(anchor, frame, desired)
 }
 
 /// Search modal outer height: draft row + borders (candidates float below).
@@ -1884,11 +1944,11 @@ pub fn render_picker(
     frame: &mut Frame,
     frame_area: Rect,
 ) -> Option<Position> {
-    let picker_area = picker_frame_rect(frame_area);
+    let picker_area = picker_frame_rect(frame_area, show_preview);
     frame.render_widget(Clear, picker_area);
 
     let (left, right) = if show_preview {
-        let (l, r) = split_picker_lr(picker_area, left_ratio);
+        let (l, r) = split_picker_lr_gapped(picker_area, left_ratio);
         (l, Some(r))
     } else {
         (picker_area, None)
@@ -1908,6 +1968,7 @@ pub fn render_picker(
             match_query,
             frame,
             candidates_area,
+            false,
         );
     }
     let cursor = render_picker_search_line(
@@ -1943,9 +2004,8 @@ fn confirm_dialog_question(confirm: &crate::picker::ConfirmKind) -> String {
 pub fn render_confirm_dialog(
     confirm: &crate::picker::ConfirmKind,
     frame: &mut Frame,
-    frame_area: Rect,
+    picker_area: Rect,
 ) {
-    let picker_area = picker_frame_rect(frame_area);
     let question = confirm_dialog_question(confirm);
     let width = 34.min(picker_area.width).max(1);
     let height = 5.min(picker_area.height).max(1);
@@ -2016,6 +2076,7 @@ pub fn render_highlight_popup(
         &search.draft,
         frame,
         area,
+        true,
     );
 }
 
@@ -2045,6 +2106,7 @@ pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
         &input.draft,
         frame,
         area,
+        true,
     );
 }
 
@@ -2715,6 +2777,11 @@ mod tests {
             rules >= 2,
             "strip should have top+bottom ─ rules, got {rules}"
         );
+        let rounded = before.chars().filter(|c| "╭╮╰╯".contains(*c)).count();
+        assert_eq!(
+            rounded, 0,
+            "Filter strip must stay divider-only (no rounded modal corners)"
+        );
     }
 
     #[test]
@@ -3154,7 +3221,8 @@ mod tests {
                     frame,
                     frame.area(),
                 );
-                render_confirm_dialog(&confirm, frame, frame.area());
+                let picker_area = picker_frame_rect(frame.area(), true);
+                render_confirm_dialog(&confirm, frame, picker_area);
             })
             .unwrap();
 
@@ -3180,12 +3248,98 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_confirm_dialog(&confirm, frame, frame.area());
+                let picker_area = picker_frame_rect(frame.area(), true);
+                render_confirm_dialog(&confirm, frame, picker_area);
             })
             .unwrap();
 
         let content = cell_text(terminal.backend().buffer());
         assert_eq!(confirm_dialog_question(&confirm), "删除选中 12 项？");
         assert!(content.contains("12"));
+    }
+
+    #[test]
+    fn picker_frame_rect_compact_when_no_preview() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let full = picker_frame_rect(frame, true);
+        let compact = picker_frame_rect(frame, false);
+        assert_eq!(compact.width, full.width / 2);
+        assert_eq!(compact.height, full.height);
+        assert_eq!(
+            compact.x,
+            frame.x + (frame.width.saturating_sub(compact.width)) / 2
+        );
+    }
+
+    #[test]
+    fn split_picker_lr_gapped_leaves_one_col() {
+        let area = Rect::new(0, 0, 100, 40);
+        let (l, r) = split_picker_lr_gapped(area, 0.4);
+        assert_eq!(l.x + l.width + 1, r.x);
+        assert_eq!(l.width + r.width + 1, area.width);
+    }
+
+    #[test]
+    fn modal_shell_draws_rounded_corners() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(2, 1, 36, 5);
+                let _ = render_modal_shell("Input", frame, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // Rounded BorderType corners (ratatui): ╭ ╮ ╰ ╯
+        let mut corners = 0u32;
+        for y in 1..6u16 {
+            for x in 2..38u16 {
+                match buf[(x, y)].symbol() {
+                    "╭" | "╮" | "╰" | "╯" => corners += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(corners, 4, "modal shell should paint four rounded corners");
+    }
+
+    #[test]
+    fn confirm_dialog_centers_on_compact_picker() {
+        use crate::picker::{ConfirmKind, UnifiedId, UnifiedKind};
+
+        let confirm = ConfirmKind::DeleteMany {
+            items: vec![UnifiedId {
+                kind: UnifiedKind::Filter,
+                source_index: 0,
+            }],
+        };
+        let frame = Rect::new(0, 0, 100, 40);
+        let compact = picker_frame_rect(frame, false);
+        let full = picker_frame_rect(frame, true);
+        let width = 34.min(compact.width).max(1);
+        let height = 5.min(compact.height).max(1);
+        let area = centered_modal_rect(compact, width, height);
+        assert!(
+            area.x >= compact.x
+                && area.x + area.width <= compact.x + compact.width
+                && area.y >= compact.y
+                && area.y + area.height <= compact.y + compact.height,
+            "confirm area {area:?} must lie inside compact picker {compact:?}"
+        );
+        assert!(
+            compact.width * 2 <= full.width + 1,
+            "compact width should be ~half of full ({compact:?} vs {full:?})"
+        );
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_confirm_dialog(&confirm, f, compact);
+            })
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("y/Enter"));
+        assert!(content.contains("n/Esc"));
     }
 }

@@ -33,7 +33,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Read [stream-visible-ingest.md](./stream-visible-ingest.md) before changing `visible`, `push_row` eviction, or hdc ingest.
 - [ ] Read [file-store.md](./file-store.md) before changing `-f` ingest, `RowStore`, or file filter scanning.
 - [ ] Read [async-scans.md](./async-scans.md) before changing File highlight/`nN`/severe/minimap cache paths or LogList loading.
-- [ ] Read [quality-guidelines.md](./quality-guidelines.md) Forbidden Patterns (theme colors, Group.time, modal Ctrl+C).
+- [ ] Read [quality-guidelines.md](./quality-guidelines.md) Forbidden Patterns (theme colors, Group.time, modal Ctrl+C) and "Popup chrome vs strip chrome".
 - [ ] Touching picker Manage: read Directory Structure "Picker session dispatch".
 
 ## Quality Check
@@ -45,6 +45,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] `--hdc` ingest uses drop-oldest ring (`INGEST_RING_CAP`), not a blocking/unbounded channel.
 - [ ] File highlight stats / `n`/`N` use hit index (no UI O(visible) `row_at`); FilterBatch does not full-parse.
 - [ ] New modal key paths handle Ctrl+C as cancel when appropriate.
+- [ ] Popup shells stay rounded; strips stay divider; confirm uses the same `picker_area` as the picker.
 - [ ] `cargo test -p aloggrep-tui` green; `cargo fmt -p aloggrep-tui --check` clean.
 
 ---

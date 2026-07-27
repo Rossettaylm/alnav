@@ -492,6 +492,7 @@ fn run<B: ratatui::backend::Backend>(
                     let modal_w = ui::modal_width(frame_area.width);
                     let mut hw_cursor: Option<Position> = None;
                     if let Some(data) = picker_render_data(app) {
+                        let picker_area = ui::picker_frame_rect(frame_area, data.show_preview);
                         hw_cursor = ui::render_picker(
                             &data.title,
                             &data.mode,
@@ -518,7 +519,7 @@ fn run<B: ratatui::backend::Backend>(
                             .as_ref()
                             .and_then(|session| session.confirm.as_ref())
                         {
-                            ui::render_confirm_dialog(confirm, frame, frame_area);
+                            ui::render_confirm_dialog(confirm, frame, picker_area);
                             // Don't let the search caret poke through the dialog.
                             hw_cursor = None;
                         }
@@ -2895,14 +2896,14 @@ mod dispatch_tests {
             height: 24,
         };
         let rect = popup_rect(modal, frame_area, 20); // way more matches than fit
-                                                      // desired = min(8,20)+2 = 10; space below = 24-(10+3)=11; height = 10; y = 13
+                                                      // desired = min(8,20)+2 = 10; +1 gap → y = 14; space = 10; height = 10
         assert_eq!(rect.height, 10);
-        assert_eq!(rect.y, 13, "popup should sit directly below the modal");
+        assert_eq!(rect.y, 14, "popup should sit one row below the modal");
         assert_eq!(rect.x, modal.x);
         assert_eq!(rect.width, modal.width);
         assert!(
-            rect.y >= modal.y + modal.height,
-            "popup must not overlap the modal"
+            rect.y > modal.y + modal.height,
+            "popup must leave a gap below the modal"
         );
     }
 
@@ -2920,7 +2921,7 @@ mod dispatch_tests {
             width: 80,
             height: 20,
         };
-        // space below = 20-(16+3)=1; desired=8 → height=1
+        // space below = 1 (≤ gap) → pack flush; desired=8 → height=1
         let rect = popup_rect(modal, frame_area, 6);
         assert_eq!(rect.height, 1);
         assert_eq!(rect.y, 19);
