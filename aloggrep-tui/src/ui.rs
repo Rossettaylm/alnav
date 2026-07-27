@@ -29,8 +29,10 @@ const PICKER_FRAME_WIDTH_MARGIN: u16 = 4;
 const PICKER_FRAME_MIN_HEIGHT: u16 = 10;
 /// Minimum width for each left/right pane inside the picker.
 const PICKER_LR_MIN_WIDTH: u16 = 10;
-/// Search prompt row height at the bottom of the left pane.
+/// Rounded search input height at the bottom of the left pane.
 const PICKER_SEARCH_HEIGHT: u16 = 3;
+/// Horizontal padding between the search border and its content.
+const PICKER_SEARCH_HORIZONTAL_PADDING: u16 = 1;
 /// Gap between adjacent popup surfaces (Picker L/R, modal → candidates → Preview).
 const POPUP_GAP: u16 = 1;
 /// LogList tag column width (display columns); short tags pad, long tags truncate.
@@ -230,9 +232,10 @@ pub fn split_picker_lr_gapped(area: Rect, left_ratio: f32) -> (Rect, Rect) {
     (left, right)
 }
 
-/// Left pane vertical stack: candidates fill the top, search prompt pinned to bottom.
-pub fn picker_left_stack(left: Rect) -> (Rect, Rect) {
-    let search_h = PICKER_SEARCH_HEIGHT.min(left.height);
+/// Left pane vertical stack: candidates fill the top, search area pinned to bottom.
+pub fn picker_left_stack(left: Rect, has_chips: bool) -> (Rect, Rect) {
+    let chip_h = if has_chips { 1 } else { 0 };
+    let search_h = PICKER_SEARCH_HEIGHT.saturating_add(chip_h).min(left.height);
     let cand_h = left.height.saturating_sub(search_h);
     let candidates = Rect {
         x: left.x,
@@ -1968,6 +1971,50 @@ pub fn render_picker_search_line(
     if area.height == 0 {
         return None;
     }
+
+    let show_chips = !chips.is_empty() && area.height > PICKER_SEARCH_HEIGHT;
+    let chip_h = if show_chips { 1 } else { 0 };
+    if show_chips {
+        let chip_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(committed_chip_spans(chips, exclude_chips))),
+            chip_area,
+        );
+    }
+
+    let input_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(chip_h),
+        width: area.width,
+        height: area.height.saturating_sub(chip_h),
+    };
+    if input_area.height == 0 {
+        return None;
+    }
+
+    let block = rounded_block(Line::from(""), true);
+    let inner = block.inner(input_area);
+    frame.render_widget(block, input_area);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+
+    let padding = PICKER_SEARCH_HORIZONTAL_PADDING.min(inner.width / 2);
+    let content = Rect {
+        x: inner.x.saturating_add(padding),
+        y: inner.y,
+        width: inner.width.saturating_sub(padding.saturating_mul(2)),
+        height: inner.height,
+    };
+    if content.width == 0 {
+        return None;
+    }
+
     let mut prompt_spans = vec![theme::picker_mode_prefix(mode)];
     if let Some(field) = draft_field {
         prompt_spans.push(Span::styled(
@@ -1976,28 +2023,16 @@ pub fn render_picker_search_line(
         ));
     }
     let prefix_w = spans_display_width(&prompt_spans);
-    let draft_max = (area.width as usize).saturating_sub(prefix_w) as u16;
+    let draft_max = (content.width as usize).saturating_sub(prefix_w) as u16;
     let (draft_spans, caret_col) = editable_text_spans(text, caret, Some(draft_max));
     prompt_spans.extend(draft_spans);
-    let prompt = Line::from(prompt_spans);
-    let prompt_row = if chips.is_empty() { 0u16 } else { 1 };
-    let lines = if chips.is_empty() {
-        vec![prompt]
-    } else {
-        vec![
-            Line::from(committed_chip_spans(chips, exclude_chips)),
-            prompt,
-        ]
-    };
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(Line::from(prompt_spans)), content);
     let x_off = (prefix_w as u16).saturating_add(caret_col);
     Some(Position {
-        x: area
+        x: content
             .x
-            .saturating_add(x_off.min(area.width.saturating_sub(1))),
-        y: area
-            .y
-            .saturating_add(prompt_row.min(area.height.saturating_sub(1))),
+            .saturating_add(x_off.min(content.width.saturating_sub(1))),
+        y: content.y,
     })
 }
 
@@ -2034,7 +2069,7 @@ pub fn render_picker(
         (picker_area, None)
     };
     let left_inner = render_modal_shell(title, frame, left);
-    let (candidates_area, search_area) = picker_left_stack(left_inner);
+    let (candidates_area, search_area) = picker_left_stack(left_inner, !chips.is_empty());
 
     if candidates_area.height > 0 {
         render_candidate_list(
@@ -3232,11 +3267,16 @@ mod tests {
     #[test]
     fn picker_left_stack_search_at_bottom() {
         let left = Rect::new(0, 0, 40, 20);
-        let (cand, search) = picker_left_stack(left);
+        let (cand, search) = picker_left_stack(left, false);
         assert_eq!(search.height, 3);
         assert_eq!(search.y + search.height, left.y + left.height);
         assert_eq!(cand.y, left.y);
         assert_eq!(cand.height, left.height - 3);
+
+        let (cand, search) = picker_left_stack(left, true);
+        assert_eq!(search.height, 4);
+        assert_eq!(search.y + search.height, left.y + left.height);
+        assert_eq!(cand.height, left.height - 4);
     }
 
     #[test]
@@ -3269,6 +3309,70 @@ mod tests {
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "ab");
         assert_eq!(caret_col, 0);
+    }
+
+    #[test]
+    fn picker_search_line_has_rounded_border_padding_and_icon_gap() {
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut cursor = None;
+        terminal
+            .draw(|frame| {
+                cursor = render_picker_search_line(
+                    &crate::picker::PickerMode::Manage,
+                    "abc",
+                    3,
+                    &[],
+                    false,
+                    None,
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(0, 0)].symbol(), "╭");
+        assert_eq!(buf[(19, 0)].symbol(), "╮");
+        assert_eq!(buf[(0, 2)].symbol(), "╰");
+        assert_eq!(buf[(19, 2)].symbol(), "╯");
+        assert_eq!(buf[(1, 1)].symbol(), " ");
+        assert_eq!(buf[(2, 1)].symbol(), theme::GLYPH_MODE_MANAGE);
+        assert_eq!(buf[(3, 1)].symbol(), " ");
+        assert_eq!(buf[(4, 1)].symbol(), "a");
+        assert_eq!(cursor, Some(Position { x: 7, y: 1 }));
+    }
+
+    #[test]
+    fn picker_search_line_keeps_committed_chips_above_border() {
+        use crate::input::{Chip, ChipField};
+
+        let chips = vec![Chip {
+            field: ChipField::Tag,
+            value: "MyTag".into(),
+        }];
+        let backend = TestBackend::new(40, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let _ = render_picker_search_line(
+                    &crate::picker::PickerMode::Edit { index: 0 },
+                    "",
+                    0,
+                    &chips,
+                    false,
+                    None,
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let content = cell_text(buf);
+        assert!(content.lines().next().unwrap_or_default().contains("MyTag"));
+        assert_eq!(buf[(0, 1)].symbol(), "╭");
+        assert_eq!(buf[(39, 3)].symbol(), "╯");
     }
 
     #[test]
