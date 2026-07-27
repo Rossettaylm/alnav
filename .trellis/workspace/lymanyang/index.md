@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
+- **Total Sessions**: 8
 - **Last Active**: 2026-07-27
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~244 | Active |
+| `journal-1.md` | ~278 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-07-27 | TUI status bar + Help panel | `490de5c` | `master` |
 | 7 | 2026-07-27 | TUI popup rounded borders + compact picker | `c895275` | `master` |
 | 6 | 2026-07-24 | File async Vis scans | `2dffcda` | `master` |
 | 5 | 2026-07-24 | mmap FileStore land + All-scan grill | `0dca14d` | `master` |

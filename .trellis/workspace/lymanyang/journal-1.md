@@ -242,3 +242,37 @@ Restored rounded four-sided popup chrome (modal/candidate/preview) with 1-cell g
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: TUI status bar + Help panel
+
+**Date**: 2026-07-27
+**Task**: TUI status bar + Help panel
+**Package**: aloggrep-core
+**Branch**: `master`
+
+### Summary
+
+English status bar (icon badges, dim-key L1/L2), read-only ? Help with Active+catalog and J/K fast scroll; captured status-help.md code-spec.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `490de5c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
