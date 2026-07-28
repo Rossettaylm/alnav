@@ -24,28 +24,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "aloggrep-core"
-version = "0.1.7"
+name = "alnav"
+version = "0.2.1"
 dependencies = [
- "assert_cmd",
- "atty",
- "clap",
- "colored",
- "ctrlc",
- "glob",
- "libc",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "aloggrep-tui"
-version = "0.1.0"
-dependencies = [
- "aloggrep-core",
+ "alnav-core",
  "arboard",
+ "assert_cmd",
  "clap",
  "crossterm",
  "lru 0.12.5",
@@ -58,6 +42,21 @@ dependencies = [
  "tempfile",
  "toml",
  "unicode-width",
+]
+
+[[package]]
+name = "alnav-core"
+version = "0.2.1"
+dependencies = [
+ "atty",
+ "clap",
+ "colored",
+ "ctrlc",
+ "glob",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

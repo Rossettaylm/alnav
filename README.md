@@ -1,197 +1,117 @@
 <p align="center">
-  <h1 align="center">aloggrep</h1>
-  <p align="center">
-    轻量级 Android logcat / xlog / HarmonyOS hilog 日志过滤与分析 CLI 工具，专为 <strong>AI agent 日志分析场景</strong> 设计
-  </p>
-  <p align="center">
-    <a href="https://crates.io/crates/aloggrep"><img src="https://img.shields.io/crates/v/aloggrep.svg" alt="crates.io version"></a>
-    <a href="https://crates.io/crates/aloggrep"><img src="https://img.shields.io/crates/d/aloggrep.svg" alt="downloads"></a>
-    <a href="#license"><img src="https://img.shields.io/crates/l/aloggrep.svg" alt="license"></a>
-  </p>
+  <img src="./assets/readme/hero.svg" width="100%" alt="alnav — App / Android Log Navigator：默认 TUI，alnav grep 提供 CLI">
 </p>
 
----
+<p align="center">
+  <a href="https://crates.io/crates/alnav"><img src="https://img.shields.io/crates/v/alnav.svg" alt="crates.io version"></a>
+  <a href="https://crates.io/crates/alnav"><img src="https://img.shields.io/crates/d/alnav.svg" alt="downloads"></a>
+  <a href="#license"><img src="https://img.shields.io/crates/l/alnav.svg" alt="license"></a>
+  <a href="https://github.com/Rossettaylm/alnav"><img src="https://img.shields.io/github/stars/Rossettaylm/alnav?style=flat" alt="GitHub stars"></a>
+</p>
 
-支持结构化输出（JSON/CSV）、时间窗口聚合、去重归并、崩溃提取等，用一条命令完成 agent 需要多轮 grep + 自行推理的工作。
+**alnav**（App / Android Log Navigator）是面向 Android logcat、xlog、HarmonyOS hilog 的终端日志工具：默认打开 vim 风格 TUI，脚本与 AI agent 用 `alnav grep` 做结构化过滤与聚合。
+
+<p align="center">
+  <img src="./assets/readme/workflow.svg" width="100%" alt="alnav 默认进 TUI，alnav grep 走 CLI 流水线">
+</p>
 
 ## 安装
 
 ```bash
-cargo install aloggrep
+cargo install alnav
 ```
 
-安装后提供两个命令：**`aloggrep`**（完整名）和 **`alg`**（简写），功能完全相同。
+```bash
+# 第一次成功路径
+alnav -f app.log                 # TUI
+alnav grep -f app.log --level E  # CLI
+```
 
 <details>
 <summary>从源码安装</summary>
 
 ```bash
-git clone https://github.com/Rossettaylm/loggrep
-cd loggrep
-cargo install --path .
+git clone https://github.com/Rossettaylm/alnav
+cd alnav
+cargo install --path alnav
 ```
 </details>
+
+本版本仍附带兼容别名（**下一版本移除**）：`aloggrep` / `alg` ≡ `alnav grep`，`aloggrep-tui` ≡ `alnav`。
+
+配置硬切：`--config-path` > `$ALNAV_HOME` > `~/.config/alnav/`。旧目录请手动迁移：`~/.config/aloggrep` → `~/.config/alnav`。
 
 ## 快速上手
 
 ```bash
-# 查看帮助（简洁版，仅列出参数）
-alg --help
+# TUI：文件 / 实时设备
+alnav -f app.log
+alnav --adb
+alnav --hdc --device <serial>
 
-# 查看完整使用示例
-alg --example
-
-# 查看版本
-alg --version
-
-# 管道模式（配合 adb logcat）
-adb logcat | alg --tag "OkHttp" --level W
-
-# Android 实时抓取（自动使用 threadtime 并跳过历史缓冲）
-alg --adb --tag "OkHttp" --level W
-
-# 文件模式
-alg -f app.log --tag "MyApp" --level E
-
-# 全局概览（JSON 统计）
-alg -f app.log --summary
-
-# 崩溃提取
-alg -f app.log --crashes
+# CLI：管道与分析
+adb logcat | alnav grep --tag "OkHttp" --level W
+alnav grep --adb --tag "OkHttp" --level W
+alnav grep -f app.log --summary
+alnav grep -f app.log --crashes
+alnav grep --help
+alnav grep --example
 ```
 
-## 功能
+TUI 内 `yc` 可将当前过滤导出为一行 `alnav grep …`。
 
-### 多条件过滤
+## 为什么不只用 grep
+
+一条 `alnav grep` 通常能替代 agent 多轮 `grep` + 自行统计：
+
+| 能力 | alnav | grep / rg |
+|:-----|:------|:----------|
+| 格式感知 | hilog / xlog / threadtime / brief 自动解析 | 纯文本 |
+| 语义级别 | `--level W` → W/E/F | 手写正则 |
+| 布尔过滤 | `-e '(tag ~ A or tag ~ B) and level >= W'` | 多管道 |
+| 聚合 | `--summary` / `--histogram` / `--dedupe` | 自行算 |
+| 崩溃 | `--crashes` 结构化输出 | 手写识别 |
+| 输出控制 | `--fields` / `--limit` / JSON·CSV | 整行文本 |
+
+> 适用范围仅限 Android / HarmonyOS 设备日志；通用文本请继续用 `rg`。
+
+## CLI 要点
 
 ```bash
-alg -f app.log --tag "OkHttp" --msg "timeout" --level W
+# 多条件：同类 OR，跨类 AND；加 --and 改同类 AND
+alnav grep -f app.log --tag "OkHttp" --msg "timeout" --level W
+alnav grep -f app.log --tag A --tag B --and
 
-# 多值默认 OR，加 --and 改为 AND
-alg -f app.log --tag A --tag B            # tag=A OR tag=B
-alg -f app.log --tag A --tag B --and      # tag=A AND tag=B
+# 表达式
+alnav grep -f app.log -e 'msg ~ timeout and tag ~ OkHttp'
+alnav grep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
 
-# 按 PID / TID 过滤
-alg -f app.log --pid 3542 --tid 999
+# 时间 / 输出 / 分析
+alnav grep -f app.log --since 10:30:00 --until 10:35:00
+alnav grep -f app.log --format json --fields timestamp,level,tag,msg --limit 50
+alnav grep -f app.log --histogram 1m
+alnav grep -f app.log -M --tag AndroidRuntime   # 合并堆栈
+alnav grep -f 'logs/*.log' --sort-time --level E
 ```
 
-### 布尔表达式（`-e`）
+| 过滤规则 | 行为 |
+|:---------|:-----|
+| `--tag A --tag B` | OR |
+| `--tag A --tag B --and` | AND |
+| `--tag A --msg err` | 跨字段 AND |
+| `--level W` | W / E / F |
+| `-e E1 -e E2` | 表达式之间 OR，与其他 flag AND |
 
-对跨字段复杂逻辑使用 `-e` 表达式，语法更直观：
+### Live：`--adb` / `--hdc`
 
 ```bash
-alg -f app.log -e 'msg ~ timeout and tag ~ OkHttp'
-alg -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
-alg -f app.log -e 'not tag ~ Debug'
+alnav grep --adb --device <serial> --level E
+alnav grep --hdc --tag AppFreeze
 ```
 
-> **语法**：`FIELD ~ VALUE` | `level >= LEVEL`，用 `and` / `or` / `not` / `()` 组合。
->
-> FIELD = `tag` | `msg` | `pkg` | `pid` | `tid`
-
-多个 `-e` 之间为 OR，与其他 flag 之间为 AND。
-
-### 时间范围
-
-```bash
-alg -f app.log --since 10:30:00 --until 10:35:00
-alg -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
-```
-
-### 输出格式与字段选择
-
-```bash
-alg -f app.log --format json --limit 50          # JSON lines
-alg -f app.log --format csv > out.csv             # CSV 导出
-alg -f app.log --fields timestamp,level,tag,msg   # 只输出指定字段
-alg -f app.log --count                            # 仅输出匹配数量
-```
-
-### 上下文行
-
-```bash
-alg -f app.log --tag crash -C 3           # 前后各 3 行
-alg -f app.log --level F --time-context 5s  # 前后各 5 秒内的所有日志
-```
-
-### 分析工具
-
-```bash
-alg -f app.log --summary                  # 级别分布、Top tags/errors、崩溃数
-alg -f app.log --histogram 1m             # 每分钟级别分布（含异常检测）
-alg -f app.log --dedupe --limit 20        # 去重归并，输出 Top 20 模式
-alg -f app.log --crashes                  # 崩溃提取（JSON）
-```
-
-> [!TIP]
-> `--histogram` 输出自带基于均值+2σ 的异常检测，无需手动计算。
-
-### 多行合并与采样
-
-```bash
-alg -f app.log -M --tag AndroidRuntime    # 合并堆栈追踪为单条记录
-alg -f app.log --tail 50                  # 最后 50 条匹配
-alg -f app.log --sample 100               # 水塘抽样 100 条
-```
-
-### 多文件归并
-
-```bash
-alg -f 'logs/*.log' --sort-time --level E  # 多文件按时间归并排序
-```
-
-### 关键词高亮
-
-```bash
-alg -f app.log --tag OkHttp --highlight timeout                    # 单关键词高亮
-alg -f app.log --highlight timeout --highlight "error|failed"      # 多关键词，各自独立配色
-```
-
-> `--highlight` 接受正则（大小写不敏感），可重复传入，每个关键词使用不同背景色，仅在终端彩色输出下生效。
-
-### Android 实时抓取（`--adb`）
-
-```bash
-alg --adb --tag OkHttp                    # 通过 adb logcat 实时抓取当前设备日志
-alg --adb --device <serial> --level E     # 多设备时指定序列号
-```
-
-`--adb` 固定运行 `adb logcat -v threadtime`，先查询设备时间，再跳过更早的 logcat 历史缓冲记录。若设备时间查询失败，会继续抓取并提示历史缓冲回退。
-
-### HarmonyOS 实时抓取（`--hdc`）
-
-```bash
-alg --hdc --tag AppFreeze                 # 通过 hdc hilog 实时抓取当前设备日志
-alg --hdc --device <serial> --level E     # 多设备时指定序列号
-```
-
-> `--adb` 与 `--hdc` 都只输出从命令启动时刻起的新日志，并支持 `--device`。二者互斥，且不可与 `-f`、`--time-context`、`--follow-pid`/`--follow-tid` 或 `--sort-time` 同时使用。
-
-### 交互式 TUI
-
-```bash
-aloggrep-tui -f app.log                  # 浏览静态日志文件
-aloggrep-tui --adb                       # Android adb logcat 实时流
-aloggrep-tui --adb --device <serial>     # 指定 Android 设备
-aloggrep-tui --hdc --device <serial>     # 指定 HarmonyOS 设备
-```
-
-ADB 与 HDC 实时模式共用有界的 drop-oldest 缓冲、`Ctrl-L` 本地清屏和子进程清理逻辑；实时模式不提供交互式时间窗，`yc` 导出会保留 `--adb` / `--hdc` 与设备序列号。
-
-## 过滤逻辑速查
-
-| 用法 | 行为 |
-|:-----|:-----|
-| `--tag A --tag B` | OR — 匹配 A 或 B |
-| `--tag A --tag B --and` | AND — 同时匹配 A 和 B |
-| `--tag "A\|B"` | OR — 值内管道符 |
-| `--tag A --msg err` | AND — 跨字段始终 AND |
-| `--level W` | 匹配 W / E / F（最低级别） |
-| `-e EXPR1 -e EXPR2` | OR（多个 `-e` 之间），与其他 flag AND |
+启动时查询设备时间并跳过更早缓冲；二者互斥，且不可与 `-f`、`--time-context`、`--follow-pid`/`--follow-tid`、`--sort-time` 同用。
 
 ## 支持的日志格式
-
-自动检测，可混合使用：
 
 | 格式 | 示例 |
 |:-----|:-----|
@@ -200,93 +120,27 @@ ADB 与 HDC 实时模式共用有界的 drop-oldest 缓冲、`Ctrl-L` 本地清�
 | **threadtime** | `03-04 10:23:28.872  3542  3831 I NTKernel: msg` |
 | **brief** | `I/NTKernel(3542): msg` |
 
-> hilog 格式会自动分离 domain / package / tag，`--package` 和 `-e 'pkg ~ ...'` 可精确匹配 package 字段。
-
-## 与 grep 对比（AI agent 场景）
-
-aloggrep 核心优势在于**用一条命令完成 agent 需要 3–5 轮 grep + 自行推理的工作**，大幅降低 token 消耗。
-
-<details>
-<summary>展开完整对比表</summary>
-
-| 维度 | aloggrep | grep / rg |
-|:-----|:---------|:----------|
-| **结构化解析** | 自动识别四种格式，提取 timestamp/pid/tid/level/tag/pkg/msg | 纯文本正则，需自写复杂 regex |
-| **语义过滤** | `--level W` 即匹配 W/E/F | 需 `grep -E "[WEF]/"` 并处理格式差异 |
-| **多条件组合** | `--tag X --msg Y --level E` 一行完成 | 需多管道 `grep \| grep \| grep` |
-| **布尔表达式** | `-e '(tag ~ A or tag ~ B) and level >= W'` | 无法单命令表达 |
-| **聚合分析** | `--summary` / `--histogram` / `--dedupe` 直接输出 JSON | agent 需把原始行读入 context 自行统计 |
-| **崩溃提取** | `--crashes` 结构化输出 type/exception/stack | 需手写正则识别 FATAL EXCEPTION/ANR/SIGSEGV |
-| **多行合并** | `-M` 自动合并 stack trace | grep 逐行输出，stack trace 被打散 |
-| **Token 效率** | `--fields --limit` 精确控制输出量 | 输出整行，无法选字段 |
-| **时间窗口** | `--since` / `--until` / `--time-context` 原生支持 | 需先 grep 时间戳再手动过滤 |
-| **多文件排序** | `--sort-time` glob 多文件归并排序 | 需手动 `sort -m`，不理解时间格式 |
-| **通用性** | 仅适用于 Android logcat/xlog | 任意文本文件 |
-
-</details>
-
-> [!NOTE]
-> 聚合分析场景（summary / histogram / dedupe）可节省 **80%+** token 消耗。主要劣势是适用范围仅限 Android 日志，且需额外安装。
-
 ## Claude Code Skill
 
-本仓库附带 `loggrep-analyzer.skill`，可在 [Claude Code](https://claude.ai/code) 中让 AI agent 自动完成系统化日志分析。
-
-**安装：**
+仓库附带 `loggrep-analyzer.skill`，可让 agent 按「概览 → 定位 → 追踪 → 报告」分析日志：
 
 ```bash
-# 全局安装（所有项目可用）
 unzip loggrep-analyzer.skill -d ~/.claude/skills/loggrep-analyzer
-
-# 项目级安装（仅当前项目）
-unzip loggrep-analyzer.skill -d .claude/skills/loggrep-analyzer
 ```
 
-**使用：** 安装后在 Claude Code 中直接描述需求即可触发：
+## 架构（简）
 
 ```
-帮我分析这个日志 /path/to/app.log
-在日志中搜索所有 OkHttp 相关的 timeout 错误
-这份日志有崩溃吗？Error 集中在哪个时间段？
+alnav-core/   # lib name = alnav：解析 / 过滤 / 格式化
+alnav/        # 统一二进制：alnav · alnav grep · 兼容别名
 ```
 
-Skill 引导 agent 按 **全局概览 → 定位问题区域 → 深入追踪 → 结构化报告** 四阶段工作流进行分析。
-
-## 架构
-
 ```
-src/
-├── main.rs        # CLI 入口（clap derive），输入调度，主循环
-├── live.rs        # 后端无关的实时会话与启动时间过滤
-├── adb.rs         # adb 设备时间查询与 logcat 命令
-├── hdc.rs         # hdc 设备时间查询与 hilog 命令
-├── parser.rs      # LogEntry 解析（hilog / threadtime / xlog / brief）
-├── filter.rs      # FilterChain：多条件组合过滤，支持 pid/tid
-├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
-├── multiline.rs   # 多行合并（堆栈追踪等续行）
-├── crash.rs       # 崩溃识别 + CrashInfo 结构化提取
-├── dedupe.rs      # 消息归一化 + 去重分组
-├── sampler.rs     # 输出采样（tail / sample）
-├── histogram.rs   # 时间窗口聚合（--histogram）
-├── formatter.rs   # 输出格式化（text / json / csv + 字段选择）
-└── summary.rs     # 聚合统计（级别分布、Top tags/errors、崩溃计数）
+stdin/file/adb/hdc → [MultilineMerger] → LogEntry::parse()
+  → FilterChain → [CrashDetector] → Formatter / Summary
 ```
 
-**数据流：**
-
-```
-stdin/file/adb/hdc → 逐行读取 → [MultilineMerger] → LogEntry::parse()
-  → FilterChain::matches() → [CrashDetector]
-  → Formatter::write_entry() / Summary::record()
-```
-
-关键设计决策：
-
-- **`LogEntry<'a>` 零拷贝解析**：所有字段均为 `&'a str`，直接引用原始行，避免堆分配。
-- **`FilterChain::from_cli`** 是唯一过滤器构建入口，将所有 CLI 参数统一转换为内部过滤链。
-- **`dispatch_lines!` 宏**：根据 `--multiline` / `--crashes` 标志决定是否用 `MultilineMerger` 包裹迭代器，避免运行时分支开销。
-
-## 退出码
+## 退出码（CLI）
 
 | 码 | 含义 |
 |:---|:-----|

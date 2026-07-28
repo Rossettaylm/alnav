@@ -1,0 +1,25 @@
+# Example UI theme for alnav (M4).
+#
+# Copy to `$ALNAV_HOME/theme.toml` (default: ~/.config/alnav/theme.toml)
+# or pass `--config-path /path/to/dir` (directory, not this file).
+#
+# Colors: named ratatui colors (cyan, darkgray, …) or #RRGGBB / #RGB.
+# Log severity / search USER_HIGHLIGHT colors are NOT configurable here —
+# they always come from alnav-core::logcolor (lib `alnav::logcolor`).
+
+accent = "cyan"
+success = "green"
+warning = "yellow"
+lock = "magenta"
+selection_frame = "magenta"
+log_selection_bg = "darkgray"
+log_visual_bg = "#1e3c46"
+preview_highlight_bg = "darkgray"
+border_inactive = "darkgray"
+candidate_selected_bg = "darkgray"
+candidate_selected_fg = "white"
+candidate_unselected_bg = "reset"
+candidate_unselected_fg = "gray"
+candidate_match_fg = "cyan"
+candidate_prefix = "▌ "
+bookmark_strip_bg = "darkgray"

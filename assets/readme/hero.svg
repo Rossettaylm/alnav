@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">alnav - App / Android Log Navigator</title>
+  <desc id="desc">Terminal-native log navigator: vim-style TUI by default, alnav grep for scripted CLI filtering of Android and HarmonyOS logs.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1218"/>
+      <stop offset="100%" stop-color="#101a22"/>
+    </linearGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#1c2a35"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="360" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="360" rx="28" fill="url(#dots)" opacity="0.55"/>
+  <rect x="1.5" y="1.5" width="1197" height="357" rx="27" fill="none" stroke="#243442" stroke-width="2"/>
+  <g transform="translate(56 48)">
+    <rect x="0" y="0" width="118" height="28" rx="8" fill="#12202a" stroke="#2a4152"/>
+    <text x="14" y="19" fill="#7dd3fc" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">mobile logs</text>
+    <text x="0" y="92" fill="#f0f6fc" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="72" font-weight="700">alnav</text>
+    <text x="0" y="138" fill="#9fb3c4" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24">App / Android Log Navigator</text>
+    <text x="0" y="188" fill="#d7e2eb" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="22">默认 vim 风 TUI · <tspan fill="#67e8f9">alnav grep</tspan> 跑纯 CLI</text>
+    <text x="0" y="222" fill="#8aa0b2" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="20">logcat / xlog / hilog · 过滤 · 崩溃 · 聚合</text>
+    <g transform="translate(0 258)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">
+      <rect width="430" height="40" rx="10" fill="#0a141c" stroke="#2a4152"/>
+      <text x="16" y="26"><tspan fill="#67e8f9">&gt;</tspan><tspan fill="#e6edf3"> cargo install alnav</tspan></text>
+    </g>
+  </g>
+  <g transform="translate(640 40)">
+    <rect width="504" height="280" rx="18" fill="#071017" stroke="#2a4152"/>
+    <circle cx="28" cy="28" r="6" fill="#f87171"/>
+    <circle cx="50" cy="28" r="6" fill="#fbbf24"/>
+    <circle cx="72" cy="28" r="6" fill="#34d399"/>
+    <text x="96" y="33" fill="#6b8499" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">alnav -f app.log</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" transform="translate(24 62)">
+      <text y="0" fill="#5b7285">10:23:28.872  3542  3831</text>
+      <rect x="214" y="-14" width="18" height="18" rx="4" fill="#1d4ed8"/>
+      <text x="218" y="0" fill="#dbeafe" font-size="12" font-weight="700">I</text>
+      <text x="242" y="0" fill="#93c5fd">OkHttp</text>
+      <text x="318" y="0" fill="#c9d5e0">request ok</text>
+      <text y="36" fill="#5b7285">10:23:29.104  3542  3901</text>
+      <rect x="214" y="22" width="18" height="18" rx="4" fill="#a16207"/>
+      <text x="217" y="36" fill="#fef3c7" font-size="12" font-weight="700">W</text>
+      <text x="242" y="36" fill="#fde68a">OkHttp</text>
+      <rect x="318" y="20" width="78" height="20" rx="4" fill="#134e4a"/>
+      <text x="326" y="36" fill="#5eead4">timeout</text>
+      <text y="72" fill="#5b7285">10:23:29.440  3542  3901</text>
+      <rect x="214" y="58" width="18" height="18" rx="4" fill="#b91c1c"/>
+      <text x="218" y="72" fill="#fee2e2" font-size="12" font-weight="700">E</text>
+      <text x="242" y="72" fill="#fca5a5">AndroidRuntime</text>
+      <text x="380" y="72" fill="#fecaca">FATAL</text>
+      <text y="120" fill="#67e8f9">| chip</text>
+      <text y="120" x="70" fill="#94a3b8">tag~OkHttp  level&gt;=W</text>
+      <text y="152" fill="#67e8f9">| lock</text>
+      <text y="152" x="70" fill="#94a3b8">pid 3542</text>
+      <text y="184" fill="#34d399">*</text>
+      <text y="184" x="22" fill="#64748b">following · 128 matched</text>
+    </g>
+  </g>
+</svg>

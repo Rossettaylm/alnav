@@ -1,4 +1,4 @@
-# aloggrep 待办与方向
+# alnav 待办与方向
 
 本文档分两块：
 
@@ -9,8 +9,8 @@
 
 ## 产品边界（读此节即可，无需读 lnav）
 
-| | lnav（对照物） | aloggrep（本项目） |
-|--|----------------|-------------------|
+| | lnav（对照物） | alnav（本项目） |
+|--|----------------|----------------|
 | 定位 | 通用日志「IDE」：多格式、多文件、SQL/脚本 | Android/鸿蒙 logcat「手术刀」：轻量、快、场景专一 |
 | 核心抽象 | 时间有序的**消息索引**；UI/SQL 都是索引的投影 | `rows`（环形缓冲）+ `visible` + chip/`Expr` 过滤 |
 | 过滤 UX | regex in/out、SQL 表达式、输入时预览效果 | Filter chip 组内 AND / 组间 OR；Search chip 高亮 OR |
@@ -22,7 +22,7 @@
 2. **先预览再提交** — 与现有 Input/Search 居中模态、chip Enter 两段式契合；draft 阶段应能看见「将隐藏 / 将命中」，而不只是改内部状态。
 3. **自动化能省则省，扩展能声明则声明** — 不追功能广度；把主题/键位/会话等用户可配置面与解析/过滤引擎分开。
 
-**建议落点（模块）：** `aloggrep-tui` 的 `app.rs` / `ui.rs` / `input.rs` / `search_model.rs` / `theme.rs`；分析能力可复用 `aloggrep-core` 已有 histogram/crash/`Expr`。
+**建议落点（模块）：** `alnav` 的 `app.rs` / `ui.rs` / `input.rs` / `theme.rs`；分析能力可复用 `alnav-core`（lib `alnav`）已有 histogram/crash/`Expr`。
 
 ---
 
@@ -317,7 +317,7 @@
 
 **本项目语境：**
 
-- 引擎：`aloggrep-core::expr` 已有 `not`；匹配在 include 组 OR 之后、H8 lock 之前（或之后，AND 可交换）施加 excludes。
+- 引擎：`alnav::expr` 已有 `not`；匹配在 include 组 OR 之后、H8 lock 之前（或之后，AND 可交换）施加 excludes。
 - Exclude strip：`h`/`l`/`dd`/`di` 与 Filter 同构；`dd` 删光 → 回 LogList。
 - Input 排除模式：模态标题/提示区分（如含 `!`）；Esc/Ctrl+C 重置 Input（含模式 flag）。
 - 去重 ignore-case；空字段 / 重复 → status，不 push。
@@ -355,9 +355,9 @@
 | 键位 | **`y` `c`**（yank command；并入现有 `y` operator，`c` 非 `YankField`） |
 | 过滤编码 | **统一 `-e`**（组内 AND、组间 OR；excludes 为 `not …`） |
 | H8 lock | **`--pid` / `--tid` flag**（贴近 CLI follow） |
-| 空过滤 | 仍复制骨架：`aloggrep -f …` 或 `aloggrep --hdc` |
+| 空过滤 | 仍复制骨架：`alnav grep -f …` 或 `alnav grep --hdc` |
 | 纳入 | 启用中的 Filter 组 + Excludes + lock；**不含** Search；**不含** `di` 禁用项 |
-| 二进制名 | `aloggrep` |
+| 二进制名 | `alnav grep`（兼容别名 `aloggrep`/`alg` 过渡一版） |
 | 剪贴板 | 复用 `copy_to_clipboard` / `record_yank` + status |
 
 **本项目语境：**
@@ -454,13 +454,13 @@
 | 决策点 | 决议 |
 |--------|------|
 | v1 范围 | **仅主题**；键位外置后续（可先文档化默认键位表） |
-| 配置目录 | `$ALOGGREP_HOME`，未设置时默认 **`~/.config/aloggrep`** |
+| 配置目录 | `$ALNAV_HOME`，未设置时默认 **`~/.config/alnav`** |
 | CLI | **`--config-path <dir>`** 覆盖配置目录（不是单文件路径） |
-| 主题文件 | `$ALOGGREP_HOME/theme.toml` |
-| 面板配置 | `$ALOGGREP_HOME/config.toml`；读取 `picker_left_ratio`（默认 0.4，clamp 0.2–0.8） |
+| 主题文件 | `$ALNAV_HOME/theme.toml` |
+| 面板配置 | `$ALNAV_HOME/config.toml`；读取 `picker_left_ratio`（默认 0.4，clamp 0.2–0.8） |
 | 扩展位 | 同目录预留 `keymap.toml`（v1 **不读**） |
 | 覆盖内容 | UI token（ACCENT、pill、border、selection、preview…）；渲染仍只调 `theme::*` |
-| 日志色 | **不得**外置覆盖；仍以 `aloggrep-core::logcolor` 为唯一源 |
+| 日志色 | **不得**外置覆盖；仍以 `alnav::logcolor` 为唯一源 |
 | 失败 / 热更新 | 缺失或坏文件 → 回退内置 + status；v1 **仅启动时**加载 |
 
 **非目标：** v1 键位 toml；用户 JSON 自定义 log 格式；`.lnav` 脚本语言。

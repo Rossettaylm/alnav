@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/alnav-core/backend/quality-guidelines.md", "reason": "verify core quality after rename"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "verify TUI quality after rename"}
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "ensure rename did not alter filter contracts"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "check duplicated entry/dispatch logic"}
