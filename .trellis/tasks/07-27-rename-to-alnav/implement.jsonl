@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/aloggrep-core/backend/directory-structure.md", "reason": "core module layout during package rename"}
+{"file": ".trellis/spec/aloggrep-core/backend/quality-guidelines.md", "reason": "core quality bar for rename/refactor"}
+{"file": ".trellis/spec/aloggrep-tui/backend/directory-structure.md", "reason": "TUI module ownership when merging into alnav bin"}
+{"file": ".trellis/spec/aloggrep-tui/backend/quality-guidelines.md", "reason": "TUI forbidden patterns while renaming strings/config"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "CLI/TUI/lib boundary for unified alnav entry"}

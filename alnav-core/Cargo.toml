@@ -1,0 +1,26 @@
+[package]
+name = "alnav-core"
+version = "0.2.0"
+edition = "2021"
+description = "Core library for alnav: Android/HarmonyOS log parsing, filtering, and analysis"
+license = "MIT"
+authors = ["Lyman Yang"]
+repository = "https://github.com/Rossettaylm/alnav"
+keywords = ["android", "logcat", "log", "filter", "analysis"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../README.md"
+
+[lib]
+name = "alnav"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+colored = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+glob = "0.3"
+atty = "0.2"
+ctrlc = "3"
+libc = "0.2"

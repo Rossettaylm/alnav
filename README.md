@@ -1,12 +1,13 @@
 <p align="center">
-  <h1 align="center">aloggrep</h1>
+  <h1 align="center">alnav</h1>
   <p align="center">
-    轻量级 Android logcat / xlog / HarmonyOS hilog 日志过滤与分析 CLI 工具，专为 <strong>AI agent 日志分析场景</strong> 设计
+    <strong>App / Android Log Navigator</strong> — 轻量级 Android logcat / xlog / HarmonyOS hilog
+    日志过滤与分析工具：默认进入交互式 TUI，<code>alnav grep</code> 提供纯 CLI（专为 AI agent 场景设计）
   </p>
   <p align="center">
-    <a href="https://crates.io/crates/aloggrep"><img src="https://img.shields.io/crates/v/aloggrep.svg" alt="crates.io version"></a>
-    <a href="https://crates.io/crates/aloggrep"><img src="https://img.shields.io/crates/d/aloggrep.svg" alt="downloads"></a>
-    <a href="#license"><img src="https://img.shields.io/crates/l/aloggrep.svg" alt="license"></a>
+    <a href="https://crates.io/crates/alnav"><img src="https://img.shields.io/crates/v/alnav.svg" alt="crates.io version"></a>
+    <a href="https://crates.io/crates/alnav"><img src="https://img.shields.io/crates/d/alnav.svg" alt="downloads"></a>
+    <a href="#license"><img src="https://img.shields.io/crates/l/alnav.svg" alt="license"></a>
   </p>
 </p>
 
@@ -17,62 +18,75 @@
 ## 安装
 
 ```bash
-cargo install aloggrep
+cargo install alnav
 ```
 
-安装后提供两个命令：**`aloggrep`**（完整名）和 **`alg`**（简写），功能完全相同。
+安装后主命令为 **`alnav`**（默认打开 TUI）。CLI 过滤走 **`alnav grep`**。
+
+本版本仍附带兼容别名（**下一版本将移除**）：
+
+| 兼容命令 | 等价于 |
+|:---------|:-------|
+| `aloggrep` / `alg` | `alnav grep` |
+| `aloggrep-tui` | `alnav` |
 
 <details>
 <summary>从源码安装</summary>
 
 ```bash
-git clone https://github.com/Rossettaylm/loggrep
-cd loggrep
-cargo install --path .
+git clone https://github.com/Rossettaylm/alnav
+cd alnav
+cargo install --path alnav
 ```
 </details>
+
+### 配置目录
+
+硬切为：`--config-path DIR` > `$ALNAV_HOME` > `~/.config/alnav/`（读取 `theme.toml` / `config.toml`）。  
+若你仍在用旧路径，请手动迁移：`~/.config/aloggrep` → `~/.config/alnav`。
 
 ## 快速上手
 
 ```bash
-# 查看帮助（简洁版，仅列出参数）
-alg --help
+# TUI：浏览静态日志 / 实时设备流
+alnav -f app.log
+alnav --adb
+alnav --hdc --device <serial>
 
-# 查看完整使用示例
-alg --example
-
-# 查看版本
-alg --version
+# CLI：查看帮助与示例
+alnav grep --help
+alnav grep --example
 
 # 管道模式（配合 adb logcat）
-adb logcat | alg --tag "OkHttp" --level W
+adb logcat | alnav grep --tag "OkHttp" --level W
 
-# Android 实时抓取（自动使用 threadtime 并跳过历史缓冲）
-alg --adb --tag "OkHttp" --level W
+# Android / HarmonyOS 实时抓取（CLI）
+alnav grep --adb --tag "OkHttp" --level W
+alnav grep --hdc --tag "AppFreeze" --level E
 
 # 文件模式
-alg -f app.log --tag "MyApp" --level E
+alnav grep -f app.log --tag "MyApp" --level E
 
-# 全局概览（JSON 统计）
-alg -f app.log --summary
-
-# 崩溃提取
-alg -f app.log --crashes
+# 全局概览 / 崩溃提取
+alnav grep -f app.log --summary
+alnav grep -f app.log --crashes
 ```
+
+> 兼容写法：`alg -f app.log --tag MyApp` 与 `alnav grep -f app.log --tag MyApp` 相同。
 
 ## 功能
 
 ### 多条件过滤
 
 ```bash
-alg -f app.log --tag "OkHttp" --msg "timeout" --level W
+alnav grep -f app.log --tag "OkHttp" --msg "timeout" --level W
 
 # 多值默认 OR，加 --and 改为 AND
-alg -f app.log --tag A --tag B            # tag=A OR tag=B
-alg -f app.log --tag A --tag B --and      # tag=A AND tag=B
+alnav grep -f app.log --tag A --tag B            # tag=A OR tag=B
+alnav grep -f app.log --tag A --tag B --and      # tag=A AND tag=B
 
 # 按 PID / TID 过滤
-alg -f app.log --pid 3542 --tid 999
+alnav grep -f app.log --pid 3542 --tid 999
 ```
 
 ### 布尔表达式（`-e`）
@@ -80,9 +94,9 @@ alg -f app.log --pid 3542 --tid 999
 对跨字段复杂逻辑使用 `-e` 表达式，语法更直观：
 
 ```bash
-alg -f app.log -e 'msg ~ timeout and tag ~ OkHttp'
-alg -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
-alg -f app.log -e 'not tag ~ Debug'
+alnav grep -f app.log -e 'msg ~ timeout and tag ~ OkHttp'
+alnav grep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+alnav grep -f app.log -e 'not tag ~ Debug'
 ```
 
 > **语法**：`FIELD ~ VALUE` | `level >= LEVEL`，用 `and` / `or` / `not` / `()` 组合。
@@ -94,33 +108,33 @@ alg -f app.log -e 'not tag ~ Debug'
 ### 时间范围
 
 ```bash
-alg -f app.log --since 10:30:00 --until 10:35:00
-alg -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
+alnav grep -f app.log --since 10:30:00 --until 10:35:00
+alnav grep -f app.log --since '2026-03-04 10:30:00' --until '2026-03-04 10:35:00'
 ```
 
 ### 输出格式与字段选择
 
 ```bash
-alg -f app.log --format json --limit 50          # JSON lines
-alg -f app.log --format csv > out.csv             # CSV 导出
-alg -f app.log --fields timestamp,level,tag,msg   # 只输出指定字段
-alg -f app.log --count                            # 仅输出匹配数量
+alnav grep -f app.log --format json --limit 50          # JSON lines
+alnav grep -f app.log --format csv > out.csv             # CSV 导出
+alnav grep -f app.log --fields timestamp,level,tag,msg   # 只输出指定字段
+alnav grep -f app.log --count                            # 仅输出匹配数量
 ```
 
 ### 上下文行
 
 ```bash
-alg -f app.log --tag crash -C 3           # 前后各 3 行
-alg -f app.log --level F --time-context 5s  # 前后各 5 秒内的所有日志
+alnav grep -f app.log --tag crash -C 3           # 前后各 3 行
+alnav grep -f app.log --level F --time-context 5s  # 前后各 5 秒内的所有日志
 ```
 
 ### 分析工具
 
 ```bash
-alg -f app.log --summary                  # 级别分布、Top tags/errors、崩溃数
-alg -f app.log --histogram 1m             # 每分钟级别分布（含异常检测）
-alg -f app.log --dedupe --limit 20        # 去重归并，输出 Top 20 模式
-alg -f app.log --crashes                  # 崩溃提取（JSON）
+alnav grep -f app.log --summary                  # 级别分布、Top tags/errors、崩溃数
+alnav grep -f app.log --histogram 1m             # 每分钟级别分布（含异常检测）
+alnav grep -f app.log --dedupe --limit 20        # 去重归并，输出 Top 20 模式
+alnav grep -f app.log --crashes                  # 崩溃提取（JSON）
 ```
 
 > [!TIP]
@@ -129,22 +143,22 @@ alg -f app.log --crashes                  # 崩溃提取（JSON）
 ### 多行合并与采样
 
 ```bash
-alg -f app.log -M --tag AndroidRuntime    # 合并堆栈追踪为单条记录
-alg -f app.log --tail 50                  # 最后 50 条匹配
-alg -f app.log --sample 100               # 水塘抽样 100 条
+alnav grep -f app.log -M --tag AndroidRuntime    # 合并堆栈追踪为单条记录
+alnav grep -f app.log --tail 50                  # 最后 50 条匹配
+alnav grep -f app.log --sample 100               # 水塘抽样 100 条
 ```
 
 ### 多文件归并
 
 ```bash
-alg -f 'logs/*.log' --sort-time --level E  # 多文件按时间归并排序
+alnav grep -f 'logs/*.log' --sort-time --level E  # 多文件按时间归并排序
 ```
 
 ### 关键词高亮
 
 ```bash
-alg -f app.log --tag OkHttp --highlight timeout                    # 单关键词高亮
-alg -f app.log --highlight timeout --highlight "error|failed"      # 多关键词，各自独立配色
+alnav grep -f app.log --tag OkHttp --highlight timeout
+alnav grep -f app.log --highlight timeout --highlight "error|failed"
 ```
 
 > `--highlight` 接受正则（大小写不敏感），可重复传入，每个关键词使用不同背景色，仅在终端彩色输出下生效。
@@ -152,8 +166,8 @@ alg -f app.log --highlight timeout --highlight "error|failed"      # 多关键�
 ### Android 实时抓取（`--adb`）
 
 ```bash
-alg --adb --tag OkHttp                    # 通过 adb logcat 实时抓取当前设备日志
-alg --adb --device <serial> --level E     # 多设备时指定序列号
+alnav grep --adb --tag OkHttp                    # 通过 adb logcat 实时抓取
+alnav grep --adb --device <serial> --level E     # 多设备时指定序列号
 ```
 
 `--adb` 固定运行 `adb logcat -v threadtime`，先查询设备时间，再跳过更早的 logcat 历史缓冲记录。若设备时间查询失败，会继续抓取并提示历史缓冲回退。
@@ -161,8 +175,8 @@ alg --adb --device <serial> --level E     # 多设备时指定序列号
 ### HarmonyOS 实时抓取（`--hdc`）
 
 ```bash
-alg --hdc --tag AppFreeze                 # 通过 hdc hilog 实时抓取当前设备日志
-alg --hdc --device <serial> --level E     # 多设备时指定序列号
+alnav grep --hdc --tag AppFreeze                 # 通过 hdc hilog 实时抓取
+alnav grep --hdc --device <serial> --level E     # 多设备时指定序列号
 ```
 
 > `--adb` 与 `--hdc` 都只输出从命令启动时刻起的新日志，并支持 `--device`。二者互斥，且不可与 `-f`、`--time-context`、`--follow-pid`/`--follow-tid` 或 `--sort-time` 同时使用。
@@ -170,13 +184,13 @@ alg --hdc --device <serial> --level E     # 多设备时指定序列号
 ### 交互式 TUI
 
 ```bash
-aloggrep-tui -f app.log                  # 浏览静态日志文件
-aloggrep-tui --adb                       # Android adb logcat 实时流
-aloggrep-tui --adb --device <serial>     # 指定 Android 设备
-aloggrep-tui --hdc --device <serial>     # 指定 HarmonyOS 设备
+alnav -f app.log                  # 浏览静态日志文件
+alnav --adb                       # Android adb logcat 实时流
+alnav --adb --device <serial>     # 指定 Android 设备
+alnav --hdc --device <serial>     # 指定 HarmonyOS 设备
 ```
 
-ADB 与 HDC 实时模式共用有界的 drop-oldest 缓冲、`Ctrl-L` 本地清屏和子进程清理逻辑；实时模式不提供交互式时间窗，`yc` 导出会保留 `--adb` / `--hdc` 与设备序列号。
+TUI 内 `yc` 导出当前过滤为一行 **`alnav grep …`** 命令。ADB / HDC 实时模式共用有界 drop-oldest 缓冲与子进程清理；实时模式不提供交互式时间窗。
 
 ## 过滤逻辑速查
 
@@ -204,13 +218,13 @@ ADB 与 HDC 实时模式共用有界的 drop-oldest 缓冲、`Ctrl-L` 本地清�
 
 ## 与 grep 对比（AI agent 场景）
 
-aloggrep 核心优势在于**用一条命令完成 agent 需要 3–5 轮 grep + 自行推理的工作**，大幅降低 token 消耗。
+alnav 核心优势在于**用一条命令完成 agent 需要 3–5 轮 grep + 自行推理的工作**，大幅降低 token 消耗。
 
 <details>
 <summary>展开完整对比表</summary>
 
-| 维度 | aloggrep | grep / rg |
-|:-----|:---------|:----------|
+| 维度 | alnav | grep / rg |
+|:-----|:------|:----------|
 | **结构化解析** | 自动识别四种格式，提取 timestamp/pid/tid/level/tag/pkg/msg | 纯文本正则，需自写复杂 regex |
 | **语义过滤** | `--level W` 即匹配 W/E/F | 需 `grep -E "[WEF]/"` 并处理格式差异 |
 | **多条件组合** | `--tag X --msg Y --level E` 一行完成 | 需多管道 `grep \| grep \| grep` |
@@ -254,25 +268,14 @@ Skill 引导 agent 按 **全局概览 → 定位问题区域 → 深入追踪 �
 
 ## 架构
 
+Cargo workspace：
+
 ```
-src/
-├── main.rs        # CLI 入口（clap derive），输入调度，主循环
-├── live.rs        # 后端无关的实时会话与启动时间过滤
-├── adb.rs         # adb 设备时间查询与 logcat 命令
-├── hdc.rs         # hdc 设备时间查询与 hilog 命令
-├── parser.rs      # LogEntry 解析（hilog / threadtime / xlog / brief）
-├── filter.rs      # FilterChain：多条件组合过滤，支持 pid/tid
-├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator
-├── multiline.rs   # 多行合并（堆栈追踪等续行）
-├── crash.rs       # 崩溃识别 + CrashInfo 结构化提取
-├── dedupe.rs      # 消息归一化 + 去重分组
-├── sampler.rs     # 输出采样（tail / sample）
-├── histogram.rs   # 时间窗口聚合（--histogram）
-├── formatter.rs   # 输出格式化（text / json / csv + 字段选择）
-└── summary.rs     # 聚合统计（级别分布、Top tags/errors、崩溃计数）
+alnav-core/     # package alnav-core，lib name = alnav（解析/过滤/格式化）
+alnav/          # 统一二进制：alnav + alnav grep + 兼容别名
 ```
 
-**数据流：**
+**CLI 数据流：**
 
 ```
 stdin/file/adb/hdc → 逐行读取 → [MultilineMerger] → LogEntry::parse()
@@ -284,9 +287,9 @@ stdin/file/adb/hdc → 逐行读取 → [MultilineMerger] → LogEntry::parse()
 
 - **`LogEntry<'a>` 零拷贝解析**：所有字段均为 `&'a str`，直接引用原始行，避免堆分配。
 - **`FilterChain::from_cli`** 是唯一过滤器构建入口，将所有 CLI 参数统一转换为内部过滤链。
-- **`dispatch_lines!` 宏**：根据 `--multiline` / `--crashes` 标志决定是否用 `MultilineMerger` 包裹迭代器，避免运行时分支开销。
+- **`alnav::run_cli`**：CLI 主路径以库 API 形式导出，由统一二进制调度。
 
-## 退出码
+## 退出码（`alnav grep` / 兼容 CLI）
 
 | 码 | 含义 |
 |:---|:-----|
