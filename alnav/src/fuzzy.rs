@@ -12,6 +12,7 @@ use crate::model::EntryRow;
 
 /// Separator between tag and msg in Search/Highlight haystacks.
 pub const TAG_MSG_SEP: char = '\t';
+const TAG_MSG_SEP_LEN: usize = 1; // '\t' is one byte
 
 /// Which log field a paint range belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,15 +138,109 @@ pub fn char_indices_to_byte_ranges(haystack: &str, char_idxs: &[u32]) -> Vec<(us
     ranges
 }
 
-/// Map fuzzy match positions on a Search/Highlight haystack onto tag/msg/raw fields.
+/// Whitespace-separated atoms for Search/Highlight (contiguous substring AND).
+fn substr_atoms(pattern: &str) -> impl Iterator<Item = &str> {
+    pattern.split_whitespace().filter(|a| !a.is_empty())
+}
+
+/// Ignore-case **contiguous** substring match. Whitespace splits atoms that are ANDed.
+/// Used for LogList Highlight/Search — not fuzzy (avoids `guild` matching `gu`…`i`…`ld`).
+pub fn substr_match(haystack: &str, pattern: &str) -> bool {
+    if pattern.trim().is_empty() {
+        return true;
+    }
+    if haystack.is_empty() {
+        return false;
+    }
+    let hay_l = haystack.to_lowercase();
+    substr_atoms(pattern).all(|atom| hay_l.contains(&atom.to_lowercase()))
+}
+
+/// All ignore-case contiguous occurrences of `needle` in `haystack` as byte ranges.
+pub fn find_all_ignore_case_ranges(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let hay: Vec<(usize, char)> = haystack.char_indices().collect();
+    let needle_l = needle.to_lowercase();
+    let needle_len = needle_l.chars().count();
+    if needle_len == 0 || hay.len() < needle_len {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for start in 0..=hay.len() - needle_len {
+        let window: String = hay[start..start + needle_len]
+            .iter()
+            .map(|(_, c)| *c)
+            .collect::<String>()
+            .to_lowercase();
+        if window == needle_l {
+            let byte_start = hay[start].0;
+            let byte_end = hay
+                .get(start + needle_len)
+                .map(|(i, _)| *i)
+                .unwrap_or(haystack.len());
+            out.push((byte_start, byte_end));
+        }
+    }
+    out
+}
+
+/// Contiguous substring ranges for every whitespace atom in `pattern` (for paint).
+pub fn substr_byte_ranges(haystack: &str, pattern: &str) -> Vec<(usize, usize)> {
+    if !substr_match(haystack, pattern) {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    for atom in substr_atoms(pattern) {
+        ranges.extend(find_all_ignore_case_ranges(haystack, atom));
+    }
+    ranges.sort_unstable_by_key(|(s, _)| *s);
+    ranges.dedup();
+    ranges
+}
+
+fn map_hay_byte_range_to_fields(tag: &str, msg: &str, start: usize, end: usize) -> Vec<FieldSpan> {
+    let tag_end = tag.len();
+    let msg_start = tag_end + TAG_MSG_SEP_LEN;
+    let mut out = Vec::new();
+    if start < tag_end {
+        let e = end.min(tag_end);
+        if e > start {
+            out.push(FieldSpan {
+                field: PaintField::Tag,
+                start,
+                end: e,
+            });
+        }
+    }
+    if end > msg_start {
+        let s = if start >= msg_start {
+            start - msg_start
+        } else {
+            0
+        };
+        let e = end - msg_start;
+        if e > s {
+            out.push(FieldSpan {
+                field: PaintField::Msg,
+                start: s.min(msg.len()),
+                end: e.min(msg.len()),
+            });
+        }
+    }
+    out
+}
+
+/// Map Search/Highlight **substring** hits onto tag/msg/raw fields for LogList paint.
 pub fn map_search_positions(tag: &str, msg: &str, raw: &str, pattern: &str) -> Vec<FieldSpan> {
     let hay = search_haystack(tag, msg, raw);
-    let idxs = fuzzy_char_indices(&hay, pattern);
-    if idxs.is_empty() {
+    let ranges = substr_byte_ranges(&hay, pattern);
+    if ranges.is_empty() {
         return Vec::new();
     }
     if tag.is_empty() && msg.is_empty() {
-        return char_indices_to_byte_ranges(&hay, &idxs)
+        return ranges
             .into_iter()
             .map(|(start, end)| FieldSpan {
                 field: PaintField::Raw,
@@ -154,44 +249,19 @@ pub fn map_search_positions(tag: &str, msg: &str, raw: &str, pattern: &str) -> V
             })
             .collect();
     }
-    let tag_chars = tag.chars().count() as u32;
-    let sep_chars = 1u32;
-    let msg_start_char = tag_chars + sep_chars;
     let mut out = Vec::new();
-    // Split indices by field, then merge to byte ranges within that field.
-    let mut tag_idxs = Vec::new();
-    let mut msg_idxs = Vec::new();
-    for &ci in &idxs {
-        if ci < tag_chars {
-            tag_idxs.push(ci);
-        } else if ci >= msg_start_char {
-            msg_idxs.push(ci - msg_start_char);
-        }
-        // sep char: skip (do not paint)
-    }
-    for (start, end) in char_indices_to_byte_ranges(tag, &tag_idxs) {
-        out.push(FieldSpan {
-            field: PaintField::Tag,
-            start,
-            end,
-        });
-    }
-    for (start, end) in char_indices_to_byte_ranges(msg, &msg_idxs) {
-        out.push(FieldSpan {
-            field: PaintField::Msg,
-            start,
-            end,
-        });
+    for (start, end) in ranges {
+        out.extend(map_hay_byte_range_to_fields(tag, msg, start, end));
     }
     out
 }
 
-/// Search/Highlight row match: fuzzy on tag+msg (or raw).
+/// Search/Highlight row match: contiguous substring on tag+msg (or raw), not fuzzy.
 pub fn matches_search_row(row: &EntryRow, pattern: &str) -> bool {
-    if pattern.is_empty() {
+    if pattern.trim().is_empty() {
         return false;
     }
-    fuzzy_match(&search_haystack_row(row), pattern)
+    substr_match(&search_haystack_row(row), pattern)
 }
 
 /// Filter/Exclude text chip: fuzzy on that field only; empty field → no match.
@@ -301,10 +371,9 @@ pub fn fuzzy_label_indices(labels: &[String], query: &str) -> Vec<usize> {
     scored.into_iter().map(|(i, _)| i).collect()
 }
 
-/// First fuzzy match byte range inside `text` (for preview line highlight).
+/// First Search/Highlight substring match byte range (for preview line highlight).
 pub fn first_match_byte_range(text: &str, pattern: &str) -> Option<(usize, usize)> {
-    let idxs = fuzzy_char_indices(text, pattern);
-    char_indices_to_byte_ranges(text, &idxs).into_iter().next()
+    substr_byte_ranges(text, pattern).into_iter().next()
 }
 
 #[cfg(test)]
@@ -362,10 +431,25 @@ mod tests {
     }
 
     #[test]
-    fn map_positions_split_tag_msg() {
-        let spans = map_search_positions("ab", "cd", "ab\tcd", "ac");
-        assert!(spans.iter().any(|s| s.field == PaintField::Tag));
-        assert!(spans.iter().any(|s| s.field == PaintField::Msg));
+    fn map_positions_substring_on_fields() {
+        let spans = map_search_positions("MyTag", "hello guild world", "", "guild");
+        assert!(spans.iter().any(|s| {
+            s.field == PaintField::Msg && &"hello guild world"[s.start..s.end] == "guild"
+        }));
+        // Fuzzy-style gaps must not paint / match for Search/Highlight.
+        assert!(map_search_positions("T", "gXuXiXlXd", "", "guild").is_empty());
+    }
+
+    #[test]
+    fn search_highlight_is_contiguous_not_fuzzy() {
+        let row = EntryRow::from_line("04-02 10:00:00.000  1234  5678 I Tag   : gu i ld elsewhere")
+            .unwrap();
+        assert!(!matches_search_row(&row, "guild"));
+        let row2 =
+            EntryRow::from_line("04-02 10:00:00.000  1234  5678 I Tag   : hello guild world")
+                .unwrap();
+        assert!(matches_search_row(&row2, "guild"));
+        assert!(matches_search_row(&row2, "hello world")); // AND substrings
     }
 
     #[test]

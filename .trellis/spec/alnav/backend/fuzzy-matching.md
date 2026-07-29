@@ -41,6 +41,8 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 | Engine | TUI text = **`nucleo-matcher` `Pattern` only** (ignore-case, `AtomKind::Fuzzy`). Whitespace splits atoms **AND** (fzf-style). Never match user queries via a single `Atom` (that treats spaces as literal). No fzf process. No TUI regex escape hatch. |
 | Case | Always ignore-case. No `config.toml` matcher keys. |
 | Search/Highlight haystack | `tag + '\t' + msg`; if both empty → `raw`. |
+| Search/Highlight match (LogList) | **Contiguous ignore-case substring** (`substr_match`), whitespace atoms AND. **Not** fuzzy — avoids `guild` matching scattered `gu`…`i`…`ld`. |
+| Search/Highlight paint | `substr_byte_ranges` → `map_search_positions`; not `fuzzy_char_indices`. |
 | Filter/Exclude text chip | Fuzzy **only that field**; empty field → chip does **not** match (no raw spoof). |
 | pid / tid | Exact string equality. |
 | level (row match) | Minimum level (`Level::from_str` + `>=`), same idea as CLI LevelGte. |
@@ -50,7 +52,7 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 | Highlight history candidates | `HighlightBox::candidate_indices` fuzzy on patterns; cap 6; score-ordered. |
 | Group compose | Chips AND (interactive) / same-field OR at startup; groups OR; excludes AND NOT; then lock → time_bound → view_focus. |
 | Small lists | `fuzzy_label_indices`: empty query → all indices; else score-sorted. |
-| Paint (log) | Fuzzy char indices mapped to `FieldSpan` on tag/msg (or Raw); `ui` must not use `Regex::find_iter` for highlight. |
+| Paint (log) | Substring ranges mapped to `FieldSpan` on tag/msg (or Raw); `ui` must not use fuzzy gaps or `Regex::find_iter`. |
 | Paint (candidate list) | `candidate_label_spans` uses `fuzzy_char_indices` ranges — not substring `contains`. |
 | File progressive | MVP: existing File **FilterBatch / Highlight Inc** scans apply `fuzzy` predicates per row; status may show `idx a/b`. **No** separate high-level `nucleo` worker / dual corpus required for MVP. |
 | Stream | Evaluate against current `rows`/`matched`; eviction drops reachability (no independent fuzzy corpus → no ghost hits). |
@@ -87,6 +89,7 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 
 | Wrong | Correct |
 |-------|---------|
+| TUI Highlight uses fuzzy gaps on LogList | `substr_match` / `map_search_positions` contiguous |
 | TUI Highlight uses `Regex::new` + `find_iter` | `fuzzy::map_search_positions` + theme highlight styles |
 | `Group.expr` drives `matches` | `chips_match_row` / `chip_matches_row` |
 | `Atom::new("guild viewmodel", …)` for user query | `Pattern::new(...)` so space → AND atoms |

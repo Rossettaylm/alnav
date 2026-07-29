@@ -12,7 +12,8 @@ pub struct HighlightGroup {
 }
 
 impl HighlightGroup {
-    /// Store a non-empty pattern for ignore-case nucleo fuzzy matching.
+    /// Store a non-empty pattern for ignore-case **contiguous substring** matching
+    /// on the log list (not fuzzy — see [`fuzzy::substr_match`]).
     /// Returns `None` if empty.
     pub fn from_pattern(pattern: &str) -> Option<Self> {
         if pattern.is_empty() {
@@ -25,7 +26,7 @@ impl HighlightGroup {
     }
 
     pub fn matches_msg(&self, msg: &str) -> bool {
-        fuzzy::fuzzy_match(msg, &self.pattern)
+        fuzzy::substr_match(msg, &self.pattern)
     }
 
     /// Match against tag+msg (or raw) haystack. Used by jump/n/N/stats and highlight.
@@ -36,7 +37,7 @@ impl HighlightGroup {
         if tag.is_empty() && msg.is_empty() {
             return false;
         }
-        fuzzy::fuzzy_match(&fuzzy::search_haystack(tag, msg, ""), &self.pattern)
+        fuzzy::substr_match(&fuzzy::search_haystack(tag, msg, ""), &self.pattern)
     }
 
     pub fn matches_entry(&self, row: &EntryRow) -> bool {
@@ -216,9 +217,10 @@ mod tests {
     }
 
     #[test]
-    fn test_highlight_group_fuzzy_and_metacharacters() {
+    fn test_highlight_group_substring_not_fuzzy() {
         let g = HighlightGroup::from_pattern("abc").unwrap();
-        assert!(g.matches_msg("aXbYc"));
+        assert!(!g.matches_msg("aXbYc"), "gaps must not match on LogList");
+        assert!(g.matches_msg("xxabcxx"));
 
         let g = HighlightGroup::from_pattern("(0)").unwrap();
         assert!(g.matches_msg("code=(0) ok"));
@@ -234,6 +236,10 @@ mod tests {
         let g = HighlightGroup::from_pattern("a|b").unwrap();
         assert!(g.matches_msg("x a|b y"));
         assert!(!g.matches_msg("x a y"));
+
+        let g = HighlightGroup::from_pattern("guild").unwrap();
+        assert!(!g.matches_msg("gu i ld"));
+        assert!(g.matches_msg("hello guild world"));
     }
 
     #[test]

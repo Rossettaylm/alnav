@@ -546,7 +546,7 @@ fn merge_colored_match(
     *result = tmp;
 }
 
-/// Collect fuzzy paint ranges for one field (tag or msg); later patterns overwrite.
+/// Collect substring paint ranges for one field (tag or msg); later patterns overwrite.
 fn collect_field_matches(
     row: &EntryRow,
     patterns: &[PaintPattern<'_>],
