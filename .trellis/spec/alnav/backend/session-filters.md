@@ -39,7 +39,7 @@ pub fn time_badge_label(&self) -> Option<String>;
 pub fn row_passes_filters(&self, row: &EntryRow) -> bool;
 // order: groups.matches → lock pid/tid → time_bound.matches → view_focus
 pub fn filter_active(&self) -> bool;
-// includes time_bound.is_some_and(TimeBound::is_active) and view_focus.is_some()
+// includes time_bound.is_some_and(TimeBound::is_active) and view_focus.is_active()
 
 // time_panel.rs
 pub fn TimePanel::open(rows: &VecDeque<EntryRow>, bound: Option<&TimeBound>) -> Option<Self>;
@@ -111,20 +111,21 @@ Assertion points: `Group` has no `time` field; `row_passes_filters` ANDs time af
 
 | Topic | Rule |
 |-------|------|
-| State | `Option<ViewFocus>` where `ViewFocus::{Highlight, Severe}` |
-| Keys | `f`+`h` / `f`+`e` (shares `pending_lock`); toggle same key clears; other replaces |
+| State | `ViewFocus { highlight, severe }` (independent bits; default both false) |
+| Keys | `f`+`h` / `f`+`e` (shares `pending_lock`); each key toggles its own bit; bits may both be on |
 | AND order | After groups → lock → time; before visible materialization |
+| Both on | Intersection: require highlight match **and** `row.severe` |
 | Highlight | Any **enabled** highlight group (`any_match`); none enabled → `NO HIGHLIGHT`, state unchanged |
 | Severe | `row.severe` (same as `e`/`E`) |
-| filter_active | Includes `view_focus.is_some()` |
+| filter_active | Includes `view_focus.is_active()` |
 | Esc resume | Does **not** clear `view_focus` |
 | Export | **Not** in `yc` / `build_cli_command` |
-| Status | `GLYPH_VIEW_FOCUS` + `HL` / `ERR` via `status_icon_value` |
+| Status | `GLYPH_VIEW_FOCUS` + `HL` / `ERR` / `HL+ERR` via `status_icon_value` |
 | Strip | Never a Filter/Exclude chip group |
 
 ### Tests Required
 
-- toggle / mutual exclusion / Esc keeps focus / `NO HIGHLIGHT`
+- independent toggle / both-on intersection / Esc keeps bits / `NO HIGHLIGHT`
 - chip filter then `fh` narrows to highlight hits within filter; second `fh` restores filter-only
 - dispatch `fh`/`fe`; Help L2_LOCK includes `h`/`e`; catalog `f h/e`
 

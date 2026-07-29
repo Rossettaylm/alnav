@@ -2230,11 +2230,11 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                     return;
                 }
                 KeyCode::Char('h') => {
-                    app.toggle_view_focus(app::ViewFocus::Highlight);
+                    app.toggle_view_focus(app::ViewFocusKind::Highlight);
                     return;
                 }
                 KeyCode::Char('e') => {
-                    app.toggle_view_focus(app::ViewFocus::Severe);
+                    app.toggle_view_focus(app::ViewFocusKind::Severe);
                     return;
                 }
                 KeyCode::Char(_) => {
@@ -4449,8 +4449,9 @@ mod dispatch_tests {
             &mut app,
             &[
                 "04-02 10:00:00.000  1  1 I Tag     : hit one",
-                "04-02 10:00:01.000  1  1 E Tag     : err",
-                "04-02 10:00:02.000  1  1 I Tag     : other",
+                "04-02 10:00:01.000  1  1 E Tag     : hit err",
+                "04-02 10:00:02.000  1  1 E Tag     : plain err",
+                "04-02 10:00:03.000  1  1 I Tag     : other",
             ],
         );
         app.push_or_find_highlight_group(
@@ -4459,24 +4460,34 @@ mod dispatch_tests {
         app.following = true;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
-        assert_eq!(app.view_focus, Some(app::ViewFocus::Highlight));
-        assert_eq!(app.visible.len(), 1);
+        assert!(app.view_focus.highlight);
+        assert!(!app.view_focus.severe);
+        assert_eq!(app.visible.len(), 2);
         assert!(!app.following);
 
+        // fe stacks: intersection of highlight ∩ severe.
         handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
-        assert_eq!(app.view_focus, Some(app::ViewFocus::Severe));
+        assert!(app.view_focus.highlight);
+        assert!(app.view_focus.severe);
         assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.current_row().unwrap().msg, "hit err");
 
         app.following = false;
         handle_normal_key(&mut app, &mut input, KeyCode::Esc);
         assert!(app.following);
-        assert_eq!(app.view_focus, Some(app::ViewFocus::Severe));
+        assert!(app.view_focus.highlight && app.view_focus.severe);
 
         handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
-        assert!(app.view_focus.is_none());
-        assert_eq!(app.visible.len(), 3);
+        assert!(app.view_focus.highlight);
+        assert!(!app.view_focus.severe);
+        assert_eq!(app.visible.len(), 2);
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
+        assert!(!app.view_focus.is_active());
+        assert_eq!(app.visible.len(), 4);
     }
 
     #[test]

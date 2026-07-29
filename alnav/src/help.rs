@@ -302,7 +302,7 @@ const CAT_SESSION: &[HintEntry] = &[
     HintEntry::new(
         "f h/e",
         "view",
-        "highlight-only / severe-only view focus (toggle)",
+        "highlight-only / severe-only (independent toggles; both = AND)",
     ),
     HintEntry::new(
         "t t/u",

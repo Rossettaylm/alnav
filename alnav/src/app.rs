@@ -25,12 +25,26 @@ const MATCHED_HARD_CAP: usize = 1_000_000;
 const DRAIN_BUDGET_PER_FRAME: usize = 4096;
 
 /// Global session view focus (`fh` / `fe`): AND-narrows `visible` after
-/// chip/exclude/lock/time. Not a Filter strip group; not exported by `yc`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewFocus {
+/// chip/exclude/lock/time. Bits are independent; both on = intersection.
+/// Not a Filter strip group; not exported by `yc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ViewFocus {
     /// Keep rows matching any **enabled** highlight group (tag/msg OR).
-    Highlight,
+    pub highlight: bool,
     /// Keep severe rows (E/F/crash), same predicate as `e`/`E`.
+    pub severe: bool,
+}
+
+impl ViewFocus {
+    pub fn is_active(self) -> bool {
+        self.highlight || self.severe
+    }
+}
+
+/// Which view-focus bit `fh` / `fe` toggles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewFocusKind {
+    Highlight,
     Severe,
 }
 
@@ -247,7 +261,7 @@ pub struct App {
     /// Global session time window (AND after lock). Not stored on Filter groups.
     pub time_bound: Option<TimeBound>,
     /// Session view focus (`fh`/`fe`); AND after time. Esc resume does not clear.
-    pub view_focus: Option<ViewFocus>,
+    pub view_focus: ViewFocus,
     /// Open `tt` time-window editor (`None` when closed).
     pub time_panel: Option<TimePanel>,
     /// When `Some`, LogList is in visual-line mode; value is the anchor
@@ -327,7 +341,7 @@ impl App {
             lock_pid: None,
             lock_tid: None,
             time_bound: None,
-            view_focus: None,
+            view_focus: ViewFocus::default(),
             time_panel: None,
             visual_anchor: None,
             following: true,
@@ -534,7 +548,7 @@ impl App {
         lock_pid: Option<&str>,
         lock_tid: Option<&str>,
         time_bound: Option<&crate::filter_model::TimeBound>,
-        view_focus: Option<ViewFocus>,
+        view_focus: ViewFocus,
         highlight_groups: &HighlightGroupList,
         reject_unparsed: bool,
     ) -> bool {
@@ -558,18 +572,11 @@ impl App {
                 return false;
             }
         }
-        match view_focus {
-            Some(ViewFocus::Highlight) => {
-                if !highlight_groups.any_match_entry(row) {
-                    return false;
-                }
-            }
-            Some(ViewFocus::Severe) => {
-                if !row.severe {
-                    return false;
-                }
-            }
-            None => {}
+        if view_focus.highlight && !highlight_groups.any_match_entry(row) {
+            return false;
+        }
+        if view_focus.severe && !row.severe {
+            return false;
         }
         true
     }
@@ -583,7 +590,7 @@ impl App {
             || self.lock_pid.is_some()
             || self.lock_tid.is_some()
             || self.time_bound.as_ref().is_some_and(|t| t.is_active())
-            || self.view_focus.is_some()
+            || self.view_focus.is_active()
     }
 
     /// Stream-only: the buffer `visible` indexes (`matched` when filter
@@ -1515,34 +1522,36 @@ impl App {
         self.pending_leader = false;
     }
 
-    /// Toggle session view focus (`fh` / `fe`). Same key again clears; the other
-    /// kind replaces. No enabled highlight → flash `NO HIGHLIGHT` and leave state.
-    /// Always sets `following=false` and rebuilds on a successful change.
-    pub fn toggle_view_focus(&mut self, focus: ViewFocus) {
+    /// Toggle one session view-focus bit (`fh` / `fe`). Same key again clears that
+    /// bit; the other bit is left alone. Enabling highlight with none enabled →
+    /// flash `NO HIGHLIGHT` and leave state. Sets `following=false` and rebuilds
+    /// on a successful change.
+    pub fn toggle_view_focus(&mut self, kind: ViewFocusKind) {
         self.pending_lock = false;
         self.pending_leader = false;
-        if focus == ViewFocus::Highlight
-            && self.view_focus != Some(ViewFocus::Highlight)
+        if kind == ViewFocusKind::Highlight
+            && !self.view_focus.highlight
             && !self.highlight_groups.groups.iter().any(|g| g.enabled)
         {
             self.set_flash("NO HIGHLIGHT");
             return;
         }
         self.following = false;
-        if self.view_focus == Some(focus) {
-            self.view_focus = None;
-        } else {
-            self.view_focus = Some(focus);
+        match kind {
+            ViewFocusKind::Highlight => self.view_focus.highlight = !self.view_focus.highlight,
+            ViewFocusKind::Severe => self.view_focus.severe = !self.view_focus.severe,
         }
         self.rebuild_visible();
         self.clear_flash();
     }
 
-    /// Status-bar short value when view focus is active (`HL` / `ERR`).
+    /// Status-bar short value when view focus is active (`HL` / `ERR` / `HL+ERR`).
     pub fn view_focus_badge_label(&self) -> Option<&'static str> {
-        match self.view_focus? {
-            ViewFocus::Highlight => Some("HL"),
-            ViewFocus::Severe => Some("ERR"),
+        match (self.view_focus.highlight, self.view_focus.severe) {
+            (true, true) => Some("HL+ERR"),
+            (true, false) => Some("HL"),
+            (false, true) => Some("ERR"),
+            (false, false) => None,
         }
     }
 
@@ -2459,38 +2468,47 @@ mod tests {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row_level_msg('I', "T", "hit one")).unwrap();
-        tx.send(row_level_msg('E', "T", "err")).unwrap();
+        tx.send(row_level_msg('E', "T", "hit err")).unwrap();
+        tx.send(row_level_msg('E', "T", "plain err")).unwrap();
         tx.send(row_level_msg('I', "T", "other")).unwrap();
         drop(tx);
         app.drain(&rx);
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
         app.following = true;
 
-        app.toggle_view_focus(ViewFocus::Highlight);
-        assert_eq!(app.view_focus, Some(ViewFocus::Highlight));
+        app.toggle_view_focus(ViewFocusKind::Highlight);
+        assert!(app.view_focus.highlight);
+        assert!(!app.view_focus.severe);
         assert!(!app.following);
         assert!(app.filter_active());
-        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.visible.len(), 2);
         assert_eq!(app.view_focus_badge_label(), Some("HL"));
 
-        app.toggle_view_focus(ViewFocus::Severe);
-        assert_eq!(app.view_focus, Some(ViewFocus::Severe));
+        // Independent: fe stacks with fh → intersection.
+        app.toggle_view_focus(ViewFocusKind::Severe);
+        assert!(app.view_focus.highlight);
+        assert!(app.view_focus.severe);
         assert_eq!(app.visible.len(), 1);
-        assert_eq!(app.current_row().unwrap().msg, "err");
-        assert_eq!(app.view_focus_badge_label(), Some("ERR"));
+        assert_eq!(app.current_row().unwrap().msg, "hit err");
+        assert_eq!(app.view_focus_badge_label(), Some("HL+ERR"));
 
         app.following = true;
         app.resume_following();
         assert!(app.following);
-        assert_eq!(
-            app.view_focus,
-            Some(ViewFocus::Severe),
-            "Esc resume keeps focus"
+        assert!(
+            app.view_focus.highlight && app.view_focus.severe,
+            "Esc resume keeps both focus bits"
         );
 
-        app.toggle_view_focus(ViewFocus::Severe);
-        assert!(app.view_focus.is_none());
-        assert_eq!(app.visible.len(), 3);
+        app.toggle_view_focus(ViewFocusKind::Highlight);
+        assert!(!app.view_focus.highlight);
+        assert!(app.view_focus.severe);
+        assert_eq!(app.visible.len(), 2, "fe-only keeps both severe rows");
+        assert_eq!(app.view_focus_badge_label(), Some("ERR"));
+
+        app.toggle_view_focus(ViewFocusKind::Severe);
+        assert!(!app.view_focus.is_active());
+        assert_eq!(app.visible.len(), 4);
     }
 
     #[test]
@@ -2500,8 +2518,8 @@ mod tests {
         tx.send(row("A")).unwrap();
         drop(tx);
         app.drain(&rx);
-        app.toggle_view_focus(ViewFocus::Highlight);
-        assert!(app.view_focus.is_none());
+        app.toggle_view_focus(ViewFocusKind::Highlight);
+        assert!(!app.view_focus.is_active());
         assert_eq!(app.status_msg.as_deref(), Some("NO HIGHLIGHT"));
         assert_eq!(app.visible.len(), 1);
     }
@@ -2534,8 +2552,8 @@ mod tests {
         app.rebuild_visible();
         assert_eq!(app.visible.len(), 2, "chip filter keeps both Keep rows");
 
-        app.toggle_view_focus(ViewFocus::Highlight);
-        assert_eq!(app.view_focus, Some(ViewFocus::Highlight));
+        app.toggle_view_focus(ViewFocusKind::Highlight);
+        assert!(app.view_focus.highlight);
         assert_eq!(
             app.visible.len(),
             1,
@@ -2543,8 +2561,8 @@ mod tests {
         );
         assert_eq!(app.current_row().unwrap().msg, "hit alpha");
 
-        app.toggle_view_focus(ViewFocus::Highlight);
-        assert!(app.view_focus.is_none());
+        app.toggle_view_focus(ViewFocusKind::Highlight);
+        assert!(!app.view_focus.is_active());
         assert_eq!(
             app.visible.len(),
             2,
@@ -3684,6 +3702,37 @@ mod file_store_tests {
         assert_eq!(app.cursor, 49);
         assert_eq!(app.row_at(0).unwrap().tag, "Tag0");
         assert_eq!(app.row_at(49).unwrap().tag, "Tag49");
+    }
+
+    /// Regression: `-f` filter scan must honor `fe` (ViewFocus.severe).
+    #[test]
+    fn test_view_focus_fe_file_mode_keeps_severe() {
+        let f = write_temp(
+            "04-02 10:00:00.000  1  1 I Tag     : hit one\n\
+             04-02 10:00:01.000  1  1 E Tag     : err\n\
+             04-02 10:00:02.000  1  1 I Tag     : other\n",
+        );
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        assert_eq!(app.visible_len(), 3);
+
+        app.toggle_view_focus(ViewFocusKind::Severe);
+        assert!(app.view_focus.severe);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("filter timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.visible_len(),
+            1,
+            "fe in file mode should keep the E/F (severe) row"
+        );
+        assert_eq!(app.row_at(0).unwrap().msg, "err");
     }
 
     #[test]

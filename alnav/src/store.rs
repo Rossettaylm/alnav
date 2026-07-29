@@ -771,6 +771,9 @@ fn spawn_filter_scan(
                 let cow = String::from_utf8_lossy(&mmap[start..end_b]);
                 let mut row = EntryRow::from_line_or_raw(cow.as_ref());
                 row.row_id = (i as u64).saturating_add(1);
+                // Match `parse_span`: from_line*_ leaves severe=false; ViewFocus.severe
+                // (`fe`) and any future pred that reads `row.severe` need it set here.
+                row.severe = is_severe_row(&row);
                 if pred(&row) {
                     batch.push(i);
                     if batch.len() >= FILTER_BATCH_HITS {

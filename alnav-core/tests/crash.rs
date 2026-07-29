@@ -34,6 +34,15 @@ fn test_no_crash() {
 }
 
 #[test]
+fn test_connect_signal_n_is_not_native_crash() {
+    // Regression: QT signal/slot prose must not trip `signal \d+` severe.
+    let line = "2026-07-22 14:33:23.148|1[8028]8252|8028|I|NTKernel|[I] signal_slot.h(99)::InternalConnect slot nt_1-1-1-KernelMsgService::OnNotifyRecentContactChangeForGuild connect signal 4";
+    let entry = LogEntry::parse(line).unwrap();
+    let d = CrashDetector::new();
+    assert!(d.detect(&entry).is_none());
+}
+
+#[test]
 fn test_parse_crash_with_stack() {
     let merged = "04-02 12:34:56.789  1234  5678 E AndroidRuntime: FATAL EXCEPTION: main\nProcess: com.example.app, PID: 1234\njava.lang.NullPointerException: Attempt to invoke\n\tat com.app.Foo.bar(Foo.java:12)\n\tat com.app.Baz.qux(Baz.java:34)\nCaused by: java.lang.IllegalStateException: bad\n\tat com.app.Inner.run(Inner.java:5)";
     let entry = LogEntry::parse(merged).unwrap();
