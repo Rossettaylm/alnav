@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# One-shot local install: build and install `alnav` (+ compat aliases) into ~/.cargo/bin
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$root"
+
+echo "==> cargo install --path ./alnav --locked --force"
+cargo install --path ./alnav --locked --force
+
+echo
+echo "==> installed:"
+command -v alnav
+alnav --version 2>/dev/null || true
