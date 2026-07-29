@@ -3,8 +3,8 @@ use crate::input::{Chip, ChipField};
 use crate::model::EntryRow;
 
 /// One AND-combined filter clause. `label` is precomputed display text; `chips`
-/// drives pill rendering, dedup, and fuzzy/exact matching. Session time window
-/// lives on [`crate::app::App`], not on groups.
+/// drives pill rendering, dedup, and substring/exact matching. Session time
+/// window lives on [`crate::app::App`], not on groups.
 #[derive(Debug, Clone)]
 pub struct Group {
     pub label: String,
@@ -239,18 +239,19 @@ mod tests {
     }
 
     #[test]
-    fn test_fuzzy_tag_chip() {
+    fn test_substring_tag_chip() {
         let list = GroupList {
             groups: vec![group_chips(
-                "tag:abc",
+                "tag:Tag",
                 vec![Chip {
                     field: ChipField::Tag,
-                    value: "abc".into(),
+                    value: "Tag".into(),
                 }],
             )],
             ..Default::default()
         };
-        assert!(list.matches(&row("aXbYc", "m", "I")));
+        assert!(list.matches(&row("MyTag", "m", "I")));
+        assert!(!list.matches(&row("aXbYc", "m", "I"))); // gaps ≠ substring
         assert!(!list.matches(&row("zzz", "m", "I")));
     }
 

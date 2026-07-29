@@ -313,7 +313,7 @@ const CAT_SESSION: &[HintEntry] = &[
     HintEntry::new(
         "y c",
         "export",
-        "yank filters as alnav grep CLI (literal approx; TUI uses fuzzy)",
+        "yank filters as alnav grep CLI (literal approx)",
     ),
     HintEntry::new(
         "y …",

@@ -513,7 +513,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 fn apply_yank(app: &mut App, text: String) {
     app.record_yank(text.clone());
     match copy_to_clipboard(&text) {
-        Ok(()) => app.set_flash("YANKED (approx, not fuzzy)"),
+        Ok(()) => app.set_flash("YANKED (approx)"),
         Err(e) => app.set_flash(format!("YANK FAILED: {e}")),
     }
 }
@@ -4846,8 +4846,8 @@ mod dispatch_tests {
         if let Some(msg) = app.status_msg.as_deref() {
             if !msg.starts_with("YANK FAILED") {
                 assert!(
-                    msg.contains("approx") && msg.contains("fuzzy"),
-                    "yc success flash must note fuzzy≠CLI: {msg}"
+                    msg.contains("approx"),
+                    "yc success flash must note approx export: {msg}"
                 );
             }
         }

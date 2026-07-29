@@ -1,7 +1,9 @@
-//! TUI fuzzy matching facade (nucleo-matcher).
+//! TUI text-matching facade (nucleo-matcher + substring helpers).
 //!
-//! CLI `alnav grep` keeps its own FilterChain/Expr path; all interactive
-//! text matching in the TUI goes through this module.
+//! CLI `alnav grep` keeps its own FilterChain/Expr path. Interactive TUI
+//! matching goes through this module:
+//! - **Substring** (`substr_match`): Filter/Exclude/Search/Highlight vs log rows
+//! - **Fuzzy** (`fuzzy_match` / `fuzzy_label_indices`): Picker/vocab/candidate lists
 
 use alnav::parser::Level;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
@@ -144,7 +146,8 @@ fn substr_atoms(pattern: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Ignore-case **contiguous** substring match. Whitespace splits atoms that are ANDed.
-/// Used for LogList Highlight/Search — not fuzzy (avoids `guild` matching `gu`…`i`…`ld`).
+/// Used for LogList Filter/Exclude/Search/Highlight — not fuzzy (avoids `0x1100`
+/// matching scattered `0`/`x`/`1` digits, or `guild` matching `gu`…`i`…`ld`).
 pub fn substr_match(haystack: &str, pattern: &str) -> bool {
     if pattern.trim().is_empty() {
         return true;
@@ -264,27 +267,28 @@ pub fn matches_search_row(row: &EntryRow, pattern: &str) -> bool {
     substr_match(&search_haystack_row(row), pattern)
 }
 
-/// Filter/Exclude text chip: fuzzy on that field only; empty field → no match.
-/// `pid`/`tid` exact; `level` is minimum level (same as CLI LevelGte).
+/// Filter/Exclude text chip: **contiguous substring** on that field only;
+/// empty field → no match. `pid`/`tid` exact; `level` is minimum level
+/// (same as CLI LevelGte). Fuzzy stays for Picker/vocab candidate lists only.
 pub fn chip_matches_row(chip: &Chip, row: &EntryRow) -> bool {
     match chip.field {
         ChipField::Tag => {
             if row.tag.is_empty() {
                 return false;
             }
-            fuzzy_match(&row.tag, &chip.value)
+            substr_match(&row.tag, &chip.value)
         }
         ChipField::Msg => {
             if row.msg.is_empty() {
                 return false;
             }
-            fuzzy_match(&row.msg, &chip.value)
+            substr_match(&row.msg, &chip.value)
         }
         ChipField::Pkg => {
             if row.pkg.is_empty() {
                 return false;
             }
-            fuzzy_match(&row.pkg, &chip.value)
+            substr_match(&row.pkg, &chip.value)
         }
         ChipField::Pid => row.pid == chip.value,
         ChipField::Tid => row.tid == chip.value,
@@ -425,9 +429,48 @@ mod tests {
         assert!(!chip_matches_row(&chip, &row));
         let tag = Chip {
             field: ChipField::Tag,
-            value: "Tg".into(), // fuzzy T…g
+            value: "Tag".into(),
         };
         assert!(chip_matches_row(&tag, &row));
+        // Non-contiguous must not match (was fuzzy before).
+        let gap = Chip {
+            field: ChipField::Tag,
+            value: "Tg".into(),
+        };
+        assert!(!chip_matches_row(&gap, &row));
+    }
+
+    #[test]
+    fn filter_chip_hex_is_contiguous_not_fuzzy() {
+        let line = "2026-07-22 16:43:02.809|1[14107]14321|14107|I|NTKernel|[I] sys_msg_mgr.cc(526)::NotifyRecvSysMsg [SysMsgMgr]->notify recv sys msg: msg_type=0xf01, sub_type=0x6d, is_guild_msg=1, is_online_msg=1 msg_id=0 chat_type=0 peer_uid= seq=0 random=0 time=0";
+        let row = EntryRow::from_line(line).unwrap();
+        let chips = vec![
+            Chip {
+                field: ChipField::Tag,
+                value: "NTkernel".into(),
+            },
+            Chip {
+                field: ChipField::Msg,
+                value: "0x1100".into(),
+            },
+        ];
+        // Fuzzy would stitch 0x + scattered 1/1/0/0; substring must reject.
+        assert!(fuzzy_match(&row.msg, "0x1100"));
+        assert!(!chips_match_row(&chips, &row, SameFieldOp::And));
+        assert!(chips_match_row(
+            &[
+                Chip {
+                    field: ChipField::Tag,
+                    value: "NTKernel".into(),
+                },
+                Chip {
+                    field: ChipField::Msg,
+                    value: "0x6d".into(),
+                },
+            ],
+            &row,
+            SameFieldOp::And
+        ));
     }
 
     #[test]

@@ -43,7 +43,7 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 | Search/Highlight haystack | `tag + '\t' + msg`; if both empty → `raw`. |
 | Search/Highlight match (LogList) | **Contiguous ignore-case substring** (`substr_match`), whitespace atoms AND. **Not** fuzzy — avoids `guild` matching scattered `gu`…`i`…`ld`. |
 | Search/Highlight paint | `substr_byte_ranges` → `map_search_positions`; not `fuzzy_char_indices`. |
-| Filter/Exclude text chip | Fuzzy **only that field**; empty field → chip does **not** match (no raw spoof). |
+| Filter/Exclude text chip | **Contiguous substring on that field only** (`substr_match`); empty field → chip does **not** match (no raw spoof). Same rationale as Search — hex/codes like `0x1100` must not stitch from scattered digits. |
 | pid / tid | Exact string equality. |
 | level (row match) | Minimum level (`Level::from_str` + `>=`), same idea as CLI LevelGte. |
 | level (New candidates) | Fuzzy over `V/D/I/W/E/F` via `fuzzy_str_labels`. |
@@ -54,11 +54,12 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 | Small lists | `fuzzy_label_indices`: empty query → all indices; else score-sorted. |
 | Paint (log) | Substring ranges mapped to `FieldSpan` on tag/msg (or Raw); `ui` must not use fuzzy gaps or `Regex::find_iter`. |
 | Paint (candidate list) | `candidate_label_spans` uses `fuzzy_char_indices` ranges — not substring `contains`. |
-| File progressive | MVP: existing File **FilterBatch / Highlight Inc** scans apply `fuzzy` predicates per row; status may show `idx a/b`. **No** separate high-level `nucleo` worker / dual corpus required for MVP. |
+| File progressive | MVP: existing File **FilterBatch / Highlight Inc** scans apply substring/chip predicates per row; status may show `idx a/b`. **No** separate high-level `nucleo` worker / dual corpus required for MVP. |
 | Stream | Evaluate against current `rows`/`matched`; eviction drops reachability (no independent fuzzy corpus → no ghost hits). |
-| Startup CLI → TUI | Initial group chips use same fuzzy + `SameFieldOp::Or` for multi-values. |
-| `yc` | Still emits literal `alnav grep` approx; flash must note approx / not fuzzy. |
+| Startup CLI → TUI | Initial group chips use same substring match + `SameFieldOp::Or` for multi-values. |
+| `yc` | Still emits literal `alnav grep` approx (encoding / ring truncation); flash notes `approx`. |
 | Group model | No `Group.expr` / `ExcludeEntry.expr` for TUI; chips are source of truth. |
+| Fuzzy vs substring split | **Fuzzy** = UI candidate narrowing (Picker, vocab, field/level/date/history lists). **Substring** = matching against log row content (Filter/Exclude/Search/Highlight). |
 
 ### 4. Validation & Error Matrix
 
@@ -68,35 +69,37 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 | Empty Picker query | Show all candidates |
 | Empty Filter chip field on row | That chip fails |
 | Unparsed row (empty tag+msg) | Search/Highlight uses `raw` |
-| `yc` success | Flash contains `approx` and `fuzzy` (e.g. `YANKED (approx, not fuzzy)`) |
+| `yc` success | Flash contains `approx` (e.g. `YANKED (approx)`) |
 
 ### 5. Good / Base / Bad
 
-- **Good**: `abr` fuzzy-hits `aXbYr`; Picker ranks by score; File filter Subset still line indices only.
-- **Base**: Small files feel like prior substring UX for contiguous queries.
-- **Bad**: Reintroduce `HighlightGroup.re: Regex` for TUI paint; compile Filter chips back to `Expr` for matching; spawn fzf `--listen`.
+- **Good**: Picker `abr` fuzzy-hits `aXbYr`; Filter `msg:0x1100` does **not** hit lines that only have scattered `0`/`x`/`1`; File filter Subset still line indices only.
+- **Base**: Contiguous Filter/Search queries feel like CLI substring/`-i`.
+- **Bad**: Reintroduce fuzzy gaps for Filter/Exclude/Search/Highlight on log rows; `HighlightGroup.re: Regex` for TUI paint; compile Filter chips back to `Expr` for matching; spawn fzf `--listen`.
 
 ### 6. Tests Required
 
-- `fuzzy_match` non-contiguous (`aXbYc` / `abc`)
+- `fuzzy_match` non-contiguous (`aXbYc` / `abc`) — candidate/list path only
 - Multi-word: `guild viewmodel` ⊨ `GuildFeedListViewModel` (fuzzy + vocab + highlight candidates)
 - `fuzzy_label_indices` empty + ignore-case
 - Field-scoped chip: tag chip does not match msg-only haystack
-- Highlight metacharacters treated as literals under fuzzy (no regex specials)
+- Filter chip hex contiguous (`0x1100` vs scattered digits)
+- Highlight metacharacters treated as literals under substring (no regex specials)
 - `yc` flash approx assertion (clipboard may fail in CI)
 
 ### 7. Wrong vs Correct
 
 | Wrong | Correct |
 |-------|---------|
+| TUI Filter/Exclude uses fuzzy gaps on log fields | `substr_match` / `chip_matches_row` contiguous |
 | TUI Highlight uses fuzzy gaps on LogList | `substr_match` / `map_search_positions` contiguous |
 | TUI Highlight uses `Regex::new` + `find_iter` | `fuzzy::map_search_positions` + theme highlight styles |
 | `Group.expr` drives `matches` | `chips_match_row` / `chip_matches_row` |
 | `Atom::new("guild viewmodel", …)` for user query | `Pattern::new(...)` so space → AND atoms |
 | `vocab` / New panel `contains` / `starts_with` | `fuzzy_score` / `fuzzy_label_indices` |
 | Candidate list substring paint | `fuzzy_char_indices` multi-range paint |
-| File materialises all `EntryRow` into a nucleo corpus for MVP | Per-row fuzzy inside existing bg Filter/Highlight scans + `Visible::Subset` |
-| `yc` claims exact CLI parity | Approx export + flash `not fuzzy` |
+| File materialises all `EntryRow` into a nucleo corpus for MVP | Per-row chip/substring preds inside existing bg Filter/Highlight scans + `Visible::Subset` |
+| `yc` claims exact CLI parity | Approx export + flash `approx` |
 
 ### Design decision (MVP)
 

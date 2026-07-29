@@ -171,7 +171,7 @@ impl InputBox {
         self.confirm_field_candidate()
     }
 
-    /// Build a `Group` from committed chips (fuzzy text / exact pid·tid·level).
+    /// Build a `Group` from committed chips (substring text / exact pid·tid·level).
     /// Does **not** commit the in-progress draft — caller uses Enter two-step:
     /// pending draft → `commit_draft_as_chip`, empty draft + chips → `build_group`.
     /// Returns `Ok(None)` if chips empty.
