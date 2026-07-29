@@ -45,9 +45,8 @@ fn lock_ok(app: &App, row: &EntryRow) -> bool {
 }
 
 fn excludes_allow(excludes: &[ExcludeEntry], row: &EntryRow) -> bool {
-    let le = row.as_log_entry();
     for e in excludes {
-        if e.enabled && e.expr.matches(&le) {
+        if e.enabled && e.matches(row) {
             return false;
         }
     }
@@ -263,7 +262,7 @@ pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<P
     };
 
     let indices = sample_near_anchor(app, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
-        app.row_passes_filters(row) && group.matches_row(&row.tag, &row.msg)
+        app.row_passes_filters(row) && group.matches_entry(row)
     });
 
     let mut out = Vec::with_capacity(indices.len());
@@ -272,14 +271,10 @@ pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<P
             continue;
         };
         let text = format_preview_line(&row);
-        let highlight = find_highlight_in_preview(&text, &group.re);
+        let highlight = crate::fuzzy::first_match_byte_range(&text, &group.pattern);
         out.push(PreviewLine { text, highlight });
     }
     Ok(out)
-}
-
-fn find_highlight_in_preview(text: &str, re: &regex::Regex) -> Option<(usize, usize)> {
-    re.find(text).map(|m| (m.start(), m.end()))
 }
 
 #[cfg(test)]

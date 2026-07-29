@@ -15,7 +15,7 @@
 | Inc | FilterBatch / IndexProgress grow shared `HighlightDomain`; worker continues from `scanned_vis` |
 | Invalidate | Filter rebuild, active highlight change, clear/delete → bump gen, clear hits, restart |
 | Stats / nN | `HighlightScanState` hit index (binary search); Stream keeps sync scan |
-| Wrap | `n`/`N` wrapscan only when `done`; while Inc, no wrap past known hits |
+| Wrap | `n`/`N` **no wrapscan** (boundary → `NO MORE`); while Inc, never jump past known hits |
 | Minimap | File paints severe from `severe_cache` + highlight from hit index — no per-frame `row_at` |
 
 ## Scenario: Severe prefetch

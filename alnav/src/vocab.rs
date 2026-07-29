@@ -1,6 +1,8 @@
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
+use crate::fuzzy;
+
 const TAG_CAP: usize = 5_000;
 const PKG_CAP: usize = 2_000;
 const MSG_CAP: usize = 100_000;
@@ -47,24 +49,27 @@ impl Vocab {
     }
 
     pub fn all_candidates(&self, query: &str) -> Vec<String> {
-        let q = query.to_lowercase();
         let mut seen = std::collections::HashSet::new();
-        let mut entries: Vec<(String, u32)> = self
+        let mut entries: Vec<(String, u32, u32)> = self
             .tag_cache
             .iter()
             .chain(self.pkg_cache.iter())
             .chain(self.msg_cache.iter())
-            .filter(|(k, _)| q.is_empty() || k.to_lowercase().contains(&q))
-            .filter_map(|(k, &v)| {
+            .filter_map(|(k, &freq)| {
+                let score = if query.is_empty() {
+                    Some(0)
+                } else {
+                    fuzzy::fuzzy_score(k, query)
+                }?;
                 if seen.insert(k.to_lowercase()) {
-                    Some((k.clone(), v))
+                    Some((k.clone(), score, freq))
                 } else {
                     None
                 }
             })
             .collect();
-        entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-        entries.into_iter().map(|(k, _)| k).collect()
+        sort_scored(&mut entries, query.is_empty());
+        entries.into_iter().map(|(k, _, _)| k).collect()
     }
 }
 
@@ -76,15 +81,33 @@ fn increment(cache: &mut LruCache<String, u32>, key: String) {
     }
 }
 
+/// Empty query: frequency desc. Non-empty: nucleo score desc, then freq, then key.
 fn filter_sort(cache: &LruCache<String, u32>, query: &str) -> Vec<String> {
-    let q = query.to_lowercase();
-    let mut entries: Vec<(&String, u32)> = cache
+    let mut entries: Vec<(String, u32, u32)> = cache
         .iter()
-        .filter(|(k, _)| q.is_empty() || k.to_lowercase().contains(&q))
-        .map(|(k, &v)| (k, v))
+        .filter_map(|(k, &freq)| {
+            let score = if query.is_empty() {
+                Some(0)
+            } else {
+                fuzzy::fuzzy_score(k, query)
+            }?;
+            Some((k.clone(), score, freq))
+        })
         .collect();
-    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-    entries.into_iter().map(|(k, _)| k.clone()).collect()
+    sort_scored(&mut entries, query.is_empty());
+    entries.into_iter().map(|(k, _, _)| k).collect()
+}
+
+fn sort_scored(entries: &mut [(String, u32, u32)], empty_query: bool) {
+    if empty_query {
+        entries.sort_unstable_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    } else {
+        entries.sort_unstable_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +142,17 @@ mod tests {
         v.feed("OtherTag", "", &[]);
         let cands = v.tag_candidates("app");
         assert_eq!(cands, vec!["MyApp".to_string()]);
+    }
+
+    #[test]
+    fn candidates_multi_word_fuzzy() {
+        let mut v = Vocab::default();
+        v.feed("GuildFeedListViewModel", "", &[]);
+        v.feed("OtherThing", "", &[]);
+        let cands = v.tag_candidates("guild viewmodel");
+        assert_eq!(cands, vec!["GuildFeedListViewModel".to_string()]);
+        let all = v.all_candidates("guild viewmodel");
+        assert_eq!(all, vec!["GuildFeedListViewModel".to_string()]);
     }
 
     #[test]

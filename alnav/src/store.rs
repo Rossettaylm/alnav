@@ -405,11 +405,7 @@ impl FileStore {
 
     /// Cancel any in-flight highlight scan and start a new Vis-domain scan.
     /// Returns the generation id.
-    pub fn start_highlight_scan(
-        &mut self,
-        domain: Arc<HighlightDomain>,
-        pattern: &regex::Regex,
-    ) -> u64 {
+    pub fn start_highlight_scan(&mut self, domain: Arc<HighlightDomain>, pattern: &str) -> u64 {
         self.highlight_cancel.store(true, Ordering::Release);
         drop(self.highlight_handle.take());
         self.highlight_cancel = Arc::new(AtomicBool::new(false));
@@ -429,7 +425,7 @@ impl FileStore {
             Arc::clone(&self.highlight_scanned),
             Arc::clone(&self.highlight_done),
             gen,
-            pattern.clone(),
+            pattern.to_string(),
             self.event_tx.clone(),
         );
         self.highlight_handle = Some(handle);

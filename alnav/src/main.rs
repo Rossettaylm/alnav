@@ -3,6 +3,7 @@ mod bookmark;
 mod config;
 mod export;
 mod filter_model;
+mod fuzzy;
 mod help;
 mod highlight_model;
 mod ingest;
@@ -34,16 +35,19 @@ use ratatui::layout::Position;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::Terminal;
 
-use alnav::expr::{Expr, SameFieldOp};
-
 use app::App;
 use filter_model::{Group, GroupList, TimeBound};
+use fuzzy::SameFieldOp;
 
 /// Page size for Ctrl-d/Ctrl-u paging in the log list. `App` doesn't track
 /// the rendered viewport height (that's `ui.rs`'s job at render time), so a
 /// fixed page size is the simplest correct approach.
 const PAGE_SIZE: isize = 10;
 const LEVEL_CANDIDATES: &[&str] = &["V", "D", "I", "W", "E", "F"];
+
+fn level_field_candidates(query: &str) -> Vec<String> {
+    crate::fuzzy::fuzzy_str_labels(LEVEL_CANDIDATES, query)
+}
 
 #[derive(Parser)]
 #[command(
@@ -120,22 +124,11 @@ fn validate_source(cli: &TuiCli) -> Result<(), String> {
     Ok(())
 }
 
-/// Startup chip/expr Filter group (no time — time goes to [`App::time_bound`]).
+/// Startup chip Filter group (no time — time goes to [`App::time_bound`]).
 fn initial_group(cli: &TuiCli) -> Result<GroupList, String> {
-    // TUI always compiles filters case-insensitively (CLI `-i` is a no-op).
+    // TUI always matches case-insensitively (CLI `-i` is a no-op).
     // Startup CLI multi-values keep OR (`msg:a|b` label); interactive chips use And.
-    let expr = Expr::from_filters(
-        &cli.tag,
-        &cli.msg,
-        &cli.pkg,
-        &cli.pid,
-        &cli.tid,
-        cli.level.as_deref(),
-        true,
-        SameFieldOp::Or,
-    )?;
-    if expr.is_none()
-        && cli.tag.is_empty()
+    if cli.tag.is_empty()
         && cli.msg.is_empty()
         && cli.pkg.is_empty()
         && cli.pid.is_empty()
@@ -143,6 +136,11 @@ fn initial_group(cli: &TuiCli) -> Result<GroupList, String> {
         && cli.level.is_none()
     {
         return Ok(GroupList::default());
+    }
+    if let Some(l) = &cli.level {
+        if alnav::parser::Level::from_str(l).is_none() {
+            return Err(format!("unknown level '{}', expected V/D/I/W/E/F", l));
+        }
     }
     let mut chips = Vec::new();
     for v in &cli.tag {
@@ -209,8 +207,8 @@ fn initial_group(cli: &TuiCli) -> Result<GroupList, String> {
         groups: vec![Group {
             label,
             chips,
-            expr,
             enabled: true,
+            same_field_op: SameFieldOp::Or,
         }],
         excludes: Vec::new(),
     })
@@ -515,7 +513,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 fn apply_yank(app: &mut App, text: String) {
     app.record_yank(text.clone());
     match copy_to_clipboard(&text) {
-        Ok(()) => app.set_flash("YANKED"),
+        Ok(()) => app.set_flash("YANKED (approx, not fuzzy)"),
         Err(e) => app.set_flash(format!("YANK FAILED: {e}")),
     }
 }
@@ -985,16 +983,7 @@ fn picker_render_data(app: &App) -> Option<PickerRenderData> {
                                 ChipField::Tag => app.vocab.tag_candidates(q),
                                 ChipField::Pkg => app.vocab.pkg_candidates(q),
                                 ChipField::Msg => app.vocab.msg_candidates(q),
-                                ChipField::Level => {
-                                    let ql = q.to_lowercase();
-                                    LEVEL_CANDIDATES
-                                        .iter()
-                                        .filter(|&&s| {
-                                            ql.is_empty() || s.to_lowercase().contains(&ql)
-                                        })
-                                        .map(|&s| s.to_string())
-                                        .collect()
-                                }
+                                ChipField::Level => level_field_candidates(q),
                                 ChipField::Pid | ChipField::Tid => vec![],
                             };
                             styles = vec![
@@ -1676,14 +1665,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                             ChipField::Tag => app.vocab.tag_candidates(input.draft.as_str()),
                             ChipField::Pkg => app.vocab.pkg_candidates(input.draft.as_str()),
                             ChipField::Msg => app.vocab.msg_candidates(input.draft.as_str()),
-                            ChipField::Level => {
-                                let ql = input.draft.to_lowercase();
-                                LEVEL_CANDIDATES
-                                    .iter()
-                                    .filter(|&&s| ql.is_empty() || s.to_lowercase().contains(&ql))
-                                    .map(|&s| s.to_string())
-                                    .collect()
-                            }
+                            ChipField::Level => level_field_candidates(input.draft.as_str()),
                             ChipField::Pid | ChipField::Tid => vec![],
                         }
                     };
@@ -1741,7 +1723,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                             ChipField::Tag => app.vocab.tag_candidates(input.draft.as_str()).len(),
                             ChipField::Pkg => app.vocab.pkg_candidates(input.draft.as_str()).len(),
                             ChipField::Msg => app.vocab.msg_candidates(input.draft.as_str()).len(),
-                            ChipField::Level => LEVEL_CANDIDATES.len(),
+                            ChipField::Level => level_field_candidates(input.draft.as_str()).len(),
                             ChipField::Pid | ChipField::Tid => 0,
                         }
                     };
@@ -2039,7 +2021,7 @@ fn handle_help_key(app: &mut App, key: event::KeyEvent) {
     }
 }
 
-/// Route keys to the open `ts` time panel. Esc / Ctrl+C cancel without applying
+/// Route keys to the open `tt` time panel. Esc / Ctrl+C cancel without applying
 /// and do not resume following (same draft-cancel convention as Picker).
 fn handle_time_panel_key(app: &mut App, key: event::KeyEvent) {
     use time_panel::TimePanelOutcome;
@@ -2225,8 +2207,8 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         }
     }
 
-    // Session lock operator pending (`f` + p/t/u). Esc clears pending only;
-    // does not clear lock or resume_following.
+    // Session lock / view-focus operator pending (`f` + p/t/u/h/e).
+    // Esc clears pending only; does not clear lock/focus or resume_following.
     if app.pending_lock {
         app.pending_lock = false;
         if app.focus == Focus::LogList {
@@ -2247,6 +2229,14 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                     app.clear_session_lock();
                     return;
                 }
+                KeyCode::Char('h') => {
+                    app.toggle_view_focus(app::ViewFocus::Highlight);
+                    return;
+                }
+                KeyCode::Char('e') => {
+                    app.toggle_view_focus(app::ViewFocus::Severe);
+                    return;
+                }
                 KeyCode::Char(_) => {
                     app.set_flash("UNKNOWN");
                     return;
@@ -2259,8 +2249,8 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         }
     }
 
-    // Global time-window operator pending (`t` + s/u). File mode only.
-    // Esc clears pending only; does not resume_following.
+    // Global time-window operator pending (`t` + t/u). File mode only.
+    // Esc clears pending only; does not resume_following. `s` abandoned → UNKNOWN.
     if app.pending_time {
         app.pending_time = false;
         if app.focus == Focus::LogList {
@@ -2269,7 +2259,7 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
                     app.cancel_time_pending();
                     return;
                 }
-                KeyCode::Char('s') => {
+                KeyCode::Char('t') => {
                     let _ = app.open_time_panel();
                     return;
                 }
@@ -2389,22 +2379,24 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             }
         }
         (Focus::LogList, KeyCode::Char('V')) => app.enter_visual_line(),
-        (Focus::LogList, KeyCode::Char('n')) => {
-            let _ = app.find_match(1);
-        }
-        (Focus::LogList, KeyCode::Char('N')) => {
-            let _ = app.find_match(-1);
-        }
-        (Focus::LogList, KeyCode::Char('e')) => {
-            if !app.find_severe(1) {
-                app.set_flash("NO ERROR");
-            }
-        }
-        (Focus::LogList, KeyCode::Char('E')) => {
-            if !app.find_severe(-1) {
-                app.set_flash("NO ERROR");
-            }
-        }
+        (Focus::LogList, KeyCode::Char('n')) => match app.find_match(1) {
+            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
+            _ => {}
+        },
+        (Focus::LogList, KeyCode::Char('N')) => match app.find_match(-1) {
+            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
+            _ => {}
+        },
+        (Focus::LogList, KeyCode::Char('e')) => match app.find_severe(1) {
+            app::FindJumpResult::None => app.set_flash("NO ERROR"),
+            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
+            app::FindJumpResult::Moved => {}
+        },
+        (Focus::LogList, KeyCode::Char('E')) => match app.find_severe(-1) {
+            app::FindJumpResult::None => app.set_flash("NO ERROR"),
+            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
+            app::FindJumpResult::Moved => {}
+        },
         (Focus::ChipStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Filter, -1),
         (Focus::ChipStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Filter, 1),
         (Focus::ExcludeStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Exclude, -1),
@@ -2667,8 +2659,8 @@ mod dispatch_tests {
         app.groups.groups.push(Group {
             label: "g".into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.highlight_groups
             .groups
@@ -2871,14 +2863,14 @@ mod dispatch_tests {
         app.groups.groups.push(Group {
             label: "first".into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.groups.groups.push(Group {
             label: "second".into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.open_unified_picker();
         handle_picker_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -2898,8 +2890,8 @@ mod dispatch_tests {
         app.groups.groups.push(Group {
             label: "f1".into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("h1").unwrap());
         app.open_unified_picker();
@@ -3700,8 +3692,8 @@ mod dispatch_tests {
         app.groups.groups.push(Group {
             label: "g".into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         assert!(app
             .groups
@@ -3799,8 +3791,8 @@ mod dispatch_tests {
         app.groups.groups.push(Group {
             label: "g0".into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.focus = app::Focus::ChipStrip;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
@@ -3817,8 +3809,8 @@ mod dispatch_tests {
         app.groups.groups.push(Group {
             label: "g0".into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.focus = app::Focus::ChipStrip;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
@@ -4158,8 +4150,15 @@ mod dispatch_tests {
         assert_eq!(app.cursor, 1);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 3);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
+        assert_eq!(app.cursor, 3);
+        assert_eq!(app.status_msg.as_deref(), Some("NO MORE"));
+        app.status_msg = None;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('N'));
         assert_eq!(app.cursor, 1);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('N'));
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.status_msg.as_deref(), Some("NO MORE"));
     }
 
     #[test]
@@ -4181,6 +4180,10 @@ mod dispatch_tests {
         assert_eq!(app.cursor, 1);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
         assert_eq!(app.cursor, 3);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
+        assert_eq!(app.cursor, 3);
+        assert_eq!(app.status_msg.as_deref(), Some("NO MORE"));
+        app.status_msg = None;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('E'));
         assert_eq!(app.cursor, 1);
         assert_ne!(app.status_msg.as_deref(), Some("NO ERROR"));
@@ -4217,8 +4220,9 @@ mod dispatch_tests {
         );
         handle_normal_key(&mut app, &mut input, KeyCode::Char('n'));
         assert_eq!(app.cursor, 2, "n follows search, not severe");
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
-        assert_eq!(app.cursor, 1, "e follows severe, not search");
+        // Severe is behind the cursor; forward `e` no longer wraps.
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('E'));
+        assert_eq!(app.cursor, 1, "E follows severe, not search");
     }
 
     #[test]
@@ -4435,6 +4439,44 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('x'));
         assert_eq!(app.status_msg.as_deref(), Some("UNKNOWN FIELD"));
         assert!(app.groups.groups.is_empty());
+    }
+
+    #[test]
+    fn test_fh_fe_view_focus_keys() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I Tag     : hit one",
+                "04-02 10:00:01.000  1  1 E Tag     : err",
+                "04-02 10:00:02.000  1  1 I Tag     : other",
+            ],
+        );
+        app.push_or_find_highlight_group(
+            highlight_model::HighlightGroup::from_pattern("hit").unwrap(),
+        );
+        app.following = true;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
+        assert_eq!(app.view_focus, Some(app::ViewFocus::Highlight));
+        assert_eq!(app.visible.len(), 1);
+        assert!(!app.following);
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
+        assert_eq!(app.view_focus, Some(app::ViewFocus::Severe));
+        assert_eq!(app.visible.len(), 1);
+
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Esc);
+        assert!(app.following);
+        assert_eq!(app.view_focus, Some(app::ViewFocus::Severe));
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
+        assert!(app.view_focus.is_none());
+        assert_eq!(app.visible.len(), 3);
     }
 
     #[test]
@@ -4789,10 +4831,19 @@ mod dispatch_tests {
         let cmd = app.last_yanked.as_deref().unwrap();
         assert!(cmd.starts_with("alnav grep -f 'demo.log' -i -e "));
         assert!(cmd.contains(r#"tag ~ "MyTag""#), "{cmd}");
+        // Clipboard may fail in headless/CI; flash still carries approx note on Ok.
+        if let Some(msg) = app.status_msg.as_deref() {
+            if !msg.starts_with("YANK FAILED") {
+                assert!(
+                    msg.contains("approx") && msg.contains("fuzzy"),
+                    "yc success flash must note fuzzy≠CLI: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_ts_opens_panel_in_file_mode_and_tu_clears() {
+    fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         app.export_source = export::ExportSource::File("demo.log".into());
@@ -4806,9 +4857,9 @@ mod dispatch_tests {
         app.following = true;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
         assert!(app.pending_time);
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
         assert!(app.time_panel.is_some());
-        assert!(!app.following, "ts opens with following=false");
+        assert!(!app.following, "tt opens with following=false");
         assert!(!app.pending_time);
 
         // Submit a one-sided since window via panel API (key path covered above).
@@ -4830,15 +4881,23 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_ts_empty_candidates_flashes_and_live_modes_hide_t() {
+    fn test_tt_empty_candidates_flashes_and_live_modes_hide_t() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         app.export_source = export::ExportSource::File("demo.log".into());
         // No rows → no date candidates.
         handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
         assert!(app.time_panel.is_none());
         assert_eq!(app.status_msg.as_deref(), Some("NO DATES"));
+
+        // Abandoned `ts` → UNKNOWN, panel stays closed.
+        app.status_msg = None;
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : a"]);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+        assert!(app.time_panel.is_none());
+        assert_eq!(app.status_msg.as_deref(), Some("UNKNOWN"));
 
         // Live modes: bare `t` must not arm time operator.
         app.export_source = export::ExportSource::Hdc { device: None };

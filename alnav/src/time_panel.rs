@@ -1,4 +1,4 @@
-//! Global session time-window editor (`ts` panel, file mode only).
+//! Global session time-window editor (`tt` panel, file mode only).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -115,7 +115,7 @@ impl Default for SideDraft {
     }
 }
 
-/// Open `ts` editor state.
+/// Open `tt` editor state.
 #[derive(Debug, Clone)]
 pub struct TimePanel {
     pub catalog: DateCatalog,
@@ -253,25 +253,22 @@ impl TimePanel {
         self.until.date_highlight
     }
 
-    /// Filtered date candidates for the given side (substring match on query).
+    /// Filtered date candidates for the given side (nucleo fuzzy on query).
     pub fn filtered_dates(&self, since_side: bool) -> Vec<&DateStats> {
         let q = self.side(since_side).date_query.as_str();
-        self.catalog
-            .dates
-            .iter()
-            .filter(|d| q.is_empty() || d.date.contains(q))
+        let labels: Vec<String> = self.catalog.dates.iter().map(|d| d.date.clone()).collect();
+        let idxs = crate::fuzzy::fuzzy_label_indices(&labels, q);
+        idxs.into_iter()
+            .filter_map(|i| self.catalog.dates.get(i))
             .collect()
     }
 
     fn sync_date_highlight(&mut self, since_side: bool) {
-        let q = self.side(since_side).date_query.as_str().to_string();
         let selected = self.side(since_side).selected_date.clone();
         let cur_hl = self.side(since_side).date_highlight;
         let filtered: Vec<String> = self
-            .catalog
-            .dates
-            .iter()
-            .filter(|d| q.is_empty() || d.date.contains(&q))
+            .filtered_dates(since_side)
+            .into_iter()
             .map(|d| d.date.clone())
             .collect();
         let new_hl = if filtered.is_empty() {

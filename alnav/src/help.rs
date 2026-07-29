@@ -121,7 +121,7 @@ const L1_LOGLIST: &[HintEntry] = &[
     HintEntry::short("n/N", "next"),
     HintEntry::short("e/E", "error"),
     HintEntry::new("m", "mark", "bookmark operator"),
-    HintEntry::new("f", "lock", "lock pid/tid"),
+    HintEntry::new("f", "focus", "lock pid/tid or view focus"),
     HintEntry::new("t", "time", "time window"),
     HintEntry::new("c", "chip", "filter from row"),
     HintEntry::new("C", "exclude", "exclude from row"),
@@ -141,7 +141,7 @@ const L1_LOGLIST_LIVE: &[HintEntry] = &[
     HintEntry::short("n/N", "next"),
     HintEntry::short("e/E", "error"),
     HintEntry::new("m", "mark", "bookmark operator"),
-    HintEntry::new("f", "lock", "lock pid/tid"),
+    HintEntry::new("f", "focus", "lock pid/tid or view focus"),
     HintEntry::new("c", "chip", "filter from row"),
     HintEntry::new("C", "exclude", "exclude from row"),
     HintEntry::new("y", "yank", "yank operator"),
@@ -217,12 +217,14 @@ const L2_BOOKMARK: &[HintEntry] = &[
 const L2_LOCK: &[HintEntry] = &[
     HintEntry::short("p", "pid"),
     HintEntry::short("t", "tid"),
+    HintEntry::short("h", "hl"),
+    HintEntry::short("e", "err"),
     HintEntry::short("u", "clear"),
     HintEntry::short("Esc", "cancel"),
 ];
 
 const L2_TIME: &[HintEntry] = &[
-    HintEntry::short("s", "set"),
+    HintEntry::short("t", "set"),
     HintEntry::short("u", "clear"),
     HintEntry::short("Esc", "cancel"),
 ];
@@ -298,12 +300,21 @@ const CAT_OPERATORS: &[HintEntry] = &[
 const CAT_SESSION: &[HintEntry] = &[
     HintEntry::new("f p/t/u", "lock", "lock pid / tid / clear"),
     HintEntry::new(
-        "t s/u",
+        "f h/e",
+        "view",
+        "highlight-only / severe-only view focus (toggle)",
+    ),
+    HintEntry::new(
+        "t t/u",
         "time",
         "set / clear global time window (file only)",
     ),
     HintEntry::new("ma/md", "bookmark", "add / remove bookmark on current row"),
-    HintEntry::new("y c", "export", "yank current filters as alnav grep CLI"),
+    HintEntry::new(
+        "y c",
+        "export",
+        "yank filters as alnav grep CLI (literal approx; TUI uses fuzzy)",
+    ),
     HintEntry::new(
         "y …",
         "yank field",
@@ -317,8 +328,8 @@ const CAT_OVERLAYS: &[HintEntry] = &[
     HintEntry::new("V", "visual", "visual line mode"),
     HintEntry::new(
         "Picker",
-        "fzf",
-        "type to filter; Enter toggle; ^X edit; Del delete",
+        "fuzzy",
+        "type to fuzzy-filter; Enter toggle; ^X edit; Del delete",
     ),
 ];
 
@@ -589,7 +600,7 @@ pub fn help_body_lines(app: &App) -> Vec<Line<'static>> {
             theme::help_section_style(is_active),
         )));
         for entry in section.entries {
-            if live && entry.key.starts_with("t s") {
+            if live && entry.key.starts_with("t t") {
                 continue;
             }
             if !live && entry.key == "^L" {

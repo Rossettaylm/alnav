@@ -24,6 +24,27 @@ const MATCHED_HARD_CAP: usize = 1_000_000;
 /// by a burst. Remaining rows stay in the ring for subsequent frames.
 const DRAIN_BUDGET_PER_FRAME: usize = 4096;
 
+/// Global session view focus (`fh` / `fe`): AND-narrows `visible` after
+/// chip/exclude/lock/time. Not a Filter strip group; not exported by `yc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewFocus {
+    /// Keep rows matching any **enabled** highlight group (tag/msg OR).
+    Highlight,
+    /// Keep severe rows (E/F/crash), same predicate as `e`/`E`.
+    Severe,
+}
+
+/// Outcome of `n`/`N` / `e`/`E` jumps (no wrapscan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindJumpResult {
+    /// Cursor moved to a further hit in the requested direction.
+    Moved,
+    /// At least one hit exists, but none further in that direction.
+    NoMore,
+    /// No hits at all (or jump unavailable — e.g. no active highlight).
+    None,
+}
+
 /// Visible-row index set into the active row source.
 ///
 /// Stream path (`--hdc` / `--adb`) always uses [`Visible::All`]: an identity mapping
@@ -74,10 +95,8 @@ fn group_to_exclude_entry(group: Group) -> Option<ExcludeEntry> {
         return None;
     }
     let chip = group.chips.first()?.clone();
-    let expr = group.expr?;
     Some(ExcludeEntry {
         chip,
-        expr,
         enabled: group.enabled,
     })
 }
@@ -227,7 +246,9 @@ pub struct App {
     pub lock_tid: Option<String>,
     /// Global session time window (AND after lock). Not stored on Filter groups.
     pub time_bound: Option<TimeBound>,
-    /// Open `ts` time-window editor (`None` when closed).
+    /// Session view focus (`fh`/`fe`); AND after time. Esc resume does not clear.
+    pub view_focus: Option<ViewFocus>,
+    /// Open `tt` time-window editor (`None` when closed).
     pub time_panel: Option<TimePanel>,
     /// When `Some`, LogList is in visual-line mode; value is the anchor
     /// index into `visible` (same coordinate space as `cursor`).
@@ -306,6 +327,7 @@ impl App {
             lock_pid: None,
             lock_tid: None,
             time_bound: None,
+            view_focus: None,
             time_panel: None,
             visual_anchor: None,
             following: true,
@@ -488,7 +510,7 @@ impl App {
         self.detail = DetailView::Closed;
     }
 
-    /// Chip filter → session lock (H8) → global time window. Used by drain/rebuild.
+    /// Chip filter → session lock (H8) → global time → view focus. Used by drain/rebuild.
     ///
     /// CLI-aligned: when any filter is active, unparsed (raw-fallback) rows never pass.
     pub fn row_passes_filters(&self, row: &EntryRow) -> bool {
@@ -498,6 +520,8 @@ impl App {
             self.lock_pid.as_deref(),
             self.lock_tid.as_deref(),
             self.time_bound.as_ref(),
+            self.view_focus,
+            &self.highlight_groups,
             /*reject_unparsed*/ self.filter_active(),
         )
     }
@@ -510,6 +534,8 @@ impl App {
         lock_pid: Option<&str>,
         lock_tid: Option<&str>,
         time_bound: Option<&crate::filter_model::TimeBound>,
+        view_focus: Option<ViewFocus>,
+        highlight_groups: &HighlightGroupList,
         reject_unparsed: bool,
     ) -> bool {
         if reject_unparsed && !row.is_parsed() {
@@ -532,18 +558,32 @@ impl App {
                 return false;
             }
         }
+        match view_focus {
+            Some(ViewFocus::Highlight) => {
+                if !highlight_groups.any_match_entry(row) {
+                    return false;
+                }
+            }
+            Some(ViewFocus::Severe) => {
+                if !row.severe {
+                    return false;
+                }
+            }
+            None => {}
+        }
         true
     }
 
-    /// Whether any include/exclude/lock/time filter is currently active. When false,
-    /// `visible` indexes `rows` directly (every row shown); when true, `visible`
-    /// indexes `matched` (only filter-passing rows, retained across `rows` churn).
+    /// Whether any include/exclude/lock/time/view-focus filter is currently active.
+    /// When false, `visible` indexes `rows` directly (every row shown); when true,
+    /// `visible` indexes `matched` (only filter-passing rows, retained across `rows` churn).
     pub fn filter_active(&self) -> bool {
         self.groups.has_any_enabled()
             || self.groups.excludes.iter().any(|e| e.enabled)
             || self.lock_pid.is_some()
             || self.lock_tid.is_some()
             || self.time_bound.as_ref().is_some_and(|t| t.is_active())
+            || self.view_focus.is_some()
     }
 
     /// Stream-only: the buffer `visible` indexes (`matched` when filter
@@ -753,12 +793,15 @@ impl App {
         let f = self.store.as_file()?;
         let p = f.progress();
         if !p.index_done {
-            let pct = if p.file_bytes == 0 {
-                100
+            // Approximate total lines from byte progress for status `idx a/b`.
+            let approx_total = if p.file_bytes == 0 || p.indexed_bytes == 0 {
+                p.indexed_lines.max(1)
             } else {
-                (p.indexed_bytes.saturating_mul(100) / p.file_bytes).min(100)
+                let est = (p.indexed_lines as u64).saturating_mul(p.file_bytes as u64)
+                    / (p.indexed_bytes as u64).max(1);
+                (est as usize).max(p.indexed_lines).max(1)
             };
-            return Some(format!("INDEX {}% ({} lines)", pct, p.indexed_lines));
+            return Some(format!("idx {}/{}", p.indexed_lines, approx_total));
         }
         if self.filter_active() && !p.filter_done {
             let total = p.indexed_lines.max(1);
@@ -841,7 +884,7 @@ impl App {
             .store
             .as_file_mut()
             .expect("file")
-            .start_highlight_scan(domain, &group.re);
+            .start_highlight_scan(domain, &group.pattern);
         self.highlight_scan.gen = gen;
         self.highlight_scan.done = false;
         self.match_stats_stale = true;
@@ -943,6 +986,8 @@ impl App {
                 let lock_pid = self.lock_pid.clone();
                 let lock_tid = self.lock_tid.clone();
                 let time_bound = self.time_bound.clone();
+                let view_focus = self.view_focus;
+                let highlight_groups = self.highlight_groups.clone();
                 let pred: crate::store::FilterPred = Arc::new(move |row: &EntryRow| {
                     Self::row_passes_filter_parts(
                         row,
@@ -950,6 +995,8 @@ impl App {
                         lock_pid.as_deref(),
                         lock_tid.as_deref(),
                         time_bound.as_ref(),
+                        view_focus,
+                        &highlight_groups,
                         true,
                     )
                 });
@@ -1468,7 +1515,38 @@ impl App {
         self.pending_leader = false;
     }
 
-    /// `ts`: open time panel from current rows / file sample. Returns false
+    /// Toggle session view focus (`fh` / `fe`). Same key again clears; the other
+    /// kind replaces. No enabled highlight → flash `NO HIGHLIGHT` and leave state.
+    /// Always sets `following=false` and rebuilds on a successful change.
+    pub fn toggle_view_focus(&mut self, focus: ViewFocus) {
+        self.pending_lock = false;
+        self.pending_leader = false;
+        if focus == ViewFocus::Highlight
+            && self.view_focus != Some(ViewFocus::Highlight)
+            && !self.highlight_groups.groups.iter().any(|g| g.enabled)
+        {
+            self.set_flash("NO HIGHLIGHT");
+            return;
+        }
+        self.following = false;
+        if self.view_focus == Some(focus) {
+            self.view_focus = None;
+        } else {
+            self.view_focus = Some(focus);
+        }
+        self.rebuild_visible();
+        self.clear_flash();
+    }
+
+    /// Status-bar short value when view focus is active (`HL` / `ERR`).
+    pub fn view_focus_badge_label(&self) -> Option<&'static str> {
+        match self.view_focus? {
+            ViewFocus::Highlight => Some("HL"),
+            ViewFocus::Severe => Some("ERR"),
+        }
+    }
+
+    /// `tt`: open time panel from current rows / file sample. Returns false
     /// when refused (empty date candidates). Sets `following=false` on success.
     pub fn open_time_panel(&mut self) -> bool {
         self.pending_time = false;
@@ -1800,55 +1878,92 @@ impl App {
         self.last_yanked = Some(text);
     }
 
+    /// Probe whether visible slot `idx` is severe. `None` = budget abort (flash set).
+    fn severe_at_visible(&mut self, idx: usize, sync_parses: &mut usize) -> Option<bool> {
+        if self.store.is_file() {
+            let src = self.source_idx_for_visible(idx)?;
+            match self.store.as_file().and_then(|f| f.severe_cached(src)) {
+                Some(v) => Some(v),
+                None => {
+                    if *sync_parses >= SEVERE_SYNC_PARSE_BUDGET {
+                        self.set_flash("SEVERE…");
+                        return None;
+                    }
+                    *sync_parses += 1;
+                    Some(self.row_at(idx).is_some_and(|r| r.severe))
+                }
+            }
+        } else {
+            Some(self.row_at(idx).is_some_and(|r| r.severe))
+        }
+    }
+
     /// Jump to the next (`dir > 0`) or previous (`dir < 0`) severe visible row
-    /// (level E/F or crash). Wraps like vim `wrapscan`. Independent of search.
+    /// (level E/F or crash). No wrapscan — at the last/first hit returns
+    /// [`FindJumpResult::NoMore`]. Independent of search.
     ///
     /// File mode prefers the severe cache / prefetch; synchronous `row_at` is
     /// budget-capped so a keypress never full-scans a huge visible set.
-    pub fn find_severe(&mut self, dir: i8) -> bool {
+    pub fn find_severe(&mut self, dir: i8) -> FindJumpResult {
         let n = self.visible.len();
         if n == 0 {
-            return false;
+            return FindJumpResult::None;
         }
-        let step: isize = if dir >= 0 { 1 } else { -1 };
-        let start = self.cursor as isize;
-        let file_mode = self.store.is_file();
         let mut sync_parses = 0usize;
-        for offset in 1..=n as isize {
-            let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            let is_severe = if file_mode {
-                let Some(src) = self.source_idx_for_visible(idx) else {
-                    continue;
-                };
-                match self.store.as_file().and_then(|f| f.severe_cached(src)) {
-                    Some(v) => v,
-                    None => {
-                        if sync_parses >= SEVERE_SYNC_PARSE_BUDGET {
-                            self.set_flash("SEVERE…");
-                            return false;
-                        }
-                        sync_parses += 1;
-                        self.row_at(idx).is_some_and(|r| r.severe)
+        let cursor = self.cursor;
+
+        if dir >= 0 {
+            for idx in (cursor + 1)..n {
+                match self.severe_at_visible(idx, &mut sync_parses) {
+                    Some(true) => {
+                        self.following = false;
+                        self.cursor = idx;
+                        self.match_stats_stale = true;
+                        return FindJumpResult::Moved;
                     }
+                    Some(false) => {}
+                    None => return FindJumpResult::None,
                 }
-            } else {
-                self.row_at(idx).is_some_and(|r| r.severe)
-            };
-            if is_severe {
-                self.following = false;
-                self.cursor = idx;
-                self.match_stats_stale = true;
-                return true;
+            }
+        } else {
+            for idx in (0..cursor).rev() {
+                match self.severe_at_visible(idx, &mut sync_parses) {
+                    Some(true) => {
+                        self.following = false;
+                        self.cursor = idx;
+                        self.match_stats_stale = true;
+                        return FindJumpResult::Moved;
+                    }
+                    Some(false) => {}
+                    None => return FindJumpResult::None,
+                }
             }
         }
-        false
+
+        // Already on a hit → NoMore (avoids a full re-probe / budget abort).
+        match self.severe_at_visible(cursor, &mut sync_parses) {
+            Some(true) => return FindJumpResult::NoMore,
+            Some(false) => {}
+            None => return FindJumpResult::None,
+        }
+        for idx in 0..n {
+            if idx == cursor {
+                continue;
+            }
+            match self.severe_at_visible(idx, &mut sync_parses) {
+                Some(true) => return FindJumpResult::NoMore,
+                Some(false) => {}
+                None => return FindJumpResult::None,
+            }
+        }
+        FindJumpResult::None
     }
 
     /// Jump to the next (`dir > 0`) or previous (`dir < 0`) visible row whose
-    /// tag or msg matches the globally active search group. Wraps like vim `wrapscan`.
-    pub fn find_match(&mut self, dir: i8) -> bool {
+    /// tag or msg matches the globally active search group. No wrapscan.
+    pub fn find_match(&mut self, dir: i8) -> FindJumpResult {
         let Some(active_idx) = self.active_highlight else {
-            return false;
+            return FindJumpResult::None;
         };
         if !self
             .highlight_groups
@@ -1856,37 +1971,56 @@ impl App {
             .get(active_idx)
             .is_some_and(|g| g.enabled)
         {
-            return false;
+            return FindJumpResult::None;
         }
         if self.store.is_file() {
-            let Some(idx) = self.highlight_scan.find_next(self.cursor, dir) else {
-                return false;
+            return match self.highlight_scan.find_next(self.cursor, dir) {
+                Some(idx) => {
+                    self.following = false;
+                    self.cursor = idx;
+                    self.match_stats_stale = true;
+                    FindJumpResult::Moved
+                }
+                None if self.highlight_scan.hits.is_empty() => FindJumpResult::None,
+                None => FindJumpResult::NoMore,
             };
-            self.following = false;
-            self.cursor = idx;
-            self.match_stats_stale = true;
-            return true;
         }
         let n = self.visible.len();
         if n == 0 {
-            return false;
+            return FindJumpResult::None;
         }
-        let step: isize = if dir >= 0 { 1 } else { -1 };
-        let start = self.cursor as isize;
-        for offset in 1..=n as isize {
-            let idx = (start + offset * step).rem_euclid(n as isize) as usize;
-            let Some(row) = self.row_at(idx) else {
-                continue;
-            };
-            let hit = self.highlight_groups.groups[active_idx].matches_row(&row.tag, &row.msg);
-            if hit {
-                self.following = false;
-                self.cursor = idx;
-                self.match_stats_stale = true;
-                return true;
+        let cursor = self.cursor;
+        if dir >= 0 {
+            for idx in (cursor + 1)..n {
+                if self.visible_slot_matches_active(idx, active_idx) {
+                    self.following = false;
+                    self.cursor = idx;
+                    self.match_stats_stale = true;
+                    return FindJumpResult::Moved;
+                }
+            }
+        } else {
+            for idx in (0..cursor).rev() {
+                if self.visible_slot_matches_active(idx, active_idx) {
+                    self.following = false;
+                    self.cursor = idx;
+                    self.match_stats_stale = true;
+                    return FindJumpResult::Moved;
+                }
             }
         }
-        false
+        if (0..n).any(|idx| self.visible_slot_matches_active(idx, active_idx)) {
+            FindJumpResult::NoMore
+        } else {
+            FindJumpResult::None
+        }
+    }
+
+    fn visible_slot_matches_active(&self, idx: usize, active_idx: usize) -> bool {
+        let Some(row) = self.row_at(idx) else {
+            return false;
+        };
+        self.highlight_groups.groups[active_idx].matches_entry(&row)
     }
 
     /// Jump to the first visible row matching search group `group_idx`.
@@ -1918,7 +2052,7 @@ impl App {
             let Some(row) = self.row_at(idx) else {
                 continue;
             };
-            if group.matches_row(&row.tag, &row.msg) {
+            if group.matches_entry(&row) {
                 self.following = false;
                 self.cursor = idx;
                 self.match_stats_stale = true;
@@ -2205,7 +2339,7 @@ impl App {
             let Some(row) = self.row_at(idx) else {
                 continue;
             };
-            if group.matches_row(&row.tag, &row.msg) {
+            if group.matches_entry(&row) {
                 total += 1;
                 if idx == self.cursor {
                     current = Some(total);
@@ -2220,20 +2354,30 @@ impl App {
 mod tests {
     use super::*;
     use crate::filter_model::Group;
-    use alnav::expr::Expr;
     use std::sync::mpsc;
 
     fn row(tag: &str) -> EntryRow {
         EntryRow::from_line(&format!("04-02 10:00:00.000  1  1 I {tag}   : m")).unwrap()
     }
 
-    fn filter_group(label: &str, expr: Option<Expr>) -> Group {
+    fn tag_group(tag: &str) -> Group {
+        use crate::fuzzy::SameFieldOp;
+        use crate::input::{Chip, ChipField};
         Group {
-            label: label.into(),
-            chips: Vec::new(),
-            expr,
+            label: format!("tag:{tag}"),
+            chips: vec![Chip {
+                field: ChipField::Tag,
+                value: tag.into(),
+            }],
             enabled: true,
+            same_field_op: SameFieldOp::And,
         }
+    }
+
+    fn filter_group(label: &str, tag: &str) -> Group {
+        let mut g = tag_group(tag);
+        g.label = label.into();
+        g
     }
 
     #[test]
@@ -2310,9 +2454,114 @@ mod tests {
     }
 
     #[test]
+    fn test_view_focus_highlight_and_severe_toggle() {
+        use crate::highlight_model::HighlightGroup;
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_level_msg('I', "T", "hit one")).unwrap();
+        tx.send(row_level_msg('E', "T", "err")).unwrap();
+        tx.send(row_level_msg('I', "T", "other")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
+        app.following = true;
+
+        app.toggle_view_focus(ViewFocus::Highlight);
+        assert_eq!(app.view_focus, Some(ViewFocus::Highlight));
+        assert!(!app.following);
+        assert!(app.filter_active());
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.view_focus_badge_label(), Some("HL"));
+
+        app.toggle_view_focus(ViewFocus::Severe);
+        assert_eq!(app.view_focus, Some(ViewFocus::Severe));
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.current_row().unwrap().msg, "err");
+        assert_eq!(app.view_focus_badge_label(), Some("ERR"));
+
+        app.following = true;
+        app.resume_following();
+        assert!(app.following);
+        assert_eq!(
+            app.view_focus,
+            Some(ViewFocus::Severe),
+            "Esc resume keeps focus"
+        );
+
+        app.toggle_view_focus(ViewFocus::Severe);
+        assert!(app.view_focus.is_none());
+        assert_eq!(app.visible.len(), 3);
+    }
+
+    #[test]
+    fn test_view_focus_fh_without_highlight_flashes() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.toggle_view_focus(ViewFocus::Highlight);
+        assert!(app.view_focus.is_none());
+        assert_eq!(app.status_msg.as_deref(), Some("NO HIGHLIGHT"));
+        assert_eq!(app.visible.len(), 1);
+    }
+
+    #[test]
+    fn test_view_focus_fh_ands_after_chip_filter() {
+        use crate::highlight_model::HighlightGroup;
+        use crate::input::{build_group_from_chips, Chip, ChipField};
+
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row_level_msg('I', "Keep", "hit alpha")).unwrap();
+        tx.send(row_level_msg('I', "Keep", "plain")).unwrap();
+        tx.send(row_level_msg('I', "Drop", "hit beta")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+
+        app.groups.groups.push(
+            build_group_from_chips(
+                vec![Chip {
+                    field: ChipField::Tag,
+                    value: "Keep".into(),
+                }],
+                true,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
+        app.rebuild_visible();
+        assert_eq!(app.visible.len(), 2, "chip filter keeps both Keep rows");
+
+        app.toggle_view_focus(ViewFocus::Highlight);
+        assert_eq!(app.view_focus, Some(ViewFocus::Highlight));
+        assert_eq!(
+            app.visible.len(),
+            1,
+            "fh keeps only highlight hits inside filter"
+        );
+        assert_eq!(app.current_row().unwrap().msg, "hit alpha");
+
+        app.toggle_view_focus(ViewFocus::Highlight);
+        assert!(app.view_focus.is_none());
+        assert_eq!(
+            app.visible.len(),
+            2,
+            "second fh restores chip-filter-only view"
+        );
+    }
+
+    fn row_level_msg(level: char, tag: &str, msg: &str) -> EntryRow {
+        EntryRow::from_line(&format!(
+            "04-02 10:00:00.000  1234  5678 {level} {tag}   : {msg}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
     fn test_di_group_zero_does_not_clear_time_bound() {
         use crate::input::{Chip, ChipField};
-        use alnav::expr::Expr;
 
         let mut app = App::new(100);
         app.time_bound = Some(TimeBound {
@@ -2325,8 +2574,8 @@ mod tests {
                 field: ChipField::Tag,
                 value: "A".into(),
             }],
-            expr: Some(Expr::parse("tag~A", true).unwrap()),
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         let (tx, rx) = mpsc::channel();
         tx.send(row("A")).unwrap(); // 10:00:00 — excluded by since
@@ -2375,10 +2624,7 @@ mod tests {
     fn test_visible_all_identity_under_filter_active() {
         let mut app = App::new(100);
         app.groups = GroupList {
-            groups: vec![filter_group(
-                "keep-A",
-                Some(Expr::parse("tag~A", false).unwrap()),
-            )],
+            groups: vec![filter_group("keep-A", "A")],
             excludes: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
@@ -2464,10 +2710,7 @@ mod tests {
         let mut app = App::new(100);
         app.matched_cap = 2;
         app.groups = GroupList {
-            groups: vec![filter_group(
-                "keep-A",
-                Some(Expr::parse("tag~A", false).unwrap()),
-            )],
+            groups: vec![filter_group("keep-A", "A")],
             excludes: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
@@ -2529,10 +2772,7 @@ mod tests {
 
         let mut app = App::new(100);
         app.groups = GroupList {
-            groups: vec![filter_group(
-                "keep-A",
-                Some(Expr::parse("tag~A", false).unwrap()),
-            )],
+            groups: vec![filter_group("keep-A", "A")],
             excludes: Vec::new(),
         };
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("err").unwrap());
@@ -2586,10 +2826,7 @@ mod tests {
     fn test_cursor_unaffected_when_evicted_row_was_already_filtered_out() {
         let mut app = App::new(3);
         app.groups = GroupList {
-            groups: vec![filter_group(
-                "x",
-                Some(Expr::parse("tag~X", false).unwrap()),
-            )],
+            groups: vec![filter_group("x", "X")],
             excludes: Vec::new(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2623,10 +2860,7 @@ mod tests {
         // wash out previously matched rows.
         let mut app = App::new(2);
         app.groups = GroupList {
-            groups: vec![filter_group(
-                "keep-A",
-                Some(Expr::parse("tag~A", false).unwrap()),
-            )],
+            groups: vec![filter_group("keep-A", "A")],
             excludes: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
@@ -2661,10 +2895,7 @@ mod tests {
         // Now activate a filter matching `A`; rebuild scans only current rows
         // ([B,A]) — the first `A` (already evicted from `rows`) is gone.
         app.groups = GroupList {
-            groups: vec![filter_group(
-                "keep-A",
-                Some(Expr::parse("tag~A", false).unwrap()),
-            )],
+            groups: vec![filter_group("keep-A", "A")],
             excludes: Vec::new(),
         };
         app.rebuild_visible();
@@ -2678,14 +2909,13 @@ mod tests {
 mod focus_tests {
     use super::*;
     use crate::filter_model::Group;
-    use alnav::expr::Expr;
 
     fn g(label: &str) -> Group {
         Group {
             label: label.into(),
             chips: Vec::new(),
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         }
     }
 
@@ -2756,9 +2986,12 @@ mod focus_tests {
         let mut app = App::new(100);
         app.groups.groups.push(Group {
             label: "a".into(),
-            chips: Vec::new(),
-            expr: Some(Expr::parse("tag~A", false).unwrap()),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Tag,
+                value: "A".into(),
+            }],
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I A   : m").unwrap())
@@ -2778,7 +3011,6 @@ mod focus_tests {
 mod follow_tests {
     use super::*;
     use crate::filter_model::Group;
-    use alnav::expr::Expr;
     use std::sync::mpsc;
 
     fn row(tag: &str) -> EntryRow {
@@ -2852,9 +3084,12 @@ mod follow_tests {
         app.groups = GroupList {
             groups: vec![Group {
                 label: "a".into(),
-                chips: Vec::new(),
-                expr: Some(Expr::parse("tag~A", false).unwrap()),
+                chips: vec![crate::input::Chip {
+                    field: crate::input::ChipField::Tag,
+                    value: "A".into(),
+                }],
                 enabled: true,
+                same_field_op: crate::fuzzy::SameFieldOp::And,
             }],
             excludes: Vec::new(),
         };
@@ -2884,7 +3119,7 @@ mod highlight_tests {
     }
 
     #[test]
-    fn test_find_match_next_prev_and_wrap() {
+    fn test_find_match_next_prev_and_no_wrap() {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row_with_msg("T", "aaa")).unwrap();
@@ -2897,14 +3132,15 @@ mod highlight_tests {
         app.cursor = 0;
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
 
-        assert!(app.find_match(1));
+        assert_eq!(app.find_match(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 1);
-        assert!(app.find_match(1));
+        assert_eq!(app.find_match(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 3);
-        assert!(app.find_match(1)); // wrap
+        assert_eq!(app.find_match(1), FindJumpResult::NoMore); // no wrap
+        assert_eq!(app.cursor, 3);
+        app.cursor = 1;
+        assert_eq!(app.find_match(-1), FindJumpResult::NoMore); // no wrap backward
         assert_eq!(app.cursor, 1);
-        assert!(app.find_match(-1)); // wrap backward to last
-        assert_eq!(app.cursor, 3);
     }
 
     #[test]
@@ -2914,7 +3150,7 @@ mod highlight_tests {
         tx.send(row_with_msg("T", "x")).unwrap();
         drop(tx);
         app.drain(&rx);
-        assert!(!app.find_match(1));
+        assert_eq!(app.find_match(1), FindJumpResult::None);
     }
 
     #[test]
@@ -3012,8 +3248,8 @@ mod highlight_tests {
         assert!(app.jump_first_match());
         assert_eq!(app.cursor, 1);
         assert_eq!(app.current_row().unwrap().tag, "MyTag");
-        assert!(app.find_match(1));
-        assert_eq!(app.cursor, 1, "only one tag hit; wrap lands on same row");
+        assert_eq!(app.find_match(1), FindJumpResult::NoMore);
+        assert_eq!(app.cursor, 1, "only one tag hit; no wrap — stay put");
     }
 
     #[test]
@@ -3025,7 +3261,7 @@ mod highlight_tests {
         app.drain(&rx);
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
         app.highlight_groups.groups[0].enabled = false;
-        assert!(!app.find_match(1));
+        assert_eq!(app.find_match(1), FindJumpResult::None);
         assert!(app.highlight_match_stats().is_none());
     }
 
@@ -3057,9 +3293,9 @@ mod highlight_tests {
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("foo").unwrap());
         app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
         // active is "bar" — n must not land on "foo"
-        assert!(app.find_match(1));
+        assert_eq!(app.find_match(1), FindJumpResult::Moved);
         assert_eq!(app.current_row().unwrap().msg, "bar mid");
-        assert!(app.find_match(1)); // wrap to same hit
+        assert_eq!(app.find_match(1), FindJumpResult::NoMore); // no wrap
         assert_eq!(app.current_row().unwrap().msg, "bar mid");
     }
 
@@ -3288,7 +3524,6 @@ mod flash_tests {
 mod severe_tests {
     use super::*;
     use crate::filter_model::Group;
-    use alnav::expr::{Expr, SameFieldOp};
     use std::sync::mpsc;
 
     fn row_level(level: char, tag: &str, msg: &str) -> EntryRow {
@@ -3298,17 +3533,28 @@ mod severe_tests {
         .unwrap()
     }
 
-    fn filter_group(label: &str, expr: Option<Expr>) -> Group {
+    fn tag_group(tag: &str) -> Group {
+        use crate::fuzzy::SameFieldOp;
+        use crate::input::{Chip, ChipField};
         Group {
-            label: label.into(),
-            chips: Vec::new(),
-            expr,
+            label: format!("tag:{tag}"),
+            chips: vec![Chip {
+                field: ChipField::Tag,
+                value: tag.into(),
+            }],
             enabled: true,
+            same_field_op: SameFieldOp::And,
         }
     }
 
+    fn filter_group(label: &str, tag: &str) -> Group {
+        let mut g = tag_group(tag);
+        g.label = label.into();
+        g
+    }
+
     #[test]
-    fn test_find_severe_next_prev_and_wrap() {
+    fn test_find_severe_next_prev_and_no_wrap() {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row_level('I', "T", "ok")).unwrap();
@@ -3320,15 +3566,16 @@ mod severe_tests {
         app.following = false;
         app.cursor = 0;
 
-        assert!(app.find_severe(1));
+        assert_eq!(app.find_severe(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 1);
         assert!(!app.following);
-        assert!(app.find_severe(1));
+        assert_eq!(app.find_severe(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 3);
-        assert!(app.find_severe(1)); // wrap
+        assert_eq!(app.find_severe(1), FindJumpResult::NoMore); // no wrap
+        assert_eq!(app.cursor, 3);
+        app.cursor = 1;
+        assert_eq!(app.find_severe(-1), FindJumpResult::NoMore); // no wrap backward
         assert_eq!(app.cursor, 1);
-        assert!(app.find_severe(-1)); // wrap backward to last
-        assert_eq!(app.cursor, 3);
     }
 
     #[test]
@@ -3340,7 +3587,7 @@ mod severe_tests {
         app.drain(&rx);
         app.following = true;
         app.cursor = 0;
-        assert!(!app.find_severe(1));
+        assert_eq!(app.find_severe(1), FindJumpResult::None);
         assert_eq!(app.cursor, 0);
         assert!(app.following, "no jump must not clear following");
     }
@@ -3355,26 +3602,14 @@ mod severe_tests {
         drop(tx);
         app.drain(&rx);
 
-        let expr = Expr::from_filters(
-            &[String::from("Keep")],
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            true,
-            SameFieldOp::And,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(app.push_filter_group(filter_group("tag=Keep", Some(expr))));
+        assert!(app.push_filter_group(filter_group("tag=Keep", "Keep")));
         app.rebuild_visible();
         assert_eq!(app.visible.len(), 2);
         app.following = false;
         app.cursor = 0; // on Keep E
 
-        assert!(app.find_severe(1));
-        // Only one severe in visible; wrap lands on same Keep E (index 0), not Drop.
+        assert_eq!(app.find_severe(1), FindJumpResult::NoMore);
+        // Only one severe in visible; no wrap — stay on Keep E.
         assert_eq!(app.cursor, 0);
         assert_eq!(app.current_row().unwrap().tag, "Keep");
     }
@@ -3394,7 +3629,7 @@ mod severe_tests {
         assert!(is_severe_row(
             &app.view_source()[app.source_idx_for_visible(1).unwrap()]
         ));
-        assert!(app.find_severe(1));
+        assert_eq!(app.find_severe(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 1);
     }
 }
@@ -3423,7 +3658,6 @@ mod vocab_tests {
 mod file_store_tests {
     use super::*;
     use crate::filter_model::Group;
-    use alnav::expr::Expr;
     use std::io::Write;
 
     fn write_temp(contents: &str) -> tempfile::NamedTempFile {
@@ -3464,9 +3698,12 @@ mod file_store_tests {
         app.set_file_store(FileStore::open_sync(f.path()).unwrap());
         app.groups.groups.push(Group {
             label: "tag~Keep".into(),
-            chips: Vec::new(),
-            expr: Some(Expr::parse("tag ~ Keep", true).unwrap()),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Tag,
+                value: "Keep".into(),
+            }],
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.rebuild_visible();
         // Drain bg filter to completion.
@@ -3510,9 +3747,12 @@ mod file_store_tests {
         // msg filter (would substring-match the header if unparsed were allowed)
         app.groups.groups.push(Group {
             label: "msg~QQXlog".into(),
-            chips: Vec::new(),
-            expr: Some(Expr::parse("msg ~ QQXlog", true).unwrap()),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Msg,
+                value: "QQXlog".into(),
+            }],
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.rebuild_visible();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -3560,9 +3800,12 @@ mod file_store_tests {
         );
         app.groups.groups.push(Group {
             label: "level".into(),
-            chips: Vec::new(),
-            expr: Some(Expr::parse("level >= I", true).unwrap()),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Level,
+                value: "I".into(),
+            }],
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         assert!(app.filter_active());
         assert!(!app.row_passes_filters(&raw));
@@ -3582,9 +3825,12 @@ mod file_store_tests {
         assert_eq!(app.visible_idx_for_row_id(3), Some(2));
         app.groups.groups.push(Group {
             label: "tag~Keep".into(),
-            chips: Vec::new(),
-            expr: Some(Expr::parse("tag ~ Keep", true).unwrap()),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Tag,
+                value: "Keep".into(),
+            }],
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.rebuild_visible();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -3632,13 +3878,13 @@ mod file_store_tests {
         wait_highlight_done(&mut app);
         assert_eq!(app.highlight_scan.hits, vec![1, 3]);
         assert_eq!(app.highlight_match_stats(), Some((None, 2)));
-        assert!(app.find_match(1));
+        assert_eq!(app.find_match(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 1);
         assert_eq!(app.highlight_match_stats(), Some((Some(1), 2)));
-        assert!(app.find_match(1));
+        assert_eq!(app.find_match(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 3);
-        assert!(app.find_match(1)); // wrap
-        assert_eq!(app.cursor, 1);
+        assert_eq!(app.find_match(1), FindJumpResult::NoMore); // no wrap
+        assert_eq!(app.cursor, 3);
         assert!(app
             .log_loading_label()
             .is_none_or(|s| !s.contains("Highlight")));
@@ -3663,9 +3909,12 @@ mod file_store_tests {
 
         app.groups.groups.push(Group {
             label: "tag~Keep".into(),
-            chips: Vec::new(),
-            expr: Some(Expr::parse("tag ~ Keep", true).unwrap()),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Tag,
+                value: "Keep".into(),
+            }],
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.rebuild_visible();
         assert_ne!(app.highlight_scan.gen, gen_before);
@@ -3711,7 +3960,7 @@ mod file_store_tests {
         assert_eq!(app.store.as_file().unwrap().severe_cached(1), Some(true));
         app.following = false;
         app.cursor = 0;
-        assert!(app.find_severe(1));
+        assert_eq!(app.find_severe(1), FindJumpResult::Moved);
         assert_eq!(app.cursor, 1);
         assert!(app.log_loading_label().is_none());
     }
@@ -3729,9 +3978,12 @@ mod file_store_tests {
         app.set_file_store(FileStore::open(f.path()).unwrap());
         app.groups.groups.push(Group {
             label: "tag~Tag1".into(),
-            chips: Vec::new(),
-            expr: Some(Expr::parse("tag ~ Tag1", true).unwrap()),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Tag,
+                value: "Tag1".into(),
+            }],
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.rebuild_visible();
         // Either indexing or filtering should produce a loading label.

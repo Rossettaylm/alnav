@@ -47,7 +47,7 @@ Update this spec when changing:
 | State | Render |
 |-------|--------|
 | follow / visual | Glyph only (`status_icon`) — no FOLLOWING/VISUAL words |
-| lock / time / progress | Glyph + short value (`status_icon_value`) — no LOCK/TIME word prefix |
+| lock / time / view focus / progress | Glyph + short value (`status_icon_value`) — no LOCK/TIME word prefix; view focus uses `GLYPH_VIEW_FOCUS` + `HL`/`ERR` |
 | highlight hits | Search glyph + `k/total` — **no** `[brackets]` |
 | pending / flash | Soft non-inverse text (`status_soft`), English |
 
@@ -69,6 +69,8 @@ Update this spec when changing:
 
 - `?` opens Help. `/` remains Highlight New (`open_picker_new`).
 - Do **not** rebind `?` to Highlight New.
+- LogList L1: `f` label is `focus` (lock + view focus); L2_LOCK includes `p`/`t`/`h`/`e`/`u`.
+- L2_TIME: `t` set / `u` clear (open key is `tt`, not `ts`). Catalog session: `f h/e`, `t t/u`.
 
 ### Flash language
 

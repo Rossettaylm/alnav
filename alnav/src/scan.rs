@@ -11,8 +11,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use memmap2::Mmap;
-use regex::Regex;
 
+use crate::fuzzy;
 use crate::model::{is_severe_row, EntryRow};
 use crate::store::{FileEvent, LineSpan};
 
@@ -128,10 +128,11 @@ impl HighlightScanState {
         }
     }
 
-    /// Next/prev hit vis index with wrapscan semantics (skip current).
+    /// Next/prev hit vis index **without** wrapscan (skip current).
     ///
-    /// While the Inc scan is still running (`!done`), do **not** wrap past the
-    /// last/first known hit — the unscanned tail/head may still contain matches.
+    /// At either end with no further hit in `dir`, returns `None` (caller may
+    /// flash `NO MORE`). While Inc is still running (`!done`), the same bounded
+    /// rule applies — do not jump past the last/first *known* hit.
     pub fn find_next(&self, cursor: usize, dir: i8) -> Option<usize> {
         let hits = &self.hits;
         if hits.is_empty() {
@@ -141,8 +142,6 @@ impl HighlightScanState {
             let i = hits.partition_point(|&h| h <= cursor);
             if i < hits.len() {
                 Some(hits[i])
-            } else if self.done {
-                Some(hits[0])
             } else {
                 None
             }
@@ -150,8 +149,6 @@ impl HighlightScanState {
             let i = hits.partition_point(|&h| h < cursor);
             if i > 0 {
                 Some(hits[i - 1])
-            } else if self.done {
-                Some(*hits.last().unwrap())
             } else {
                 None
             }
@@ -182,7 +179,7 @@ pub fn spawn_highlight_scan(
     scanned_out: Arc<AtomicUsize>,
     done_flag: Arc<AtomicBool>,
     gen: u64,
-    re: Regex,
+    pattern: String,
     tx: Sender<FileEvent>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
@@ -213,7 +210,7 @@ pub fn spawn_highlight_scan(
                 let hit = {
                     let guard = lines.read().expect("lines");
                     if let Some(row) = parse_line_at(&mmap, &guard, src) {
-                        re.is_match(&row.tag) || re.is_match(&row.msg)
+                        fuzzy::matches_search_row(&row, &pattern)
                     } else {
                         false
                     }
@@ -333,9 +330,9 @@ mod tests {
         assert_eq!(st.match_stats(0), (None, 3));
         assert_eq!(st.find_next(0, 1), Some(1));
         assert_eq!(st.find_next(1, 1), Some(3));
-        assert_eq!(st.find_next(7, 1), Some(1)); // wrap when done
+        assert_eq!(st.find_next(7, 1), None); // no wrap when done
         assert_eq!(st.find_next(3, -1), Some(1));
-        assert_eq!(st.find_next(1, -1), Some(7)); // wrap back when done
+        assert_eq!(st.find_next(1, -1), None); // no wrap back when done
         assert_eq!(st.first_hit(), Some(1));
         st.done = false;
         assert_eq!(st.find_next(7, 1), None); // no wrap while Inc

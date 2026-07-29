@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "Verify filter order and yc still approximate-only"}
+{"file": ".trellis/spec/alnav/backend/file-store.md", "reason": "Verify File Subset + no full-file owned rows"}
+{"file": ".trellis/spec/alnav/backend/stream-visible-ingest.md", "reason": "Verify no ghost hits after stream eviction"}
+{"file": ".trellis/spec/alnav/backend/async-scans.md", "reason": "Verify highlight/nN paths do not O(visible) row_at on File"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Quality bar and forbidden patterns"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Status/Help English flash and hint ownership"}

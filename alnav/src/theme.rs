@@ -40,6 +40,7 @@ pub const GLYPH_ACTION_TOGGLE_ON: &str = "\u{f205}"; //  nf-fa-toggle_on
 pub const GLYPH_ACTION_TOGGLE_OFF: &str = "\u{f204}"; //  nf-fa-toggle_off
 pub const GLYPH_LOCK: &str = "\u{f023}"; //
 pub const GLYPH_TIME: &str = "\u{f017}"; // nf-fa-clock_o
+pub const GLYPH_VIEW_FOCUS: &str = "\u{f06e}"; // nf-fa-eye
 pub const GLYPH_FOLLOWING: &str = "\u{f062}"; //
 pub const GLYPH_VISUAL: &str = "\u{f245}"; //
 pub const GLYPH_SEARCH: &str = "\u{f002}"; //

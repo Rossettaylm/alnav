@@ -1,25 +1,24 @@
-use alnav::expr::Expr;
-
+use crate::fuzzy::{self, SameFieldOp};
 use crate::input::{Chip, ChipField};
 use crate::model::EntryRow;
 
 /// One AND-combined filter clause. `label` is precomputed display text; `chips`
-/// drives pill rendering and dedup. Session time window lives on [`crate::app::App`],
-/// not on groups.
+/// drives pill rendering, dedup, and fuzzy/exact matching. Session time window
+/// lives on [`crate::app::App`], not on groups.
 #[derive(Debug, Clone)]
 pub struct Group {
     pub label: String,
     pub chips: Vec<Chip>,
-    pub expr: Option<Expr>,
     /// When false, the group is ignored by `GroupList::matches` (soft disable
     /// via `di`; distinct from deleting with `dd`).
     pub enabled: bool,
+    /// How same-field chips combine (interactive And / startup CLI Or).
+    pub same_field_op: SameFieldOp,
 }
 
 impl Group {
     pub fn matches(&self, row: &EntryRow) -> bool {
-        let le = row.as_log_entry();
-        self.expr.as_ref().map_or(true, |e| e.matches(&le))
+        fuzzy::chips_match_row(&self.chips, row, self.same_field_op)
     }
 
     /// Chip multiset equality (field + ignore-case value).
@@ -86,11 +85,10 @@ impl TimeBound {
     }
 }
 
-/// One global exclude chip (H9): positive `expr` is matched as AND NOT.
+/// One global exclude chip (H9): positive chip match is AND NOT.
 #[derive(Debug, Clone)]
 pub struct ExcludeEntry {
     pub chip: Chip,
-    pub expr: Expr,
     pub enabled: bool,
 }
 
@@ -98,6 +96,10 @@ impl ExcludeEntry {
     /// Ignore-case field+value equality (for dedup).
     pub fn same_chip_as(&self, chip: &Chip) -> bool {
         self.chip.field == chip.field && self.chip.value.eq_ignore_ascii_case(&chip.value)
+    }
+
+    pub fn matches(&self, row: &EntryRow) -> bool {
+        fuzzy::chip_matches_row(&self.chip, row)
     }
 }
 
@@ -134,30 +136,26 @@ impl GroupList {
         !any_enabled
     }
 
-    /// False when any enabled exclude's positive expr matches the row.
+    /// False when any enabled exclude's positive chip matches the row.
     fn excludes_allow(&self, row: &EntryRow) -> bool {
-        let le = row.as_log_entry();
         for e in &self.excludes {
-            if e.enabled && e.expr.matches(&le) {
+            if e.enabled && e.matches(row) {
                 return false;
             }
         }
         true
     }
 
-    /// Compile and append an exclude chip. Returns false on duplicate.
+    /// Append an exclude chip. Returns false on duplicate.
     pub fn push_exclude(&mut self, chip: Chip) -> Result<bool, String> {
+        if chip.value.is_empty() {
+            return Err("empty exclude".to_string());
+        }
         if self.excludes.iter().any(|e| e.same_chip_as(&chip)) {
             return Ok(false);
         }
-        let group = crate::input::build_group_from_chips(vec![chip.clone()], true)?
-            .ok_or_else(|| "empty exclude".to_string())?;
-        let expr = group
-            .expr
-            .ok_or_else(|| "exclude needs an expression".to_string())?;
         self.excludes.push(ExcludeEntry {
             chip,
-            expr,
             enabled: true,
         });
         Ok(true)
@@ -176,12 +174,12 @@ mod tests {
         .unwrap()
     }
 
-    fn group(label: &str, expr: Option<Expr>) -> Group {
+    fn group_chips(label: &str, chips: Vec<Chip>) -> Group {
         Group {
             label: label.into(),
-            chips: Vec::new(),
-            expr,
+            chips,
             enabled: true,
+            same_field_op: SameFieldOp::And,
         }
     }
 
@@ -193,9 +191,20 @@ mod tests {
 
     #[test]
     fn test_single_group_and_within() {
-        let expr = Expr::parse("tag~A and level>=W", false).unwrap();
         let list = GroupList {
-            groups: vec![group("tag:A AND level:W", Some(expr))],
+            groups: vec![group_chips(
+                "tag:A AND level:W",
+                vec![
+                    Chip {
+                        field: ChipField::Tag,
+                        value: "A".into(),
+                    },
+                    Chip {
+                        field: ChipField::Level,
+                        value: "W".into(),
+                    },
+                ],
+            )],
             ..Default::default()
         };
         assert!(list.matches(&row("A", "m", "E")));
@@ -205,15 +214,44 @@ mod tests {
 
     #[test]
     fn test_multiple_groups_or_between() {
-        let g1 = Expr::parse("tag~A", false).unwrap();
-        let g2 = Expr::parse("tag~B", false).unwrap();
         let list = GroupList {
-            groups: vec![group("tag:A", Some(g1)), group("tag:B", Some(g2))],
+            groups: vec![
+                group_chips(
+                    "tag:A",
+                    vec![Chip {
+                        field: ChipField::Tag,
+                        value: "A".into(),
+                    }],
+                ),
+                group_chips(
+                    "tag:B",
+                    vec![Chip {
+                        field: ChipField::Tag,
+                        value: "B".into(),
+                    }],
+                ),
+            ],
             ..Default::default()
         };
         assert!(list.matches(&row("A", "m", "I")));
         assert!(list.matches(&row("B", "m", "I")));
         assert!(!list.matches(&row("C", "m", "I")));
+    }
+
+    #[test]
+    fn test_fuzzy_tag_chip() {
+        let list = GroupList {
+            groups: vec![group_chips(
+                "tag:abc",
+                vec![Chip {
+                    field: ChipField::Tag,
+                    value: "abc".into(),
+                }],
+            )],
+            ..Default::default()
+        };
+        assert!(list.matches(&row("aXbYc", "m", "I")));
+        assert!(!list.matches(&row("zzz", "m", "I")));
     }
 
     #[test]
@@ -234,13 +272,15 @@ mod tests {
 
     #[test]
     fn test_disabled_group_skipped() {
-        let expr = Expr::parse("tag~A", false).unwrap();
         let list = GroupList {
             groups: vec![Group {
                 label: "tag:A".into(),
-                chips: Vec::new(),
-                expr: Some(expr),
+                chips: vec![Chip {
+                    field: ChipField::Tag,
+                    value: "A".into(),
+                }],
                 enabled: false,
+                same_field_op: SameFieldOp::And,
             }],
             ..Default::default()
         };
@@ -254,15 +294,21 @@ mod tests {
             groups: vec![
                 Group {
                     label: "tag:A".into(),
-                    chips: Vec::new(),
-                    expr: Some(Expr::parse("tag~A", false).unwrap()),
+                    chips: vec![Chip {
+                        field: ChipField::Tag,
+                        value: "A".into(),
+                    }],
                     enabled: false,
+                    same_field_op: SameFieldOp::And,
                 },
                 Group {
                     label: "tag:B".into(),
-                    chips: Vec::new(),
-                    expr: Some(Expr::parse("tag~B", false).unwrap()),
+                    chips: vec![Chip {
+                        field: ChipField::Tag,
+                        value: "B".into(),
+                    }],
                     enabled: true,
+                    same_field_op: SameFieldOp::And,
                 },
             ],
             excludes: Vec::new(),
@@ -274,7 +320,13 @@ mod tests {
     #[test]
     fn test_exclude_and_not_after_include() {
         let mut list = GroupList {
-            groups: vec![group("tag:A", Some(Expr::parse("tag~A", true).unwrap()))],
+            groups: vec![group_chips(
+                "tag:A",
+                vec![Chip {
+                    field: ChipField::Tag,
+                    value: "A".into(),
+                }],
+            )],
             excludes: Vec::new(),
         };
         assert!(list

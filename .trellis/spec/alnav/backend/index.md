@@ -17,6 +17,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | Module layout + picker/time_panel ownership | Active |
 | [Session Filters](./session-filters.md) | Lock + global `App.time_bound` contracts | Active |
+| [TUI Fuzzy Matching](./fuzzy-matching.md) | nucleo-matcher contracts for Picker/Filter/Highlight | Active |
 | [Stream Visible + Live Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest ADB/HDC ring | Active |
 | [FileStore mmap](./file-store.md) | `-f` mmap + lazy parse + bg filter | Active |
 | [Async Vis Scans](./async-scans.md) | Highlight Inc / severe prefetch / LogList loading | Active |
@@ -31,6 +32,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 ## Pre-Development Checklist
 
 - [ ] Read [session-filters.md](./session-filters.md) before changing filter/lock/time matching or `yc` export.
+- [ ] Read [fuzzy-matching.md](./fuzzy-matching.md) before changing TUI text match, Highlight paint, or Filter chip evaluation.
 - [ ] Read [stream-visible-ingest.md](./stream-visible-ingest.md) before changing `visible`, `push_row` eviction, or live ingest.
 - [ ] Read [file-store.md](./file-store.md) before changing `-f` ingest, `RowStore`, or file filter scanning.
 - [ ] Read [async-scans.md](./async-scans.md) before changing File highlight/`nN`/severe/minimap cache paths or LogList loading.

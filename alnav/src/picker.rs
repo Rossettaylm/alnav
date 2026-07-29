@@ -149,18 +149,9 @@ impl PickerSession {
         self.confirm = None;
     }
 
-    /// ignore-case 子串过滤；返回源列表下标
+    /// ignore-case nucleo fuzzy 过滤；返回源列表下标（按 score 排序）
     pub fn filtered_indices(labels: &[String], query: &str) -> Vec<usize> {
-        if query.is_empty() {
-            return (0..labels.len()).collect();
-        }
-        let q = query.to_lowercase();
-        labels
-            .iter()
-            .enumerate()
-            .filter(|(_, label)| label.to_lowercase().contains(&q))
-            .map(|(i, _)| i)
-            .collect()
+        crate::fuzzy::fuzzy_label_indices(labels, query)
     }
 
     fn fresh_input_for_kind(kind: PickerKind) -> Option<InputBox> {
@@ -224,6 +215,9 @@ mod tests {
         assert_eq!(PickerSession::filtered_indices(&labels, ""), vec![0, 1, 2]);
         assert_eq!(PickerSession::filtered_indices(&labels, "err"), vec![0]);
         assert_eq!(PickerSession::filtered_indices(&labels, "WARN"), vec![2]);
+        // non-contiguous fuzzy
+        let labels2 = vec!["aXbYc".into(), "zzz".into()];
+        assert_eq!(PickerSession::filtered_indices(&labels2, "abc"), vec![0]);
     }
 
     #[test]

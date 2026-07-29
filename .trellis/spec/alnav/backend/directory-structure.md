@@ -22,8 +22,9 @@ alnav/src/
 ├── scan.rs         # File Vis+Inc highlight worker + severe prefetch (async-scans)
 ├── model.rs        # EntryRow: owned line model, from_line()/from_line_or_raw()/as_log_entry()
 ├── filter_model.rs # Group/GroupList + TimeBound (global window matching)
+├── fuzzy.rs        # TUI nucleo-matcher facade (Search/Filter/Picker; see fuzzy-matching.md)
 ├── time_panel.rs   # `-f` ts panel: date candidates from rows + HH:MM:SS clamp
-├── highlight_model.rs # HighlightGroup/HighlightGroupList
+├── highlight_model.rs # HighlightGroup/HighlightGroupList (pattern + fuzzy, no Regex)
 ├── picker.rs       # PickerSession/PickerKind/PickerMode/UnifiedKind/UnifiedItem
 ├── input.rs        # ChipField/Chip/InputBox/Popup (Enter two-phase)
 ├── ui.rs           # Render: log list, strips, picker, minimap, modals, time panel

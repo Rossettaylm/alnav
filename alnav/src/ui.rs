@@ -3,11 +3,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
-use regex::Regex;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Mode};
 use crate::filter_model::Group;
+use crate::fuzzy::PaintField;
 use crate::highlight_model::{HighlightBox, HighlightGroup};
 use crate::input::{ChipField, InputBox};
 use crate::model::EntryRow;
@@ -271,36 +271,7 @@ pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
     inner
 }
 
-/// Find ignore-case substring match as byte range in `haystack`, or `None`.
-pub fn find_ignore_case_range(haystack: &str, needle: &str) -> Option<(usize, usize)> {
-    if needle.is_empty() {
-        return None;
-    }
-    let hay: Vec<(usize, char)> = haystack.char_indices().collect();
-    let needle_lower = needle.to_lowercase();
-    let needle_len = needle.chars().count();
-    if needle_len == 0 || hay.len() < needle_len {
-        return None;
-    }
-    for start in 0..=hay.len() - needle_len {
-        let window: String = hay[start..start + needle_len]
-            .iter()
-            .map(|(_, c)| *c)
-            .collect::<String>()
-            .to_lowercase();
-        if window == needle_lower {
-            let byte_start = hay[start].0;
-            let byte_end = hay
-                .get(start + needle_len)
-                .map(|(i, _)| *i)
-                .unwrap_or(haystack.len());
-            return Some((byte_start, byte_end));
-        }
-    }
-    None
-}
-
-/// Build label spans with optional substring match coloring.
+/// Build label spans with optional fuzzy match coloring (Pattern atoms / multi-range).
 /// `checked` changes the selection-marker (prefix) color for Tab multi-select.
 fn candidate_label_spans(
     label: &str,
@@ -312,6 +283,7 @@ fn candidate_label_spans(
     area_width: u16,
 ) -> Vec<Span<'static>> {
     use crate::bookmark::fit_label;
+    use crate::fuzzy;
     let match_style = theme::candidate_match_style(selected);
     let prefix = if selected || checked {
         theme::candidate_prefix()
@@ -335,16 +307,24 @@ fn candidate_label_spans(
         .max(1);
     let truncated = fit_label(label, label_max);
     let mut spans = vec![Span::styled(prefix, prefix_style)];
-    if let Some((s, e)) = find_ignore_case_range(&truncated, query) {
-        if s > 0 {
-            spans.push(Span::styled(truncated[..s].to_string(), base));
-        }
-        spans.push(Span::styled(truncated[s..e].to_string(), match_style));
-        if e < truncated.len() {
-            spans.push(Span::styled(truncated[e..].to_string(), base));
-        }
-    } else {
+    let idxs = fuzzy::fuzzy_char_indices(&truncated, query);
+    let ranges = fuzzy::char_indices_to_byte_ranges(&truncated, &idxs);
+    if ranges.is_empty() {
         spans.push(Span::styled(truncated, base));
+    } else {
+        let mut cursor = 0usize;
+        for (s, e) in ranges {
+            if s > cursor {
+                spans.push(Span::styled(truncated[cursor..s].to_string(), base));
+            }
+            if e > s {
+                spans.push(Span::styled(truncated[s..e].to_string(), match_style));
+            }
+            cursor = e;
+        }
+        if cursor < truncated.len() {
+            spans.push(Span::styled(truncated[cursor..].to_string(), base));
+        }
     }
     // padding to push the icon flush right, then the icon span.
     let used: usize = spans.iter().map(|sp| sp.content.chars().count()).sum();
@@ -534,49 +514,61 @@ fn wrap_ranges(text: &str, width: usize) -> Vec<(usize, usize)> {
 /// Match segment: start, end, progressive color index, globally-active underline.
 type ColoredMatch = (usize, usize, usize, bool);
 
-/// Paint pattern: regex, color index, whether this is the globally active search.
-type PaintPattern<'a> = (&'a Regex, usize, bool);
+/// Paint pattern: fuzzy pattern, color index, whether this is the globally active search.
+type PaintPattern<'a> = (&'a str, usize, bool);
 
-/// Collect all pattern matches; later patterns overwrite overlapping ranges
-/// (same order as `paint_patterns`).
-fn collect_matches(msg: &str, patterns: &[PaintPattern<'_>]) -> Vec<ColoredMatch> {
-    if patterns.is_empty() || msg.is_empty() {
-        return Vec::new();
+/// Merge a new interval into non-overlapping `result` (later pattern wins on overlap).
+fn merge_colored_match(
+    result: &mut Vec<ColoredMatch>,
+    ns: usize,
+    ne: usize,
+    color_idx: usize,
+    is_active: bool,
+) {
+    if ns >= ne {
+        return;
     }
-    // Build a compact sorted list of non-overlapping match intervals.
-    // Each successive pattern's matches overwrite earlier patterns on overlap
-    // ("later pattern wins") — same semantics as the original per-byte approach
-    // but without allocating vec![None; msg.len()] for every call.
-    let mut result: Vec<ColoredMatch> = Vec::new();
-
-    for &(re, color_idx, is_active) in patterns {
-        for m in re.find_iter(msg) {
-            let ns = m.start();
-            let ne = m.end();
-            if ns >= ne {
-                continue;
+    let mut tmp = Vec::with_capacity(result.len() + 2);
+    for (es, ee, ec, ea) in result.drain(..) {
+        if ee <= ns || es >= ne {
+            tmp.push((es, ee, ec, ea));
+        } else {
+            if es < ns {
+                tmp.push((es, ns, ec, ea));
             }
-            // Clip or remove existing intervals that overlap [ns, ne).
-            let mut tmp = Vec::with_capacity(result.len() + 2);
-            for (es, ee, ec, ea) in result.drain(..) {
-                if ee <= ns || es >= ne {
-                    tmp.push((es, ee, ec, ea)); // no overlap: keep as-is
-                } else {
-                    if es < ns {
-                        tmp.push((es, ns, ec, ea)); // left remnant before new interval
-                    }
-                    if ee > ne {
-                        tmp.push((ne, ee, ec, ea)); // right remnant after new interval
-                    }
-                    // the middle [max(es,ns), min(ee,ne)] is overwritten — drop
-                }
+            if ee > ne {
+                tmp.push((ne, ee, ec, ea));
             }
-            tmp.push((ns, ne, color_idx, is_active));
-            tmp.sort_unstable_by_key(|&(s, _, _, _)| s);
-            result = tmp;
         }
     }
+    tmp.push((ns, ne, color_idx, is_active));
+    tmp.sort_unstable_by_key(|&(s, _, _, _)| s);
+    *result = tmp;
+}
 
+/// Collect fuzzy paint ranges for one field (tag or msg); later patterns overwrite.
+fn collect_field_matches(
+    row: &EntryRow,
+    patterns: &[PaintPattern<'_>],
+    field: PaintField,
+) -> Vec<ColoredMatch> {
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let mut result: Vec<ColoredMatch> = Vec::new();
+    for &(pattern, color_idx, is_active) in patterns {
+        let spans = crate::fuzzy::map_search_positions(&row.tag, &row.msg, &row.raw, pattern);
+        for sp in spans {
+            let ok = match field {
+                PaintField::Tag => sp.field == PaintField::Tag,
+                PaintField::Msg => sp.field == PaintField::Msg || sp.field == PaintField::Raw,
+                PaintField::Raw => sp.field == PaintField::Raw,
+            };
+            if ok {
+                merge_colored_match(&mut result, sp.start, sp.end, color_idx, is_active);
+            }
+        }
+    }
     result
 }
 
@@ -724,8 +716,8 @@ fn render_entry_lines(
     let tag_style = Style::default()
         .fg(theme::accent())
         .add_modifier(Modifier::BOLD);
-    let tag_matches = collect_matches(&row.tag, patterns);
-    let msg_matches = collect_matches(&row.msg, patterns);
+    let tag_matches = collect_field_matches(row, patterns, PaintField::Tag);
+    let msg_matches = collect_field_matches(row, patterns, PaintField::Msg);
 
     let first_pass = wrap_ranges(&row.msg, first_width);
     let mut line_ranges: Vec<(usize, usize)> = vec![first_pass[0]];
@@ -1745,7 +1737,7 @@ pub fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(shown), inner);
 }
 
-/// Outer height for the global time-window panel (`ts`).
+/// Outer height for the global time-window panel (`tt`).
 pub fn time_panel_height(frame: Rect) -> u16 {
     // border(2) + 4 field rows + section labels(2) + up to 5 candidate rows
     let desired = 13u16;
@@ -1754,7 +1746,7 @@ pub fn time_panel_height(frame: Rect) -> u16 {
     desired.min(max).max(8)
 }
 
-/// Render `ts` time panel. Returns hardware cursor for the focused field.
+/// Render `tt` time panel. Returns hardware cursor for the focused field.
 pub fn render_time_panel(app: &App, frame: &mut Frame, area: Rect) -> Option<Position> {
     use crate::time_panel::TimeField;
 
@@ -2259,6 +2251,14 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
             theme::lock(),
         ));
     }
+    if let Some(focus) = app.view_focus_badge_label() {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_icon_value(
+            theme::GLYPH_VIEW_FOCUS,
+            focus,
+            theme::accent(),
+        ));
+    }
     if let Some(prog) = app.file_progress_label() {
         spans.push(Span::raw(" "));
         spans.push(theme::status_icon_value(
@@ -2684,8 +2684,7 @@ mod tests {
         let row =
             EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred here")
                 .unwrap();
-        let re = Regex::new("(?i)error").unwrap();
-        let patterns = [(&re, 0usize, false)];
+        let patterns = [("error", 0usize, false)];
         let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         assert_eq!(lines.len(), 1);
         let matched: Vec<&Span> = lines[0]
@@ -2713,8 +2712,7 @@ mod tests {
     #[test]
     fn test_render_entry_lines_highlights_tag_matches() {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I MyTag   : hello world").unwrap();
-        let re = Regex::new("(?i)tag").unwrap();
-        let patterns = [(&re, 0usize, false)];
+        let patterns = [("tag", 0usize, false)];
         let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         let matched = lines[0]
             .spans
@@ -2739,9 +2737,7 @@ mod tests {
     fn test_render_entry_lines_multicolor_patterns() {
         let row =
             EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : foo and bar here").unwrap();
-        let re0 = Regex::new("(?i)foo").unwrap();
-        let re1 = Regex::new("(?i)bar").unwrap();
-        let patterns = [(&re0, 0usize, true), (&re1, 1usize, false)];
+        let patterns = [("foo", 0usize, true), ("bar", 1usize, false)];
         let lines = render_entry_lines(&row, &patterns, 200, 1, 1);
         let foo = lines[0]
             .spans
@@ -2930,8 +2926,8 @@ mod tests {
                 field: ChipField::Tag,
                 value: "A".into(),
             }],
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.groups.groups.push(Group {
             label: "b".into(),
@@ -2939,8 +2935,8 @@ mod tests {
                 field: ChipField::Msg,
                 value: "B".into(),
             }],
-            expr: None,
             enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
         });
         app.focus = Focus::ChipStrip;
         app.group_cursor = 0;
@@ -2992,8 +2988,8 @@ mod tests {
                     field: ChipField::Tag,
                     value: label.into(),
                 }],
-                expr: None,
                 enabled: true,
+                same_field_op: crate::fuzzy::SameFieldOp::And,
             });
         }
         let h = filter_strip_height(&app, 20);

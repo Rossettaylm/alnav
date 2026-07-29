@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "Filter/lock/time/yc contracts while replacing TUI text matching with nucleo"}
+{"file": ".trellis/spec/alnav/backend/file-store.md", "reason": "File mmap + Subset scan must integrate with FuzzyIndex background inject"}
+{"file": ".trellis/spec/alnav/backend/stream-visible-ingest.md", "reason": "Stream Visible::All/matched + eviction must stay consistent with fuzzy hits"}
+{"file": ".trellis/spec/alnav/backend/async-scans.md", "reason": "Highlight n/N and File hit caches move off Regex onto fuzzy positions"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Forbidden patterns and test expectations for alnav TUI changes"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Index progress status + yc approx flash + Help copy"}
+{"file": ".trellis/spec/alnav/backend/directory-structure.md", "reason": "New fuzzy.rs module placement and picker ownership"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "TUI fuzzy vs CLI grep semantic split across crates"}

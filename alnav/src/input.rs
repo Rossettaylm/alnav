@@ -1,6 +1,7 @@
 use crate::filter_model::Group;
+use crate::fuzzy::{self, SameFieldOp};
 use crate::text_field::TextField;
-use alnav::expr::{Expr, SameFieldOp};
+use alnav::parser::Level;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChipField {
@@ -117,16 +118,19 @@ impl InputBox {
         !self.draft.is_empty() && self.draft_field.is_none()
     }
 
-    /// Fields whose keyword has `draft` as an ignore-case prefix.
+    /// Fields whose keyword fuzzy-matches `draft` (score-ordered).
     /// Empty when the panel is not visible.
     pub fn field_candidates(&self) -> Vec<ChipField> {
         if self.draft_field.is_some() {
             return Vec::new();
         }
-        let q = self.draft.to_ascii_lowercase();
-        CHIP_FIELDS
+        let labels: Vec<String> = CHIP_FIELDS
+            .iter()
+            .map(|f| f.keyword().to_string())
+            .collect();
+        fuzzy::fuzzy_label_indices(&labels, self.draft.as_str())
             .into_iter()
-            .filter(|f| f.keyword().starts_with(&q))
+            .map(|i| CHIP_FIELDS[i])
             .collect()
     }
 
@@ -167,53 +171,39 @@ impl InputBox {
         self.confirm_field_candidate()
     }
 
-    /// Compile already-committed chips into a `Group` via `Expr::from_filters`
-    /// with [`SameFieldOp::And`]. Does **not** commit the in-progress draft —
-    /// caller uses Enter two-step: pending draft → `commit_draft_as_chip`,
-    /// empty draft + chips → `build_group`. Returns `Ok(None)` if chips empty.
-    pub fn build_group(&mut self, case_insensitive: bool) -> Result<Option<Group>, String> {
+    /// Build a `Group` from committed chips (fuzzy text / exact pid·tid·level).
+    /// Does **not** commit the in-progress draft — caller uses Enter two-step:
+    /// pending draft → `commit_draft_as_chip`, empty draft + chips → `build_group`.
+    /// Returns `Ok(None)` if chips empty.
+    pub fn build_group(&mut self, _case_insensitive: bool) -> Result<Option<Group>, String> {
         if self.chips.is_empty() {
             return Ok(None);
         }
         let chips = std::mem::take(&mut self.chips);
-        build_group_from_chips(chips, case_insensitive)
+        build_group_from_chips(chips, true)
     }
 }
 
 /// Compile a chip list into a `Group` (same rules as [`InputBox::build_group`]).
+/// `_case_insensitive` is retained for call-site compatibility (TUI is always ignore-case).
 pub fn build_group_from_chips(
     chips: Vec<Chip>,
-    case_insensitive: bool,
+    _case_insensitive: bool,
 ) -> Result<Option<Group>, String> {
     if chips.is_empty() {
         return Ok(None);
     }
-    let mut tag = Vec::new();
-    let mut msg = Vec::new();
-    let mut pkg = Vec::new();
-    let mut pid = Vec::new();
-    let mut tid = Vec::new();
-    let mut level: Option<&str> = None; // last Level chip wins if more than one
     for chip in &chips {
-        match chip.field {
-            ChipField::Tag => tag.push(chip.value.clone()),
-            ChipField::Msg => msg.push(chip.value.clone()),
-            ChipField::Pkg => pkg.push(chip.value.clone()),
-            ChipField::Pid => pid.push(chip.value.clone()),
-            ChipField::Tid => tid.push(chip.value.clone()),
-            ChipField::Level => level = Some(chip.value.as_str()),
+        if chip.field == ChipField::Level && Level::from_str(&chip.value).is_none() {
+            return Err(format!(
+                "unknown level '{}', expected V/D/I/W/E/F",
+                chip.value
+            ));
+        }
+        if chip.value.is_empty() {
+            return Err(format!("empty {} chip", chip.field.keyword()));
         }
     }
-    let expr = Expr::from_filters(
-        &tag,
-        &msg,
-        &pkg,
-        &pid,
-        &tid,
-        level,
-        case_insensitive,
-        SameFieldOp::And,
-    )?;
     let label = chips
         .iter()
         .map(|c| format!("{}:{}", c.field.keyword(), c.value))
@@ -222,8 +212,8 @@ pub fn build_group_from_chips(
     Ok(Some(Group {
         label,
         chips,
-        expr,
         enabled: true,
+        same_field_op: SameFieldOp::And,
     }))
 }
 
@@ -381,7 +371,7 @@ mod field_popup_tests {
     }
 
     #[test]
-    fn test_field_popup_visible_and_filters_by_draft_prefix() {
+    fn test_field_popup_visible_and_filters_by_draft_fuzzy() {
         let mut input = InputBox::default();
         input.push_char('t');
         assert!(input.field_popup_visible());
@@ -389,6 +379,9 @@ mod field_popup_tests {
         assert!(matches.contains(&ChipField::Tag));
         assert!(matches.contains(&ChipField::Tid));
         assert!(!matches.contains(&ChipField::Msg));
+        // Multi-char fuzzy still finds level
+        input.draft = "lvl".into();
+        assert!(input.field_candidates().contains(&ChipField::Level));
     }
 
     #[test]
