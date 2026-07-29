@@ -712,6 +712,7 @@ impl App {
                 }
             }
         }
+        let mut filter_grew = false;
         for (gen, hits) in filter_batches {
             if gen != self.file_filter_gen {
                 continue;
@@ -724,7 +725,11 @@ impl App {
                 Visible::Subset(v) => v.extend(hits),
                 _ => self.visible = Visible::Subset(hits),
             }
+            filter_grew = true;
             // Never O(visible) parse here — highlight Inc follows Subset growth.
+        }
+        if filter_grew {
+            self.match_stats_stale = true;
         }
         if let Some(gen) = filter_done_gen {
             if gen == self.file_filter_gen {
@@ -756,7 +761,7 @@ impl App {
                 self.try_pending_jump_first();
             }
         }
-        if index_grew || index_done {
+        if index_grew || index_done || filter_grew {
             if self.following {
                 self.jump_bottom();
             } else if self.cursor >= self.visible.len() {

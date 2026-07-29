@@ -25,10 +25,33 @@ use crate::scan::{self, HighlightDomain};
 const FILE_PARSE_LRU: usize = 256;
 /// Indexer reports progress every this many newlines.
 const INDEX_PROGRESS_EVERY: usize = 4096;
-/// Filter scanner yields a batch every this many hits.
+/// Filter scanner first batch size (quick first paint on large files).
+const FILTER_BATCH_FIRST_HITS: usize = 64;
+/// Filter scanner subsequent batch size after the first flush.
 const FILTER_BATCH_HITS: usize = 2048;
 /// Filter scanner processes this many lines per inner loop before checking cancel.
 const FILTER_CHUNK_LINES: usize = 8192;
+
+/// Whether the filter worker should send the current hit batch to the UI.
+///
+/// - Before any batch has been sent: flush at [`FILTER_BATCH_FIRST_HITS`].
+/// - After: flush at [`FILTER_BATCH_HITS`].
+/// - At chunk end: flush any non-empty remainder (sparse filters).
+fn should_flush_filter_batch(batch_len: usize, sent_any: bool, chunk_end: bool) -> bool {
+    if batch_len == 0 {
+        return false;
+    }
+    if chunk_end {
+        return true;
+    }
+    let threshold = if sent_any {
+        FILTER_BATCH_HITS
+    } else {
+        FILTER_BATCH_FIRST_HITS
+    };
+    batch_len >= threshold
+}
+
 /// Vocab sampler: hard cap on lines parsed (keeps IndexDone off the UI
 /// critical path for multi-million-line files).
 const VOCAB_MAX_SAMPLES: usize = 4096;
@@ -747,7 +770,8 @@ fn spawn_filter_scan(
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut i = 0usize;
-        let mut batch = Vec::with_capacity(FILTER_BATCH_HITS);
+        let mut batch = Vec::with_capacity(FILTER_BATCH_FIRST_HITS);
+        let mut sent_any = false;
         loop {
             if cancel.load(Ordering::Acquire) {
                 return;
@@ -776,7 +800,7 @@ fn spawn_filter_scan(
                 row.severe = is_severe_row(&row);
                 if pred(&row) {
                     batch.push(i);
-                    if batch.len() >= FILTER_BATCH_HITS {
+                    if should_flush_filter_batch(batch.len(), sent_any, false) {
                         let hits = std::mem::take(&mut batch);
                         if tx
                             .send(FileEvent::FilterBatch {
@@ -788,10 +812,26 @@ fn spawn_filter_scan(
                         {
                             return;
                         }
+                        sent_any = true;
                     }
                 }
                 i += 1;
                 filter_scanned.store(i, Ordering::Relaxed);
+            }
+            // Chunk boundary: flush sparse remainder so UI paints before Done.
+            if should_flush_filter_batch(batch.len(), sent_any, true) {
+                let hits = std::mem::take(&mut batch);
+                if tx
+                    .send(FileEvent::FilterBatch {
+                        gen,
+                        hits,
+                        scanned: i,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                sent_any = true;
             }
         }
         if !batch.is_empty() {
@@ -822,6 +862,28 @@ mod tests {
         f.write_all(contents.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    fn should_flush_filter_batch_first_threshold() {
+        assert!(!should_flush_filter_batch(0, false, false));
+        assert!(!should_flush_filter_batch(63, false, false));
+        assert!(should_flush_filter_batch(64, false, false));
+        assert!(should_flush_filter_batch(100, false, false));
+    }
+
+    #[test]
+    fn should_flush_filter_batch_subsequent_threshold() {
+        assert!(!should_flush_filter_batch(63, true, false));
+        assert!(!should_flush_filter_batch(2047, true, false));
+        assert!(should_flush_filter_batch(2048, true, false));
+    }
+
+    #[test]
+    fn should_flush_filter_batch_chunk_end_sparse() {
+        assert!(!should_flush_filter_batch(0, false, true));
+        assert!(should_flush_filter_batch(1, false, true));
+        assert!(should_flush_filter_batch(1, true, true));
     }
 
     #[test]
