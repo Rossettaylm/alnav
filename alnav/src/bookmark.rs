@@ -8,7 +8,8 @@ pub const BOOKMARK_SOFT_CAP: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bookmark {
     pub row_id: u64,
-    /// Full strip/picker label (tag + first msg line); display truncates by width.
+    /// Full strip label (timestamp + level + tag + full msg, may contain `\n`).
+    /// Picker candidate list shows the first line only via [`bookmark_list_label`].
     pub label: String,
 }
 
@@ -94,16 +95,21 @@ pub enum JumpResult {
     Filtered,
 }
 
-/// Build strip/picker label from row fields (full first line; no eager truncate).
-pub fn bookmark_label(tag: &str, msg: &str) -> String {
-    let msg = msg.lines().next().unwrap_or("").trim_end();
-    if tag.is_empty() {
-        msg.to_string()
-    } else if msg.is_empty() {
-        tag.to_string()
+/// Build strip/picker label from full log fields (no lineno/pid/tid).
+/// Msg is kept in full (including newlines); no eager width truncate.
+pub fn bookmark_label(timestamp: &str, level: char, tag: &str, msg: &str) -> String {
+    let msg = msg.trim_end();
+    let tag = if tag.is_empty() { "-" } else { tag };
+    if msg.is_empty() {
+        format!("{timestamp} {level} {tag}")
     } else {
-        format!("{tag} {msg}")
+        format!("{timestamp} {level} {tag} {msg}")
     }
+}
+
+/// Single-line label for picker candidate rows (first line of [`bookmark_label`]).
+pub fn bookmark_list_label(label: &str) -> &str {
+    label.lines().next().unwrap_or("")
 }
 
 /// Fit `label` into `max_cols` display cells, appending `…` when truncated.
@@ -158,16 +164,28 @@ mod tests {
     #[test]
     fn bookmark_label_keeps_long_text() {
         let msg = "x".repeat(80);
-        let label = bookmark_label("Tag", &msg);
+        let label = bookmark_label("04-02 10:00:00.000", 'I', "Tag", &msg);
         assert!(label.len() > 56, "must not eagerly truncate at 56");
-        assert!(label.starts_with("Tag "));
-        assert_eq!(label.chars().count(), 4 + 80); // "Tag " + 80
+        assert!(label.starts_with("04-02 10:00:00.000 I Tag "));
+        assert_eq!(label.chars().count(), "04-02 10:00:00.000 I Tag ".chars().count() + 80);
     }
 
     #[test]
-    fn bookmark_label_first_line_only() {
-        let label = bookmark_label("T", "line1\nline2");
-        assert_eq!(label, "T line1");
+    fn bookmark_label_keeps_full_multiline_msg() {
+        let label = bookmark_label("04-02 10:00:00.000", 'I', "T", "line1\nline2");
+        assert_eq!(label, "04-02 10:00:00.000 I T line1\nline2");
+    }
+
+    #[test]
+    fn bookmark_list_label_uses_first_line() {
+        let label = bookmark_label("04-02 10:00:00.000", 'I', "T", "line1\nline2");
+        assert_eq!(bookmark_list_label(&label), "04-02 10:00:00.000 I T line1");
+    }
+
+    #[test]
+    fn bookmark_label_empty_tag_uses_dash() {
+        let label = bookmark_label("04-02 10:00:00.000", 'E', "", "oops");
+        assert_eq!(label, "04-02 10:00:00.000 E - oops");
     }
 
     #[test]

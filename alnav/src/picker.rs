@@ -43,7 +43,16 @@ pub struct UnifiedItem {
     pub enabled: bool,
 }
 
+/// Purpose of the msg-token picker opened by `c`/`C`/`y`+`m`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgChipPurpose {
+    /// `c`/`C`+`m`: build a chip (include → ActionList; exclude → push exclude).
+    Chip { exclude: bool },
+    /// `y`+`m`: yank the selected token.
+    Yank,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerKind {
     /// Aggregated Manage panel (Filter + Highlight + Exclude + Bookmark).
     Unified,
@@ -52,7 +61,11 @@ pub enum PickerKind {
     Bookmark,
     Exclude,
     MsgChip {
-        exclude: bool,
+        purpose: MsgChipPurpose,
+    },
+    /// Post-`cm` choice: Filter (default) or Highlight for a selected msg token.
+    ActionList {
+        value: String,
     },
 }
 
@@ -117,7 +130,7 @@ impl PickerSession {
         self.selected = 0;
         self.confirm = None;
         self.checked.clear();
-        self.input = Self::fresh_input_for_kind(self.kind);
+        self.input = Self::fresh_input_for_kind(self.kind.clone());
     }
 
     pub fn enter_edit(&mut self, index: usize, prefill: String) {
@@ -152,6 +165,20 @@ impl PickerSession {
     /// ignore-case nucleo fuzzy 过滤；返回源列表下标（按 score 排序）
     pub fn filtered_indices(labels: &[String], query: &str) -> Vec<usize> {
         crate::fuzzy::fuzzy_label_indices(labels, query)
+    }
+
+    /// Ignore-case substring filter (not fuzzy). Returns source indices in order.
+    pub fn contains_indices(labels: &[String], query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return (0..labels.len()).collect();
+        }
+        let q = query.to_ascii_lowercase();
+        labels
+            .iter()
+            .enumerate()
+            .filter(|(_, label)| label.to_ascii_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn fresh_input_for_kind(kind: PickerKind) -> Option<InputBox> {
@@ -218,6 +245,16 @@ mod tests {
         // non-contiguous fuzzy
         let labels2 = vec!["aXbYc".into(), "zzz".into()];
         assert_eq!(PickerSession::filtered_indices(&labels2, "abc"), vec![0]);
+    }
+
+    #[test]
+    fn contains_indices_substring_not_fuzzy() {
+        let labels = vec!["Filter".into(), "Highlight".into()];
+        assert_eq!(PickerSession::contains_indices(&labels, ""), vec![0, 1]);
+        assert_eq!(PickerSession::contains_indices(&labels, "fil"), vec![0]);
+        assert_eq!(PickerSession::contains_indices(&labels, "HIGH"), vec![1]);
+        // non-contiguous letters must NOT match (unlike fuzzy)
+        assert!(PickerSession::contains_indices(&labels, "flt").is_empty());
     }
 
     #[test]

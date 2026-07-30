@@ -23,9 +23,11 @@ use crate::input::ChipField;
 // glyph literals. See prd.md R4 / design.md D1 for the rationale and table.
 // ---------------------------------------------------------------------------
 
-pub const GLYPH_MODE_MANAGE: &str = "\u{f0b7}"; //
-pub const GLYPH_MODE_NEW: &str = "\u{f0fe}"; //
-pub const GLYPH_MODE_EDIT: &str = "\u{f044}"; //
+/// Manage/search prompt (Create / Bookmark / Unified). nf-fa-search — was
+/// `\u{f0b7}` (fa-circle) which rendered cramped against the draft text.
+pub const GLYPH_MODE_MANAGE: &str = "\u{f002}"; // nf-fa-search
+pub const GLYPH_MODE_NEW: &str = "\u{f0fe}"; // nf-fa-plus_square
+pub const GLYPH_MODE_EDIT: &str = "\u{f044}"; // nf-fa-pencil
 pub const GLYPH_CARET_SEL: &str = "\u{f0da}"; //
 pub const GLYPH_TITLE_PICKER: &str = "\u{f002}"; //
 pub const GLYPH_TITLE_LOG: &str = "\u{f0c5}"; //
@@ -34,7 +36,7 @@ pub const GLYPH_TITLE_EXCLUDE: &str = "\u{f056}"; //
 pub const GLYPH_TITLE_HIGHLIGHT: &str = "\u{f0e0}"; //
 pub const GLYPH_GROUP_ON: &str = "\u{f192}"; //
 pub const GLYPH_GROUP_OFF: &str = "\u{f10c}"; //
-pub const GLYPH_BOOKMARK: &str = "\u{f02e}"; //
+pub const GLYPH_BOOKMARK: &str = "\u{f02e}"; // nf-fa-bookmark
 pub const GLYPH_ACTION_JUMP: &str = "\u{f061}"; //  nf-fa-arrow_right
 pub const GLYPH_ACTION_TOGGLE_ON: &str = "\u{f205}"; //  nf-fa-toggle_on
 pub const GLYPH_ACTION_TOGGLE_OFF: &str = "\u{f204}"; //  nf-fa-toggle_off
@@ -263,14 +265,20 @@ pub fn picker_mode_style() -> Style {
     Style::default().fg(accent()).add_modifier(Modifier::DIM)
 }
 
-/// Mode prefix icon (nerdfont): Manage ``, New ``, Edit ``.
+/// Soft prompt icon + two trailing spaces (gap before draft text).
+pub fn picker_prompt_prefix(icon: &'static str) -> Span<'static> {
+    Span::styled(format!("{icon}  "), picker_mode_style())
+}
+
+/// Mode prefix icon (nerdfont): Manage search, New plus-square, Edit pencil.
+/// Bookmark panels pass [`GLYPH_BOOKMARK`] via [`picker_prompt_prefix`] instead.
 pub fn picker_mode_prefix(mode: &crate::picker::PickerMode) -> Span<'static> {
     let icon = match mode {
         crate::picker::PickerMode::Manage => GLYPH_MODE_MANAGE,
         crate::picker::PickerMode::New => GLYPH_MODE_NEW,
         crate::picker::PickerMode::Edit { .. } => GLYPH_MODE_EDIT,
     };
-    Span::styled(format!("{icon} "), picker_mode_style())
+    picker_prompt_prefix(icon)
 }
 
 /// Style for the group `●`/`○` marker (selected = selection_frame, else dim).
@@ -813,15 +821,15 @@ mod tests {
         use crate::picker::PickerMode;
         assert_eq!(
             picker_mode_prefix(&PickerMode::Manage).content,
-            format!("{} ", GLYPH_MODE_MANAGE)
+            format!("{}  ", GLYPH_MODE_MANAGE)
         );
         assert_eq!(
             picker_mode_prefix(&PickerMode::New).content,
-            format!("{} ", GLYPH_MODE_NEW)
+            format!("{}  ", GLYPH_MODE_NEW)
         );
         assert_eq!(
             picker_mode_prefix(&PickerMode::Edit { index: 0 }).content,
-            format!("{} ", GLYPH_MODE_EDIT)
+            format!("{}  ", GLYPH_MODE_EDIT)
         );
         let soft = picker_mode_style();
         assert_eq!(soft.fg, Some(Color::Cyan));

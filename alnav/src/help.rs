@@ -290,7 +290,11 @@ const CAT_LEADER: &[HintEntry] = &[
 ];
 
 const CAT_OPERATORS: &[HintEntry] = &[
-    HintEntry::new("c", "chip", "filter chip from current row field"),
+    HintEntry::new(
+        "c",
+        "chip",
+        "filter/highlight from row (msg → tokens → Filter|Highlight)",
+    ),
     HintEntry::new("C", "exclude", "exclude chip from current row field"),
     HintEntry::new("h/l", "strip", "prev / next group on focused strip"),
     HintEntry::new("dd", "delete", "delete selected strip group"),
@@ -318,7 +322,7 @@ const CAT_SESSION: &[HintEntry] = &[
     HintEntry::new(
         "y …",
         "yank field",
-        "yank tag/msg/pkg/pid/tid/level/raw/line/time",
+        "yank tag/msg(token picker)/pkg/pid/tid/level/raw/line/time",
     ),
     HintEntry::new("^L", "clear", "clear buffered live logs"),
 ];
@@ -693,7 +697,9 @@ mod tests {
     #[test]
     fn context_msg_chip_picker_overrides_focus() {
         let mut app = app_with_focus(Focus::LogList);
-        app.open_picker(crate::picker::PickerKind::MsgChip { exclude: false });
+        app.open_picker(crate::picker::PickerKind::MsgChip {
+            purpose: crate::picker::MsgChipPurpose::Chip { exclude: false },
+        });
         assert_eq!(context_kind(&app), ContextKind::Picker);
     }
 

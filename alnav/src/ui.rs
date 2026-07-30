@@ -27,6 +27,8 @@ pub const MODAL_WIDTH_MAX: u16 = 56;
 const PICKER_FRAME_WIDTH_MARGIN: u16 = 4;
 /// fzf picker height ≈ 75% of frame, clamped to this minimum.
 const PICKER_FRAME_MIN_HEIGHT: u16 = 10;
+/// Compact (no-preview) picker minimum height — lower so half-height can shrink.
+const PICKER_FRAME_COMPACT_MIN_HEIGHT: u16 = 6;
 /// Minimum width for each left/right pane inside the picker.
 const PICKER_LR_MIN_WIDTH: u16 = 10;
 /// Rounded search input height at the bottom of the left pane.
@@ -37,8 +39,12 @@ const PICKER_SEARCH_HORIZONTAL_PADDING: u16 = 1;
 const POPUP_GAP: u16 = 1;
 /// LogList tag column width (display columns); short tags pad, long tags truncate.
 const TAG_COL_WIDTH: usize = 20;
+/// Preview pane tag column cap (narrower than LogList so msg keeps budget).
+const PREVIEW_TAG_COL_MAX: usize = 12;
 /// Floor for the tag column when the pane is narrow (still may shrink further).
 const TAG_COL_MIN: usize = 4;
+/// Left/right split when the picker shows a Preview pane (right-biased).
+pub const PICKER_PREVIEW_LEFT_RATIO: f32 = 0.3;
 /// Gap between level badge and tag column (outside badge fill).
 const LEVEL_TAG_GAP: usize = 1;
 /// Gap between the fixed tag column and the message.
@@ -162,7 +168,8 @@ pub fn stack_below_rect_gapped(anchor: Rect, frame: Rect, height: u16) -> Rect {
 }
 
 /// Horizontal center, height ≈ 75% of `frame` (clamped to a readable minimum).
-/// When `show_preview` is false, width is ≈ half of the full picker width.
+/// When `show_preview` is false, width is ≈ half of the full picker width and
+/// height is ≈ half of the full picker height (≈ 3/8 of frame).
 pub fn picker_frame_rect(frame: Rect, show_preview: bool) -> Rect {
     let full_w = frame
         .width
@@ -173,9 +180,16 @@ pub fn picker_frame_rect(frame: Rect, show_preview: bool) -> Rect {
     } else {
         (full_w / 2).max(PICKER_LR_MIN_WIDTH)
     };
-    let height = (frame.height * 3 / 4)
+    let full_height = (frame.height * 3 / 4)
         .max(PICKER_FRAME_MIN_HEIGHT)
         .min(frame.height);
+    let height = if show_preview {
+        full_height
+    } else {
+        (full_height / 2)
+            .max(PICKER_FRAME_COMPACT_MIN_HEIGHT)
+            .min(frame.height)
+    };
     let x = frame.x + (frame.width.saturating_sub(width)) / 2;
     let y = frame.y + (frame.height.saturating_sub(height)) / 2;
     Rect {
@@ -233,9 +247,12 @@ pub fn split_picker_lr_gapped(area: Rect, left_ratio: f32) -> (Rect, Rect) {
 }
 
 /// Left pane vertical stack: candidates fill the top, search area pinned to bottom.
-pub fn picker_left_stack(left: Rect, has_chips: bool) -> (Rect, Rect) {
-    let chip_h = if has_chips { 1 } else { 0 };
-    let search_h = PICKER_SEARCH_HEIGHT.saturating_add(chip_h).min(left.height);
+/// `chip_rows` is the committed-chip band height above the rounded search input
+/// (0 when empty); search total height is `PICKER_SEARCH_HEIGHT + chip_rows`.
+pub fn picker_left_stack(left: Rect, chip_rows: u16) -> (Rect, Rect) {
+    let search_h = PICKER_SEARCH_HEIGHT
+        .saturating_add(chip_rows)
+        .min(left.height);
     let cand_h = left.height.saturating_sub(search_h);
     let candidates = Rect {
         x: left.x,
@@ -425,11 +442,30 @@ pub fn candidate_popup_rect(anchor: Rect, frame: Rect, match_count: usize) -> Re
     stack_below_rect_gapped(anchor, frame, desired)
 }
 
-/// H1 Preview window height: content rows + border, clamped to space below
-/// the previous stack item (candidates or modal).
-pub fn preview_popup_rect(anchor: Rect, frame: Rect, content_rows: usize) -> Rect {
-    let desired = (content_rows.clamp(1, 12) as u16).saturating_add(2);
-    stack_below_rect_gapped(anchor, frame, desired)
+/// H1 Preview window: fill remaining space below the previous stack item
+/// (candidates or modal), leaving [`POPUP_GAP`] when possible.
+pub fn preview_popup_rect(anchor: Rect, frame: Rect) -> Rect {
+    let flush_y = anchor.y.saturating_add(anchor.height);
+    let frame_bottom = frame.y.saturating_add(frame.height);
+    let space_flush = frame_bottom.saturating_sub(flush_y);
+    let height = if space_flush > POPUP_GAP {
+        space_flush.saturating_sub(POPUP_GAP)
+    } else {
+        space_flush
+    };
+    stack_below_rect_gapped(anchor, frame, height)
+}
+
+/// Content rows inside a bordered Preview shell (`height - 2` for borders).
+pub fn preview_content_capacity(area: Rect) -> usize {
+    area.height.saturating_sub(2) as usize
+}
+
+/// Content rows available in the picker's right Preview pane for `frame`.
+pub fn picker_preview_capacity(frame: Rect, left_ratio: f32) -> usize {
+    let picker = picker_frame_rect(frame, true);
+    let (_left, right) = split_picker_lr_gapped(picker, left_ratio);
+    preview_content_capacity(right)
 }
 
 /// Search modal outer height: draft row + borders (candidates float below).
@@ -606,15 +642,27 @@ fn spans_for_range(
     spans
 }
 
-/// Choose tag column width: prefer [`TAG_COL_WIDTH`], shrink on narrow panes so
+/// Choose tag column width: prefer `preferred_max`, shrink on narrow panes so
 /// the message still gets at least 8 columns.
-fn tag_col_for_area(area_width: usize, prefix_without_tag: usize) -> usize {
+fn tag_col_for_area_max(
+    area_width: usize,
+    prefix_without_tag: usize,
+    preferred_max: usize,
+) -> usize {
     let reserved = prefix_without_tag + TAG_MSG_GAP + 8;
     let available = area_width.saturating_sub(reserved);
     if available == 0 {
         return 0;
     }
-    TAG_COL_WIDTH.min(available).max(TAG_COL_MIN.min(available))
+    preferred_max
+        .min(available)
+        .max(TAG_COL_MIN.min(available))
+}
+
+/// Choose tag column width: prefer [`TAG_COL_WIDTH`], shrink on narrow panes so
+/// the message still gets at least 8 columns.
+fn tag_col_for_area(area_width: usize, prefix_without_tag: usize) -> usize {
+    tag_col_for_area_max(area_width, prefix_without_tag, TAG_COL_WIDTH)
 }
 
 /// Fit `tag` into a fixed display-column width: right-pad with spaces, or
@@ -761,6 +809,71 @@ fn render_entry_lines(
             Line::from(spans)
         })
         .collect()
+}
+
+/// Byte end of the first `max_chars` chars of `text` (or `text.len()` if shorter).
+fn byte_end_for_chars(text: &str, max_chars: usize) -> usize {
+    text.char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
+}
+
+/// Compact single-line Preview entry: timestamp/level/tag/msg colors like
+/// LogList, but no lineno and a narrower tag column so msg keeps width.
+fn render_entry_line_single(
+    row: &EntryRow,
+    patterns: &[PaintPattern<'_>],
+    area_width: usize,
+) -> Line<'static> {
+    let ts = format!("{} ", row.timestamp);
+    let level_badge = format!(" {} ", row.level.as_char());
+    let prefix_without_tag =
+        ts.chars().count() + level_badge.chars().count() + LEVEL_TAG_GAP;
+    let tag_col = tag_col_for_area_max(area_width, prefix_without_tag, PREVIEW_TAG_COL_MAX);
+    let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
+    let msg_budget = area_width.saturating_sub(header_width).max(1);
+
+    let tag_style = Style::default()
+        .fg(theme::accent())
+        .add_modifier(Modifier::BOLD);
+    let tag_matches = collect_field_matches(row, patterns, PaintField::Tag);
+    let msg_matches = collect_field_matches(row, patterns, PaintField::Msg);
+
+    let mut spans = Vec::new();
+    spans.push(Span::styled(ts, theme::muted()));
+    spans.push(Span::styled(
+        level_badge,
+        theme::level_badge_style(row.level),
+    ));
+    spans.push(Span::styled(" ".repeat(LEVEL_TAG_GAP), Style::default()));
+    push_tag_column_spans(&mut spans, &row.tag, tag_col, &tag_matches, tag_style);
+    spans.push(Span::styled(" ".repeat(TAG_MSG_GAP), Style::default()));
+
+    let msg_chars = row.msg.chars().count();
+    if msg_budget == 0 {
+        return Line::from(spans);
+    }
+    if msg_chars <= msg_budget {
+        spans.extend(spans_for_range(
+            &row.msg,
+            (0, row.msg.len()),
+            &msg_matches,
+            Style::default(),
+        ));
+    } else if msg_budget == 1 {
+        spans.push(Span::styled("…".to_string(), Style::default()));
+    } else {
+        let visible_end = byte_end_for_chars(&row.msg, msg_budget - 1);
+        spans.extend(spans_for_range(
+            &row.msg,
+            (0, visible_end),
+            &msg_matches,
+            Style::default(),
+        ));
+        spans.push(Span::styled("…".to_string(), Style::default()));
+    }
+    Line::from(spans)
 }
 
 /// H3 minimap cell priority (higher wins on overlap).
@@ -959,11 +1072,18 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
         height: inner.height,
     };
     // M2: bookmark strip embedded at top of Log (collapsed when empty).
-    let bm_n = app.bookmarks.display_recent().len() as u16;
-    let (bm_area_opt, list_area) = if bm_n > 0 && content_area.height > bm_n {
+    // Height = wrapped lines for ≤3 recent bookmarks, capped at 40% of content.
+    let bm_max_h = bookmark_strip_max_height(content_area.height);
+    let bm_lines = if app.bookmarks.display_recent().is_empty() || content_area.height <= 1 {
+        Vec::new()
+    } else {
+        build_bookmark_strip_lines(app, content_area.width, bm_max_h)
+    };
+    let bm_h = bm_lines.len() as u16;
+    let (bm_area_opt, list_area) = if bm_h > 0 && content_area.height > bm_h {
         let [top, rest] =
-            Layout::vertical([Constraint::Length(bm_n), Constraint::Fill(1)]).areas(content_area);
-        (Some(top), rest)
+            Layout::vertical([Constraint::Length(bm_h), Constraint::Fill(1)]).areas(content_area);
+        (Some((top, bm_lines)), rest)
     } else {
         (None, content_area)
     };
@@ -1029,8 +1149,8 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
 
     // Paint border first; list fills the content columns only (no block).
     frame.render_widget(block, area);
-    if let Some(area) = bm_area_opt {
-        render_bookmark_strip(app, frame, area);
+    if let Some((area, lines)) = bm_area_opt {
+        render_bookmark_strip(frame, area, lines);
     }
 
     // rel_offset is always 0: window_start == list_offset in the stable case,
@@ -1057,32 +1177,66 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// M2: up to 3 newest bookmarks inside the Log region.
-pub fn render_bookmark_strip(app: &App, frame: &mut Frame, area: Rect) {
-    use crate::bookmark::fit_label;
+/// Soft cap: bookmark strip uses at most 40% of the Log content height.
+pub fn bookmark_strip_max_height(content_h: u16) -> u16 {
+    ((u32::from(content_h) * 2) / 5).max(1) as u16
+}
 
+/// Build wrapped strip lines for up to [`crate::bookmark::BOOKMARK_DISPLAY_N`]
+/// newest bookmarks, truncated to `max_h` physical rows (no `…` ellipsis).
+pub fn build_bookmark_strip_lines(app: &App, width: u16, max_h: u16) -> Vec<Line<'static>> {
+    if max_h == 0 || width == 0 {
+        return Vec::new();
+    }
+    let text_cols = width.saturating_sub(3) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for bm in app.bookmarks.display_recent() {
+        if lines.len() >= max_h as usize {
+            break;
+        }
+        let alive = app.bookmark_alive(bm.row_id);
+        let (mark, style) = if alive {
+            ("★", theme::bookmark_label_style())
+        } else {
+            ("☆", theme::bookmark_stale_style())
+        };
+        let mut first = true;
+        // Preserve hard newlines in msg, then wrap each logical line by width.
+        for logical in bm.label.split('\n') {
+            let ranges = if text_cols == 0 {
+                vec![(0usize, 0usize)]
+            } else {
+                wrap_ranges(logical, text_cols)
+            };
+            for (s, e) in ranges {
+                if lines.len() >= max_h as usize {
+                    break;
+                }
+                let chunk = logical.get(s..e).unwrap_or("").to_string();
+                let text = if first {
+                    first = false;
+                    format!(" {mark} {chunk}")
+                } else {
+                    format!("   {chunk}")
+                };
+                lines.push(Line::from(Span::styled(text, style)));
+            }
+            if lines.len() >= max_h as usize {
+                break;
+            }
+        }
+    }
+    lines
+}
+
+/// M2: up to 3 newest bookmarks inside the Log region (wrapped, height-capped).
+pub fn render_bookmark_strip(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
     if area.height == 0 {
         return;
     }
     frame.render_widget(Block::default().style(theme::bookmark_strip_style()), area);
-    let recent = app.bookmarks.display_recent();
-    // " ★ " / " ☆ " prefix is 3 cols; fit the rest to the strip width.
-    let text_cols = area.width.saturating_sub(3) as usize;
-    let lines: Vec<Line> = recent
-        .iter()
-        .take(area.height as usize)
-        .map(|bm| {
-            let alive = app.bookmark_alive(bm.row_id);
-            let (mark, style) = if alive {
-                ("★", theme::bookmark_label_style())
-            } else {
-                ("☆", theme::bookmark_stale_style())
-            };
-            let text = fit_label(&bm.label, text_cols);
-            Line::from(Span::styled(format!(" {mark} {text}"), style))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+    let shown: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
+    frame.render_widget(Paragraph::new(shown), area);
 }
 
 fn group_dot_span(enabled: bool, selected: bool) -> Span<'static> {
@@ -1365,6 +1519,46 @@ fn committed_chip_spans(chips: &[crate::input::Chip], exclude_mode: bool) -> Vec
     spans
 }
 
+/// Wrap committed pills to `width` (each chip is an atomic flow group).
+fn committed_chip_lines(
+    chips: &[crate::input::Chip],
+    exclude_mode: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    if chips.is_empty() {
+        return Vec::new();
+    }
+    let groups: Vec<Vec<Span<'static>>> = chips
+        .iter()
+        .map(|chip| {
+            if exclude_mode {
+                theme::exclude_pill_spans(chip.field, &chip.value, false)
+            } else {
+                theme::chip_pill_spans(chip.field, &chip.value, false)
+            }
+        })
+        .collect();
+    flow_wrap_groups(groups, width)
+}
+
+/// Rows needed for committed chips in the picker search band.
+/// Caps so at least one candidate row remains above the search input.
+fn committed_chip_rows(
+    chips: &[crate::input::Chip],
+    exclude_mode: bool,
+    width: u16,
+    left_height: u16,
+) -> u16 {
+    if chips.is_empty() {
+        return 0;
+    }
+    let rows = committed_chip_lines(chips, exclude_mode, width)
+        .len()
+        .max(1) as u16;
+    let max_chip = left_height.saturating_sub(PICKER_SEARCH_HEIGHT.saturating_add(1));
+    rows.min(max_chip)
+}
+
 /// Display-column width of styled spans (sum of content widths).
 fn spans_display_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|s| s.content.width()).sum()
@@ -1507,9 +1701,8 @@ pub fn render_input_modal(
     let (spans, caret_col) = input_content_spans(input, mode == Mode::Insert, Some(inner.width));
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     caret_col.map(|col| Position {
-        x: inner
-            .x
-            .saturating_add(col.min(inner.width.saturating_sub(1))),
+        // `col == width` means after the last visible char (into right padding/border).
+        x: inner.x.saturating_add(col.min(inner.width)),
         y: inner.y,
     })
 }
@@ -1529,9 +1722,7 @@ pub fn render_input_box(
     let (spans, caret_col) = input_content_spans(input, mode == Mode::Insert, Some(inner.width));
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     caret_col.map(|col| Position {
-        x: inner
-            .x
-            .saturating_add(col.min(inner.width.saturating_sub(1))),
+        x: inner.x.saturating_add(col.min(inner.width)),
         y: inner.y,
     })
 }
@@ -1551,9 +1742,7 @@ pub fn render_highlight_modal(
     );
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     Some(Position {
-        x: inner
-            .x
-            .saturating_add(caret_col.min(inner.width.saturating_sub(1))),
+        x: inner.x.saturating_add(caret_col.min(inner.width)),
         y: inner.y,
     })
 }
@@ -1897,16 +2086,15 @@ pub fn render_time_panel(app: &App, frame: &mut Frame, area: Rect) -> Option<Pos
     let y = inner
         .y
         .saturating_add(caret_row.min(inner.height.saturating_sub(1)));
-    let x = inner
-        .x
-        .saturating_add(caret_col.min(inner.width.saturating_sub(1)));
+    // `caret_col == width` means after the last visible char.
+    let x = inner.x.saturating_add(caret_col.min(inner.width));
     Some(Position { x, y })
 }
 
-/// H1 Preview window: sampled result lines (Filter) or faint-highlighted hits (Search).
+/// H1 Preview window: LogList-styled single-line hits (Filter / Highlight / Search).
 pub fn render_preview(
     title: &str,
-    lines: &[crate::preview::PreviewLine],
+    lines: &[crate::preview::PreviewHit],
     placeholder: &str,
     frame: &mut Frame,
     area: Rect,
@@ -1925,31 +2113,27 @@ pub fn render_preview(
         );
         return;
     }
+    let area_width = inner.width as usize;
     let items: Vec<ListItem> = lines
         .iter()
-        .map(|line| {
-            if let Some((s, e)) = line.highlight {
-                let s = s.min(line.text.len());
-                let e = e.min(line.text.len()).max(s);
-                ListItem::new(Line::from(vec![
-                    Span::raw(line.text[..s].to_string()),
-                    Span::styled(
-                        line.text[s..e].to_string(),
-                        theme::preview_highlight_style(),
-                    ),
-                    Span::raw(line.text[e..].to_string()),
-                ]))
-            } else {
-                ListItem::new(Span::raw(line.text.clone()))
-            }
+        .map(|hit| {
+            let patterns: Vec<PaintPattern<'_>> = hit
+                .pattern
+                .as_deref()
+                .map(|p| vec![(p, 0usize, true)])
+                .unwrap_or_default();
+            ListItem::new(render_entry_line_single(&hit.row, &patterns, area_width))
         })
         .collect();
     frame.render_widget(List::new(items), inner);
 }
 
 /// fzf left-pane committed pills plus search prompt:
-/// mode icon (`>` / `＋` / `✎`) + optional `field:` + draft.
+/// mode icon (search / `＋` / `✎`) + optional `field:` + draft.
 /// Returns hardware cursor position for the draft caret.
+///
+/// `chip_rows` is the height reserved above the rounded input for wrapped
+/// committed chips (must match [`picker_left_stack`]).
 pub fn render_picker_search_line(
     mode: &crate::picker::PickerMode,
     text: &str,
@@ -1957,6 +2141,9 @@ pub fn render_picker_search_line(
     chips: &[crate::input::Chip],
     exclude_chips: bool,
     draft_field: Option<ChipField>,
+    // Override mode icon (e.g. bookmark glyph for Bookmark picker).
+    prompt_icon: Option<&'static str>,
+    chip_rows: u16,
     frame: &mut Frame,
     area: Rect,
 ) -> Option<Position> {
@@ -1964,19 +2151,16 @@ pub fn render_picker_search_line(
         return None;
     }
 
-    let show_chips = !chips.is_empty() && area.height > PICKER_SEARCH_HEIGHT;
-    let chip_h = if show_chips { 1 } else { 0 };
-    if show_chips {
+    let chip_h = chip_rows.min(area.height.saturating_sub(PICKER_SEARCH_HEIGHT.min(area.height)));
+    if chip_h > 0 && !chips.is_empty() {
         let chip_area = Rect {
             x: area.x,
             y: area.y,
             width: area.width,
-            height: 1,
+            height: chip_h,
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(committed_chip_spans(chips, exclude_chips))),
-            chip_area,
-        );
+        let lines = committed_chip_lines(chips, exclude_chips, chip_area.width);
+        frame.render_widget(Paragraph::new(lines), chip_area);
     }
 
     let input_area = Rect {
@@ -2007,7 +2191,10 @@ pub fn render_picker_search_line(
         return None;
     }
 
-    let mut prompt_spans = vec![theme::picker_mode_prefix(mode)];
+    let mut prompt_spans = vec![match prompt_icon {
+        Some(icon) => theme::picker_prompt_prefix(icon),
+        None => theme::picker_mode_prefix(mode),
+    }];
     if let Some(field) = draft_field {
         prompt_spans.push(Span::styled(
             format!("{} {}:", theme::field_icon(field), field.keyword()),
@@ -2020,12 +2207,21 @@ pub fn render_picker_search_line(
     prompt_spans.extend(draft_spans);
     frame.render_widget(Paragraph::new(Line::from(prompt_spans)), content);
     let x_off = (prefix_w as u16).saturating_add(caret_col);
+    // `x_off == content.width` places the caret after the last visible char
+    // (into the right horizontal padding).
     Some(Position {
-        x: content
-            .x
-            .saturating_add(x_off.min(content.width.saturating_sub(1))),
+        x: content.x.saturating_add(x_off.min(content.width)),
         y: content.y,
     })
+}
+
+/// Right-pane content for [`render_picker`].
+pub enum PickerRightPane<'a> {
+    /// Filter/Highlight-style sampled log hits.
+    Hits(&'a [crate::preview::PreviewHit]),
+    /// Bookmark panel: reuse `p` Fields detail for the selected row.
+    /// `None` means the bookmarked row is missing/evicted.
+    Detail(Option<&'a crate::model::EntryRow>),
 }
 
 /// fzf-style picker shell: left candidates + bottom search, right Preview.
@@ -2045,23 +2241,30 @@ pub fn render_picker(
     actions: &[ActionKind],
     selected: usize,
     empty_msg: &str,
-    preview_lines: &[crate::preview::PreviewLine],
+    right_pane: PickerRightPane<'_>,
     left_ratio: f32,
     show_preview: bool,
+    prompt_icon: Option<&'static str>,
     frame: &mut Frame,
     frame_area: Rect,
 ) -> Option<Position> {
     let picker_area = picker_frame_rect(frame_area, show_preview);
     frame.render_widget(Clear, picker_area);
 
+    let split_ratio = if show_preview {
+        PICKER_PREVIEW_LEFT_RATIO
+    } else {
+        left_ratio
+    };
     let (left, right) = if show_preview {
-        let (l, r) = split_picker_lr_gapped(picker_area, left_ratio);
+        let (l, r) = split_picker_lr_gapped(picker_area, split_ratio);
         (l, Some(r))
     } else {
         (picker_area, None)
     };
     let left_inner = render_modal_shell(title, frame, left);
-    let (candidates_area, search_area) = picker_left_stack(left_inner, !chips.is_empty());
+    let chip_rows = committed_chip_rows(chips, exclude_chips, left_inner.width, left_inner.height);
+    let (candidates_area, search_area) = picker_left_stack(left_inner, chip_rows);
 
     if candidates_area.height > 0 {
         render_candidate_list(
@@ -2085,13 +2288,45 @@ pub fn render_picker(
         chips,
         exclude_chips,
         draft_field,
+        prompt_icon,
+        chip_rows,
         frame,
         search_area,
     );
     if let Some(right) = right {
-        render_preview("Preview", preview_lines, "无预览", frame, right);
+        match right_pane {
+            PickerRightPane::Hits(preview_lines) => {
+                render_preview("Preview", preview_lines, "无预览", frame, right);
+            }
+            PickerRightPane::Detail(row) => {
+                render_picker_detail(row, frame, right);
+            }
+        }
     }
     cursor
+}
+
+/// Bookmark picker right pane: same Fields shell/content as LogList `p`.
+pub fn render_picker_detail(
+    row: Option<&crate::model::EntryRow>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let inner = render_modal_shell("Detail", frame, area);
+    let lines = if row.is_some() {
+        detail_field_lines(row, inner.width)
+    } else {
+        vec![Line::from(Span::styled(
+            "行已淘汰".to_string(),
+            theme::preview_placeholder_style(),
+        ))]
+    };
+    let max_rows = inner.height as usize;
+    let shown: Vec<Line<'static>> = lines.into_iter().take(max_rows).collect();
+    frame.render_widget(Paragraph::new(shown), inner);
 }
 
 /// Destructive picker action confirmation, overlaid at the picker center.
@@ -2663,6 +2898,35 @@ mod tests {
     fn test_wrap_ranges_short_text_is_single_range() {
         let ranges = wrap_ranges("short", 80);
         assert_eq!(ranges, vec![(0, 5)]);
+    }
+
+    #[test]
+    fn test_render_entry_line_single_truncates_msg_with_ellipsis() {
+        let long = "word ".repeat(40);
+        let line = format!("04-02 10:00:00.000  1  1 I Tag     : {long}");
+        let row = EntryRow::from_line(&line).unwrap();
+        let rendered = render_entry_line_single(&row, &[], 60);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('…'), "single-line preview must ellipsize: {text}");
+        assert!(
+            !text.contains('\n'),
+            "single-line preview must stay one physical line"
+        );
+        assert!(text.starts_with("04-02 10:00:00.000"), "must start at timestamp");
+    }
+
+    #[test]
+    fn test_render_entry_line_single_highlights_pattern() {
+        let row =
+            EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred").unwrap();
+        let patterns = [("error", 0usize, true)];
+        let rendered = render_entry_line_single(&row, &patterns, 200);
+        let matched = rendered
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "error")
+            .expect("highlight span");
+        assert_eq!(matched.style, theme::highlight_style_active(0));
     }
 
     #[test]
@@ -3263,16 +3527,20 @@ mod tests {
     #[test]
     fn picker_left_stack_search_at_bottom() {
         let left = Rect::new(0, 0, 40, 20);
-        let (cand, search) = picker_left_stack(left, false);
+        let (cand, search) = picker_left_stack(left, 0);
         assert_eq!(search.height, 3);
         assert_eq!(search.y + search.height, left.y + left.height);
         assert_eq!(cand.y, left.y);
         assert_eq!(cand.height, left.height - 3);
 
-        let (cand, search) = picker_left_stack(left, true);
+        let (cand, search) = picker_left_stack(left, 1);
         assert_eq!(search.height, 4);
         assert_eq!(search.y + search.height, left.y + left.height);
         assert_eq!(cand.height, left.height - 4);
+
+        let (cand, search) = picker_left_stack(left, 2);
+        assert_eq!(search.height, 5);
+        assert_eq!(cand.height, left.height - 5);
     }
 
     #[test]
@@ -3321,6 +3589,8 @@ mod tests {
                     &[],
                     false,
                     None,
+                    None,
+                    0,
                     frame,
                     frame.area(),
                 );
@@ -3335,8 +3605,51 @@ mod tests {
         assert_eq!(buf[(1, 1)].symbol(), " ");
         assert_eq!(buf[(2, 1)].symbol(), theme::GLYPH_MODE_MANAGE);
         assert_eq!(buf[(3, 1)].symbol(), " ");
-        assert_eq!(buf[(4, 1)].symbol(), "a");
-        assert_eq!(cursor, Some(Position { x: 7, y: 1 }));
+        assert_eq!(buf[(4, 1)].symbol(), " ");
+        assert_eq!(buf[(5, 1)].symbol(), "a");
+        assert_eq!(cursor, Some(Position { x: 8, y: 1 }));
+    }
+
+    #[test]
+    fn picker_search_line_cursor_after_last_char_when_full() {
+        // area 20: border 2 → inner 18 → pad 1+1 → content 16; prefix icon+"  " = 3
+        // → draft budget 13. Fill with 13 chars at end caret.
+        let text = "abcdefghijklm"; // 13
+        assert_eq!(text.len(), 13);
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut cursor = None;
+        terminal
+            .draw(|frame| {
+                cursor = render_picker_search_line(
+                    &crate::picker::PickerMode::Manage,
+                    text,
+                    text.chars().count(),
+                    &[],
+                    false,
+                    None,
+                    None,
+                    0,
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+
+        let pos = cursor.expect("hardware cursor");
+        // content.x = 2; content.width = 16 → caret after last char at x = 18
+        // (right padding), still left of the right border at x = 19.
+        assert_eq!(pos.x, 18, "cursor should sit after last visible char");
+        assert_eq!(pos.y, 1);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(19, 1)].symbol(), "│");
+        // Last draft char 'm' occupies content col 15 → screen x = 2+15 = 17
+        assert_eq!(buf[(17, 1)].symbol(), "m");
+        assert!(
+            pos.x > 17,
+            "cursor must be to the right of last char, got {:?}",
+            pos
+        );
     }
 
     #[test]
@@ -3358,6 +3671,8 @@ mod tests {
                     &chips,
                     false,
                     None,
+                    None,
+                    1,
                     frame,
                     frame.area(),
                 );
@@ -3369,6 +3684,74 @@ mod tests {
         assert!(content.lines().next().unwrap_or_default().contains("MyTag"));
         assert_eq!(buf[(0, 1)].symbol(), "╭");
         assert_eq!(buf[(39, 3)].symbol(), "╯");
+    }
+
+    #[test]
+    fn picker_committed_chips_wrap_and_squeeze_candidates() {
+        use crate::input::{Chip, ChipField};
+
+        // Narrow width forces each long pill onto its own row.
+        let chips = vec![
+            Chip {
+                field: ChipField::Tag,
+                value: "AAAAAAAA".into(),
+            },
+            Chip {
+                field: ChipField::Msg,
+                value: "BBBBBBBB".into(),
+            },
+        ];
+        let width = 18u16;
+        let left_h = 20u16;
+        let rows = committed_chip_rows(&chips, false, width, left_h);
+        assert!(rows >= 2, "expected wrap to >=2 rows, got {rows}");
+
+        let left = Rect::new(0, 0, width, left_h);
+        let (cand, search) = picker_left_stack(left, rows);
+        assert_eq!(search.height, PICKER_SEARCH_HEIGHT + rows);
+        assert_eq!(cand.height, left_h - search.height);
+        assert!(cand.height >= 1);
+
+        let backend = TestBackend::new(width, search.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let _ = render_picker_search_line(
+                    &crate::picker::PickerMode::New,
+                    "",
+                    0,
+                    &chips,
+                    false,
+                    None,
+                    None,
+                    rows,
+                    frame,
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("AAAAAAAA"), "first chip visible: {content}");
+        assert!(
+            content.contains("BBBBBBBB"),
+            "wrapped second chip must remain visible: {content}"
+        );
+        // Second chip should not share the first chip row when wrapped.
+        let lines: Vec<&str> = content.lines().collect();
+        assert!(
+            lines.len() >= 2,
+            "chip band + input need multiple rows: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("AAAAAAAA"),
+            "row0 should hold first chip: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("BBBBBBBB"),
+            "row1 should hold second chip: {:?}",
+            lines[1]
+        );
     }
 
     #[test]
@@ -3398,9 +3781,10 @@ mod tests {
                     &[],
                     0,
                     "无项目",
-                    &[],
+                    PickerRightPane::Hits(&[]),
                     0.4,
                     true,
+                    None,
                     frame,
                     frame.area(),
                 );
@@ -3434,9 +3818,10 @@ mod tests {
                     &[],
                     0,
                     "无项目",
-                    &[],
+                    PickerRightPane::Hits(&[]),
                     0.4,
                     true,
+                    None,
                     frame,
                     frame.area(),
                 );
@@ -3479,9 +3864,10 @@ mod tests {
                     &[],
                     0,
                     "无项目",
-                    &[],
+                    PickerRightPane::Hits(&[]),
                     0.4,
                     true,
+                    None,
                     frame,
                     frame.area(),
                 );
@@ -3494,6 +3880,118 @@ mod tests {
         assert_eq!(confirm_dialog_question(&confirm), "删除选中？");
         assert!(content.contains("y/Enter"));
         assert!(content.contains("n/Esc"));
+    }
+
+    #[test]
+    fn bookmark_strip_max_height_is_forty_percent() {
+        assert_eq!(bookmark_strip_max_height(10), 4);
+        assert_eq!(bookmark_strip_max_height(5), 2);
+        assert_eq!(bookmark_strip_max_height(1), 1);
+        assert_eq!(bookmark_strip_max_height(0), 1);
+    }
+
+    #[test]
+    fn build_bookmark_strip_lines_wraps_without_ellipsis() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let long_msg = "word ".repeat(20);
+        tx.send(
+            crate::model::EntryRow::from_line(&format!(
+                "04-02 10:00:00.000  1  1 I Tag     : {long_msg}"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 0;
+        app.bookmark_add_current();
+
+        let width = 40u16;
+        let max_h = bookmark_strip_max_height(50);
+        let lines = build_bookmark_strip_lines(&app, width, max_h);
+        assert!(lines.len() > 1, "long msg must wrap to multiple strip rows");
+        assert!(lines.len() as u16 <= max_h);
+        let joined: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            !joined.contains('…'),
+            "strip must not ellipsize msg within soft cap: {joined:?}"
+        );
+        assert!(joined.contains("word"), "msg content preserved");
+    }
+
+    #[test]
+    fn build_bookmark_strip_lines_respects_height_cap() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : short")
+                .unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 0;
+        app.bookmark_add_current();
+        let row_id = app.bookmarks.items[0].row_id;
+        // Inject a long multi-line label (msg may contain hard newlines).
+        app.update_bookmark_label(
+            row_id,
+            format!(
+                "04-02 10:00:00.000 I Tag line1\n{}",
+                "x".repeat(200)
+            ),
+        );
+
+        let lines = build_bookmark_strip_lines(&app, 30, 3);
+        assert_eq!(lines.len(), 3, "must truncate to max_h physical rows");
+    }
+
+    #[test]
+    fn render_picker_detail_shows_fields() {
+        let row = crate::model::EntryRow::from_line(
+            "04-02 10:00:00.000  1  1 I TagA    : hello detail",
+        )
+        .unwrap();
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_picker_detail(Some(&row), frame, frame.area());
+            })
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("Detail"));
+        assert!(content.contains("TagA"));
+        assert!(content.contains("hello detail"));
+    }
+
+    #[test]
+    fn render_picker_detail_stale_placeholder() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_picker_detail(None, frame, frame.area());
+            })
+            .unwrap();
+        // CJK wide glyphs leave empty spacer cells; collapse whitespace for assert.
+        let content: String = cell_text(terminal.backend().buffer())
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            content.contains("Detail") && content.contains("行已淘汰"),
+            "stale detail must show placeholder, got: {content:?}"
+        );
     }
 
     #[test]
@@ -3528,11 +4026,34 @@ mod tests {
         let full = picker_frame_rect(frame, true);
         let compact = picker_frame_rect(frame, false);
         assert_eq!(compact.width, full.width / 2);
-        assert_eq!(compact.height, full.height);
+        assert_eq!(compact.height, full.height / 2);
         assert_eq!(
             compact.x,
             frame.x + (frame.width.saturating_sub(compact.width)) / 2
         );
+        assert_eq!(
+            compact.y,
+            frame.y + (frame.height.saturating_sub(compact.height)) / 2
+        );
+    }
+
+    #[test]
+    fn preview_popup_rect_fills_remaining_space() {
+        let frame = Rect::new(0, 0, 80, 40);
+        let anchor = Rect::new(10, 2, 40, 3);
+        let prev = preview_popup_rect(anchor, frame);
+        assert!(prev.height > 12, "should fill below modal, got {}", prev.height);
+        assert_eq!(prev.y + prev.height, frame.y + frame.height);
+    }
+
+    #[test]
+    fn picker_preview_capacity_uses_right_pane_inner() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let cap = picker_preview_capacity(frame, PICKER_PREVIEW_LEFT_RATIO);
+        let picker = picker_frame_rect(frame, true);
+        let (_l, r) = split_picker_lr_gapped(picker, PICKER_PREVIEW_LEFT_RATIO);
+        assert_eq!(cap, r.height.saturating_sub(2) as usize);
+        assert!(cap > 10, "tall picker should expose more than old PREVIEW_LIMIT");
     }
 
     #[test]

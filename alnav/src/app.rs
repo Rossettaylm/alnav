@@ -1311,6 +1311,26 @@ impl App {
         self.row_at(self.cursor)
     }
 
+    /// Resolve a bookmarked `row_id` to an owned row (Stream: rows or matched;
+    /// File: `row_id - 1`). Returns `None` when the row has left the buffers.
+    pub fn row_by_id(&self, row_id: u64) -> Option<EntryRow> {
+        match &self.store {
+            RowStore::Stream(s) => s
+                .matched
+                .iter()
+                .chain(s.rows.iter())
+                .find(|r| r.row_id == row_id)
+                .cloned(),
+            RowStore::File(f) => {
+                if row_id == 0 {
+                    return None;
+                }
+                let i = (row_id - 1) as usize;
+                f.row_at(i)
+            }
+        }
+    }
+
     /// Flash a short status-bar toast that auto-hides after 3 seconds.
     pub fn set_flash(&mut self, msg: impl Into<String>) {
         self.status_msg = Some(msg.into());
@@ -1362,7 +1382,7 @@ impl App {
         let row_id = row.row_id;
         let bm = Bookmark {
             row_id,
-            label: bookmark_label(&row.tag, &row.msg),
+            label: bookmark_label(&row.timestamp, row.level.as_char(), &row.tag, &row.msg),
         };
         match self.bookmarks.try_add(bm) {
             Ok(()) => {
@@ -1734,8 +1754,8 @@ impl App {
         self.push_single_chip_filter(Chip { field, value })
     }
 
-    /// Open msg token picker for the current row (`c`/`C`+`m`).
-    pub fn begin_msg_chip_picker(&mut self, as_exclude: bool) {
+    /// Open msg token picker for the current row (`c`/`C`/`y`+`m`).
+    pub fn begin_msg_token_picker(&mut self, purpose: crate::picker::MsgChipPurpose) {
         let Some(row) = self.current_row() else {
             self.set_flash("NO ROW");
             return;
@@ -1744,28 +1764,31 @@ impl App {
         if tokens.is_empty() {
             self.pending_chip = false;
             self.pending_exclude = false;
+            self.pending_yank = false;
             self.pending_leader = false;
             self.set_flash("NO TOKENS");
         } else {
             self.pending_chip = false;
             self.pending_exclude = false;
+            self.pending_yank = false;
             self.pending_leader = false;
-            self.open_picker(crate::picker::PickerKind::MsgChip {
-                exclude: as_exclude,
-            });
+            self.open_picker(crate::picker::PickerKind::MsgChip { purpose });
             let picker = self.picker.as_mut().expect("picker just opened");
             picker.enter_new();
             picker.choices = tokens;
         }
     }
 
-    /// Confirm msg picker selection / draft fallback → push msg include or exclude.
-    pub fn confirm_msg_chip_picker(&mut self) -> bool {
+    /// Confirm msg-token picker: yank / exclude / open Filter|Highlight ActionList.
+    /// Returns [`Some`] text when the caller should yank to the clipboard.
+    pub fn confirm_msg_token_picker(&mut self) -> Option<String> {
         use crate::input::{Chip, ChipField};
-        let Some((as_exclude, value)) = self.picker.as_ref().and_then(|picker| {
-            let crate::picker::PickerKind::MsgChip { exclude } = picker.kind else {
+        use crate::picker::{MsgChipPurpose, PickerKind};
+        let Some((purpose, value)) = self.picker.as_ref().and_then(|picker| {
+            let PickerKind::MsgChip { purpose } = &picker.kind else {
                 return None;
             };
+            let purpose = *purpose;
             let visible = crate::picker::PickerSession::filtered_indices(
                 &picker.choices,
                 picker.draft.as_str(),
@@ -1775,20 +1798,74 @@ impl App {
                 .and_then(|&index| picker.choices.get(index))
                 .cloned()
                 .or_else(|| (!picker.draft.is_empty()).then(|| picker.draft.to_string()))?;
-            Some((exclude, value))
+            Some((purpose, value))
         }) else {
             self.set_flash("NO TOKENS");
+            return None;
+        };
+        match purpose {
+            MsgChipPurpose::Yank => {
+                self.close_picker();
+                Some(value)
+            }
+            MsgChipPurpose::Chip { exclude: true } => {
+                self.close_picker();
+                let _ = self.push_exclude_chip(Chip {
+                    field: ChipField::Msg,
+                    value,
+                });
+                None
+            }
+            MsgChipPurpose::Chip { exclude: false } => {
+                self.open_msg_action_list(value);
+                None
+            }
+        }
+    }
+
+    /// Open post-`cm` ActionList (Filter default, Highlight second).
+    pub fn open_msg_action_list(&mut self, value: String) {
+        self.open_picker(crate::picker::PickerKind::ActionList { value });
+        let picker = self.picker.as_mut().expect("picker just opened");
+        picker.choices = vec!["Filter".into(), "Highlight".into()];
+        picker.selected = 0;
+    }
+
+    /// Confirm ActionList selection for a msg token → Filter or Highlight.
+    pub fn confirm_msg_action_list(&mut self) -> bool {
+        use crate::input::{Chip, ChipField};
+        use crate::picker::{PickerKind, PickerSession};
+        let Some((value, choice)) = self.picker.as_ref().and_then(|picker| {
+            let PickerKind::ActionList { value } = &picker.kind else {
+                return None;
+            };
+            let visible = PickerSession::contains_indices(&picker.choices, picker.query.as_str());
+            let choice = visible
+                .get(picker.selected)
+                .and_then(|&i| picker.choices.get(i))
+                .cloned()?;
+            Some((value.clone(), choice))
+        }) else {
             return false;
         };
         self.close_picker();
-        let chip = Chip {
-            field: ChipField::Msg,
-            value,
-        };
-        if as_exclude {
-            self.push_exclude_chip(chip)
-        } else {
-            self.push_single_chip_filter(chip)
+        match choice.as_str() {
+            "Filter" => self.push_single_chip_filter(Chip {
+                field: ChipField::Msg,
+                value,
+            }),
+            "Highlight" => {
+                let Some(group) = HighlightGroup::from_pattern(&value) else {
+                    self.set_flash("BAD PATTERN");
+                    return false;
+                };
+                let idx = self.push_or_find_highlight_group(group);
+                self.jump_first_match_of(idx);
+                self.following = false;
+                self.set_flash("HIGHLIGHT");
+                true
+            }
+            _ => false,
         }
     }
 

@@ -8,17 +8,15 @@ use crate::input::{build_group_from_chips, Chip, ChipField, InputBox};
 use crate::model::EntryRow;
 use crate::store::RowStore;
 
-/// Max rows shown in the Preview window.
-pub const PREVIEW_LIMIT: usize = 10;
 /// Hard cap on rows scanned while building a preview (anti-stall).
 pub const PREVIEW_SCAN_CAP: usize = 4000;
 
-/// One preview line for Filter (plain) or Search (optional match byte range in msg/tag).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreviewLine {
-    pub text: String,
-    /// Byte range into `text` for faint search highlight, if any.
-    pub highlight: Option<(usize, usize)>,
+/// One preview hit: owned row plus optional highlight pattern for paint.
+#[derive(Debug, Clone)]
+pub struct PreviewHit {
+    pub row: EntryRow,
+    /// When set, Preview paints this pattern with LogList highlight colors.
+    pub pattern: Option<String>,
 }
 
 /// Estimate chips that would be committed from the Input modal (pills + draft).
@@ -94,23 +92,6 @@ fn row_passes_preview(
         return false;
     }
     lock_ok(app, row)
-}
-
-fn format_preview_line(row: &EntryRow) -> String {
-    let tag = if row.tag.is_empty() { "-" } else { &row.tag };
-    let msg = if row.msg.is_empty() {
-        &row.raw
-    } else {
-        &row.msg
-    };
-    let line = format!("{} {} {}", row.level.as_char(), tag, msg);
-    // Keep preview rows short for the narrow modal width.
-    if line.chars().count() > 72 {
-        let truncated: String = line.chars().take(69).collect();
-        format!("{truncated}…")
-    } else {
-        line
-    }
 }
 
 fn preview_source_len(app: &App) -> usize {
@@ -203,8 +184,12 @@ fn compile_temp_excludes(chips: Vec<Chip>) -> Result<Vec<ExcludeEntry>, String> 
     Ok(out)
 }
 
-/// Filter/Exclude Input preview lines (final visible rows under draft).
-pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
+/// Filter/Exclude Input preview hits (final visible rows under draft).
+/// `limit` is the number of content rows the Preview pane can show.
+pub fn preview_filter_lines(app: &App, input: &InputBox, limit: usize) -> Vec<PreviewHit> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let chips = input_estimated_chips(input);
     let (temp_include, extra_excludes) = if input.exclude_mode {
         (None, compile_temp_excludes(chips).unwrap_or_default())
@@ -225,31 +210,35 @@ pub fn preview_filter_lines(app: &App, input: &InputBox) -> Vec<PreviewLine> {
             .unwrap_or(n.saturating_sub(1))
     };
 
-    let indices = sample_near_anchor(app, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
+    let indices = sample_near_anchor(app, anchor, PREVIEW_SCAN_CAP, limit, |row| {
         row_passes_preview(app, row, temp_include.as_ref(), &extra_excludes)
     });
     indices
         .into_iter()
         .filter_map(|i| {
             let row = preview_row_at(app, i)?;
-            Some(PreviewLine {
-                text: format_preview_line(&row),
-                highlight: None,
+            Some(PreviewHit {
+                row,
+                pattern: None,
             })
         })
         .collect()
 }
 
-/// Search draft preview: matching rows with faint highlight ranges.
+/// Search draft preview: matching rows with highlight pattern for paint.
 /// Empty draft → empty vec (caller shows placeholder / folds).
-pub fn preview_search_lines(app: &App) -> Result<Vec<PreviewLine>, ()> {
-    preview_highlight_pattern_lines(app, app.highlight_box.draft.as_str())
+pub fn preview_search_lines(app: &App, limit: usize) -> Result<Vec<PreviewHit>, ()> {
+    preview_highlight_pattern_lines(app, app.highlight_box.draft.as_str(), limit)
 }
 
 /// Search preview for a caller-owned draft (for example the unified picker).
-pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<PreviewLine>, ()> {
+pub fn preview_highlight_pattern_lines(
+    app: &App,
+    pattern: &str,
+    limit: usize,
+) -> Result<Vec<PreviewHit>, ()> {
     let draft = pattern.trim();
-    if draft.is_empty() {
+    if draft.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
     let group = HighlightGroup::from_pattern(draft).ok_or(())?;
@@ -261,7 +250,7 @@ pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<P
             .unwrap_or(n.saturating_sub(1))
     };
 
-    let indices = sample_near_anchor(app, anchor, PREVIEW_SCAN_CAP, PREVIEW_LIMIT, |row| {
+    let indices = sample_near_anchor(app, anchor, PREVIEW_SCAN_CAP, limit, |row| {
         app.row_passes_filters(row) && group.matches_entry(row)
     });
 
@@ -270,9 +259,10 @@ pub fn preview_highlight_pattern_lines(app: &App, pattern: &str) -> Result<Vec<P
         let Some(row) = preview_row_at(app, i) else {
             continue;
         };
-        let text = format_preview_line(&row);
-        let highlight = crate::fuzzy::first_match_byte_range(&text, &group.pattern);
-        out.push(PreviewLine { text, highlight });
+        out.push(PreviewHit {
+            row,
+            pattern: Some(group.pattern.clone()),
+        });
     }
     Ok(out)
 }
@@ -300,15 +290,16 @@ mod tests {
         for c in "Keep".chars() {
             input.push_char(c);
         }
-        let lines = preview_filter_lines(&app, &input);
+        let lines = preview_filter_lines(&app, &input, 10);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].text.contains("Keep"));
+        assert_eq!(lines[0].row.tag, "Keep");
+        assert!(lines[0].pattern.is_none());
     }
 
     #[test]
     fn search_preview_empty_draft_is_empty() {
         let app = App::new(100);
-        assert!(preview_search_lines(&app).unwrap().is_empty());
+        assert!(preview_search_lines(&app, 10).unwrap().is_empty());
     }
 
     #[test]
@@ -320,9 +311,27 @@ mod tests {
         for c in "wor".chars() {
             app.highlight_box.push_char(c);
         }
-        let lines = preview_search_lines(&app).unwrap();
+        let lines = preview_search_lines(&app, 10).unwrap();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].text.contains("world"));
-        assert!(lines[0].highlight.is_some());
+        assert!(lines[0].row.msg.contains("world"));
+        assert_eq!(lines[0].pattern.as_deref(), Some("wor"));
+    }
+
+    #[test]
+    fn filter_preview_respects_limit() {
+        let mut app = App::new(100);
+        for i in 0..20 {
+            drain_line(
+                &mut app,
+                &format!("04-02 10:00:{i:02}.000  1  1 I Keep    : msg{i}"),
+            );
+        }
+        let mut input = InputBox::default();
+        input.set_field(ChipField::Tag);
+        for c in "Keep".chars() {
+            input.push_char(c);
+        }
+        let lines = preview_filter_lines(&app, &input, 5);
+        assert_eq!(lines.len(), 5);
     }
 }

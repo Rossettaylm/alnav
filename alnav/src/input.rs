@@ -217,7 +217,7 @@ pub fn build_group_from_chips(
     }))
 }
 
-/// H7 `c`+`m`: split msg into alphanumeric tokens (len ≥ 2, ignore-case dedupe, ≤8).
+/// H7 `c`/`y`+`m`: split msg into alphanumeric tokens (len ≥ 2, ignore-case dedupe, uncapped).
 pub fn tokenize_msg_tokens(msg: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -242,7 +242,7 @@ fn push_msg_token(
     out: &mut Vec<String>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    if token.len() < 2 || out.len() >= 8 {
+    if token.len() < 2 {
         return;
     }
     let key = token.to_ascii_lowercase();
@@ -586,15 +586,16 @@ mod msg_tokenize_tests {
     use super::*;
 
     #[test]
-    fn tokenize_splits_on_non_alnum_drops_short_dedupes_caps() {
+    fn tokenize_splits_on_non_alnum_drops_short_dedupes_uncapped() {
         // `_` and `!` are separators; "AB" dedupes against earlier "ab"; "z" dropped (len<2).
         let tokens = tokenize_msg_tokens("ab cd!ef_gh AB xy z more1 more2 more3 more4");
         assert_eq!(
             tokens,
-            vec!["ab", "cd", "ef", "gh", "xy", "more1", "more2", "more3"]
+            vec![
+                "ab", "cd", "ef", "gh", "xy", "more1", "more2", "more3", "more4"
+            ]
         );
         assert!(!tokens.iter().any(|t| t == "z"));
-        assert!(!tokens.iter().any(|t| t == "more4")); // capped at 8
     }
 
     #[test]
