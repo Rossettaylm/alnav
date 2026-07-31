@@ -108,6 +108,8 @@ fn increment(cache: &mut LruCache<String, u32>, key: String) {
 
 /// Empty query: frequency desc. Non-empty: nucleo score desc, then freq, then key.
 /// Checks `cancel` every `check_every` entries (use `usize::MAX` to disable).
+///
+/// Non-empty queries score via [`fuzzy::FuzzyScorer`] (one Pattern/Matcher per call).
 pub fn filter_sort_entries(
     entries: &[(String, u32)],
     query: &str,
@@ -115,24 +117,23 @@ pub fn filter_sort_entries(
     check_every: usize,
 ) -> Vec<String> {
     let check_every = check_every.max(1);
+    let empty_query = query.is_empty();
+    let mut scorer = fuzzy::FuzzyScorer::new(query);
     let mut scored: Vec<(String, u32, u32)> = Vec::new();
     for (i, (k, freq)) in entries.iter().enumerate() {
         if i % check_every == 0 && cancel.load(Ordering::Acquire) {
             return Vec::new();
         }
-        let score = if query.is_empty() {
-            Some(0)
-        } else {
-            fuzzy::fuzzy_score(k, query)
+        let Some(score) = scorer.score(k) else {
+            continue;
         };
-        if let Some(score) = score {
-            scored.push((k.clone(), score, *freq));
-        }
+        scored.push((k.clone(), score, *freq));
     }
     if cancel.load(Ordering::Acquire) {
         return Vec::new();
     }
-    sort_scored(&mut scored, query.is_empty());
+    sort_scored(&mut scored, empty_query);
+    scored.truncate(fuzzy::CANDIDATE_RESULT_CAP);
     scored.into_iter().map(|(k, _, _)| k).collect()
 }
 
@@ -144,18 +145,17 @@ pub fn filter_all_entries(
     check_every: usize,
 ) -> Vec<String> {
     let check_every = check_every.max(1);
+    let empty_query = query.is_empty();
+    let mut scorer = fuzzy::FuzzyScorer::new(query);
     let mut seen = HashSet::new();
     let mut scored: Vec<(String, u32, u32)> = Vec::new();
     for (i, (k, freq)) in entries.iter().enumerate() {
         if i % check_every == 0 && cancel.load(Ordering::Acquire) {
             return Vec::new();
         }
-        let score = if query.is_empty() {
-            Some(0)
-        } else {
-            fuzzy::fuzzy_score(k, query)
+        let Some(score) = scorer.score(k) else {
+            continue;
         };
-        let Some(score) = score else { continue };
         if seen.insert(k.to_lowercase()) {
             scored.push((k.clone(), score, *freq));
         }
@@ -163,7 +163,8 @@ pub fn filter_all_entries(
     if cancel.load(Ordering::Acquire) {
         return Vec::new();
     }
-    sort_scored(&mut scored, query.is_empty());
+    sort_scored(&mut scored, empty_query);
+    scored.truncate(fuzzy::CANDIDATE_RESULT_CAP);
     scored.into_iter().map(|(k, _, _)| k).collect()
 }
 
@@ -260,5 +261,35 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let out = filter_sort_entries(&entries, "k", &cancel, 1);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn filter_sort_respects_result_cap() {
+        use crate::fuzzy::CANDIDATE_RESULT_CAP;
+        let entries: Vec<(String, u32)> = (0..5_000).map(|i| (format!("tok_{i:05}"), 1)).collect();
+        let cancel = AtomicBool::new(false);
+        let out = filter_sort_entries(&entries, "tok", &cancel, 4096);
+        assert_eq!(out.len(), CANDIDATE_RESULT_CAP);
+        let empty = filter_sort_entries(&entries, "", &cancel, 4096);
+        assert_eq!(empty.len(), CANDIDATE_RESULT_CAP);
+    }
+
+    #[test]
+    fn filter_sort_large_msg_vocab_uses_scorer_path() {
+        // Smoke: 100k entries (MSG_CAP) + short query finishes and stays capped.
+        // Regression guard for "rebuild Pattern per row" which made this path laggy.
+        let entries: Vec<(String, u32)> =
+            (0..100_000).map(|i| (format!("tok_{i:05}"), 1)).collect();
+        let cancel = AtomicBool::new(false);
+        let start = std::time::Instant::now();
+        let out = filter_sort_entries(&entries, "tok_99", &cancel, 4096);
+        let elapsed = start.elapsed();
+        assert!(!out.is_empty());
+        assert!(out.len() <= fuzzy::CANDIDATE_RESULT_CAP);
+        // Generous CI bound (debug). Release is typically well under this.
+        assert!(
+            elapsed.as_millis() < 2_000,
+            "100k msg filter took {elapsed:?}; FuzzyScorer reuse likely broken"
+        );
     }
 }

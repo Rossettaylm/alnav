@@ -108,6 +108,17 @@ that same `picker_area` — never recompute a full-width frame on its own.
 Do NOT reintroduce divider-only shells for popups, or nest a bordered
 candidate list inside an already-bordered Picker pane.
 
+### Candidate panel ResultCap / ViewportPaint
+
+- Every candidate narrowing exit truncates to `fuzzy::CANDIDATE_RESULT_CAP` (256).
+  Empty query must not materialise a full vocab/table for the UI.
+- `render_candidate_list` must not build `ListItem` + `fuzzy_char_indices` for
+  the entire labels vec — only the viewport (`candidate_viewport_range`).
+- Vocab New matching reuses an Arc snapshot per scope; do not re-clone the
+  full Msg cache on the UI thread every keystroke.
+- Batch fuzzy over many haystacks uses `fuzzy::FuzzyScorer` (one Pattern/Matcher
+  per query). Do not call `fuzzy_score` in a hot loop over vocab entries.
+
 ---
 
 ## Testing Requirements

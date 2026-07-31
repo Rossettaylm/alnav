@@ -290,9 +290,9 @@ pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
 
 /// Build label spans with optional fuzzy match coloring (Pattern atoms / multi-range).
 /// `checked` changes the selection-marker (prefix) color for Tab multi-select.
-fn candidate_label_spans(
+fn candidate_label_spans_with_scorer(
     label: &str,
-    query: &str,
+    scorer: &mut crate::fuzzy::FuzzyScorer,
     selected: bool,
     checked: bool,
     base: Style,
@@ -324,7 +324,7 @@ fn candidate_label_spans(
         .max(1);
     let truncated = fit_label(label, label_max);
     let mut spans = vec![Span::styled(prefix, prefix_style)];
-    let idxs = fuzzy::fuzzy_char_indices(&truncated, query);
+    let idxs = scorer.char_indices(&truncated);
     let ranges = fuzzy::char_indices_to_byte_ranges(&truncated, &idxs);
     if ranges.is_empty() {
         spans.push(Span::styled(truncated, base));
@@ -396,6 +396,8 @@ pub fn render_candidate_list(
         return;
     }
     let sel = selected.min(labels.len() - 1);
+    // Reuse one FuzzyScorer across painted labels (same query × many haystacks).
+    let mut paint_scorer = crate::fuzzy::FuzzyScorer::new(query);
     let items: Vec<ListItem> = labels
         .iter()
         .enumerate()
@@ -415,9 +417,9 @@ pub fn render_candidate_list(
                     }
                 }
             }
-            ListItem::new(Line::from(candidate_label_spans(
+            ListItem::new(Line::from(candidate_label_spans_with_scorer(
                 label,
-                query,
+                &mut paint_scorer,
                 is_sel,
                 is_checked,
                 base,

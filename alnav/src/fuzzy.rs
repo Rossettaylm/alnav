@@ -12,6 +12,10 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use crate::input::{Chip, ChipField};
 use crate::model::EntryRow;
 
+/// Hard cap on UI candidate-panel results (ResultCap SLO).
+/// Empty and non-empty queries both truncate to this many rows after ranking.
+pub const CANDIDATE_RESULT_CAP: usize = 256;
+
 /// Separator between tag and msg in Search/Highlight haystacks.
 pub const TAG_MSG_SEP: char = '\t';
 const TAG_MSG_SEP_LEN: usize = 1; // '\t' is one byte
@@ -66,19 +70,68 @@ fn fuzzy_pattern(pattern: &str) -> Pattern {
     )
 }
 
+/// Reusable nucleo scorer for **one query × many haystacks**.
+///
+/// Batch paths (vocab filter, candidate lists) MUST use this instead of calling
+/// [`fuzzy_score`] / recreating `Pattern`+`Matcher` per row — that rebuild cost
+/// dominates at ~100k Msg vocab size.
+///
+/// Semantics match the one-shot helpers: empty query → `Some(0)` for every
+/// haystack; empty haystack + non-empty query → `None`.
+pub struct FuzzyScorer {
+    pattern: Pattern,
+    matcher: Matcher,
+    buf: Vec<char>,
+    empty_query: bool,
+}
+
+impl FuzzyScorer {
+    /// Build a scorer for `query` (ignore-case, Smart normalization, fuzzy atoms).
+    pub fn new(query: &str) -> Self {
+        Self {
+            pattern: fuzzy_pattern(query),
+            matcher: matcher(),
+            buf: Vec::new(),
+            empty_query: query.is_empty(),
+        }
+    }
+
+    /// Nucleo score for `haystack`, if it matches.
+    pub fn score(&mut self, haystack: &str) -> Option<u32> {
+        if self.empty_query {
+            return Some(0);
+        }
+        if haystack.is_empty() {
+            return None;
+        }
+        self.pattern
+            .score(Utf32Str::new(haystack, &mut self.buf), &mut self.matcher)
+    }
+
+    /// Char indices of a fuzzy match; empty if no match / empty query.
+    /// Merges indices from all whitespace-separated atoms.
+    pub fn char_indices(&mut self, haystack: &str) -> Vec<u32> {
+        if self.empty_query || haystack.is_empty() {
+            return Vec::new();
+        }
+        let mut indices = Vec::new();
+        let _ = self.pattern.indices(
+            Utf32Str::new(haystack, &mut self.buf),
+            &mut self.matcher,
+            &mut indices,
+        );
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+}
+
 /// Nucleo score for `pattern` against `haystack`, if it matches.
 /// Empty pattern scores `Some(0)` (match-all). Empty haystack with non-empty pattern → `None`.
+///
+/// For many haystacks with the same query, prefer [`FuzzyScorer`].
 pub fn fuzzy_score(haystack: &str, pattern: &str) -> Option<u32> {
-    if pattern.is_empty() {
-        return Some(0);
-    }
-    if haystack.is_empty() {
-        return None;
-    }
-    let pat = fuzzy_pattern(pattern);
-    let mut m = matcher();
-    let mut buf = Vec::new();
-    pat.score(Utf32Str::new(haystack, &mut buf), &mut m)
+    FuzzyScorer::new(pattern).score(haystack)
 }
 
 /// Whether `pattern` fuzzy-matches `haystack` (ignore-case). Empty pattern matches all.
@@ -91,18 +144,10 @@ pub fn fuzzy_match(haystack: &str, pattern: &str) -> bool {
 
 /// Char indices (into `haystack`) of a fuzzy match; empty if no match / empty pattern.
 /// Merges indices from all whitespace-separated atoms.
+///
+/// For many haystacks with the same query, prefer [`FuzzyScorer::char_indices`].
 pub fn fuzzy_char_indices(haystack: &str, pattern: &str) -> Vec<u32> {
-    if pattern.is_empty() || haystack.is_empty() {
-        return Vec::new();
-    }
-    let pat = fuzzy_pattern(pattern);
-    let mut m = matcher();
-    let mut buf = Vec::new();
-    let mut indices = Vec::new();
-    let _ = pat.indices(Utf32Str::new(haystack, &mut buf), &mut m, &mut indices);
-    indices.sort_unstable();
-    indices.dedup();
-    indices
+    FuzzyScorer::new(pattern).char_indices(haystack)
 }
 
 /// Merge char indices into contiguous byte ranges within `haystack`.
@@ -354,24 +399,21 @@ pub fn fuzzy_str_labels(labels: &[&str], query: &str) -> Vec<String> {
         .collect()
 }
 
-/// Small-list fuzzy filter (Picker / MsgChip / Time dates). Empty query → all.
-/// Returns source indices sorted by nucleo score (best first); stable for ties.
+/// Candidate-list fuzzy filter (Picker / MsgChip / Time dates).
+/// Empty query → stable source order, truncated to [`CANDIDATE_RESULT_CAP`].
+/// Non-empty → nucleo score order (best first), then truncate.
 pub fn fuzzy_label_indices(labels: &[String], query: &str) -> Vec<usize> {
     if query.is_empty() {
-        return (0..labels.len()).collect();
+        return (0..labels.len().min(CANDIDATE_RESULT_CAP)).collect();
     }
-    let mut matcher = matcher();
-    let pattern = fuzzy_pattern(query);
+    let mut scorer = FuzzyScorer::new(query);
     let mut scored: Vec<(usize, u32)> = labels
         .iter()
         .enumerate()
-        .filter_map(|(i, label)| {
-            let score =
-                pattern.score(Utf32Str::new(label.as_str(), &mut Vec::new()), &mut matcher)?;
-            Some((i, score as u32))
-        })
+        .filter_map(|(i, label)| scorer.score(label).map(|score| (i, score)))
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored.truncate(CANDIDATE_RESULT_CAP);
     scored.into_iter().map(|(i, _)| i).collect()
 }
 
@@ -398,6 +440,26 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_scorer_matches_one_shot_helpers() {
+        let haystacks = ["aXbYc", "Error", "hello", "GuildFeedListViewModel", ""];
+        for q in ["", "abc", "err", "xyz", "guild viewmodel"] {
+            let mut scorer = FuzzyScorer::new(q);
+            for h in haystacks {
+                assert_eq!(
+                    scorer.score(h),
+                    fuzzy_score(h, q),
+                    "score mismatch q={q:?} h={h:?}"
+                );
+                assert_eq!(
+                    scorer.char_indices(h),
+                    fuzzy_char_indices(h, q),
+                    "indices mismatch q={q:?} h={h:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fuzzy_multi_word_and_atoms() {
         // Whitespace splits atoms (AND); must not require a literal space in haystack.
         assert!(fuzzy_match("GuildFeedListViewModel", "guild viewmodel"));
@@ -417,6 +479,15 @@ mod tests {
         // non-contiguous
         let labels2 = vec!["aXbYc".into(), "zzz".into()];
         assert_eq!(fuzzy_label_indices(&labels2, "abc"), vec![0]);
+    }
+
+    #[test]
+    fn fuzzy_label_indices_respects_result_cap() {
+        let labels: Vec<String> = (0..CANDIDATE_RESULT_CAP + 50)
+            .map(|i| format!("item{i:04}"))
+            .collect();
+        assert_eq!(fuzzy_label_indices(&labels, "").len(), CANDIDATE_RESULT_CAP);
+        assert!(fuzzy_label_indices(&labels, "item").len() <= CANDIDATE_RESULT_CAP);
     }
 
     #[test]
