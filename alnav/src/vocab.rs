@@ -1,11 +1,22 @@
 use lru::LruCache;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::fuzzy;
 
 const TAG_CAP: usize = 5_000;
 const PKG_CAP: usize = 2_000;
 const MSG_CAP: usize = 100_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CandidateScope {
+    #[default]
+    All,
+    Tag,
+    Pkg,
+    Msg,
+}
 
 pub struct Vocab {
     pub tag_cache: LruCache<String, u32>,
@@ -37,40 +48,54 @@ impl Vocab {
     }
 
     pub fn tag_candidates(&self, query: &str) -> Vec<String> {
-        filter_sort(&self.tag_cache, query)
+        self.candidates(CandidateScope::Tag, query)
     }
 
     pub fn pkg_candidates(&self, query: &str) -> Vec<String> {
-        filter_sort(&self.pkg_cache, query)
+        self.candidates(CandidateScope::Pkg, query)
     }
 
     pub fn msg_candidates(&self, query: &str) -> Vec<String> {
-        filter_sort(&self.msg_cache, query)
+        self.candidates(CandidateScope::Msg, query)
     }
 
     pub fn all_candidates(&self, query: &str) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
-        let mut entries: Vec<(String, u32, u32)> = self
-            .tag_cache
-            .iter()
-            .chain(self.pkg_cache.iter())
-            .chain(self.msg_cache.iter())
-            .filter_map(|(k, &freq)| {
-                let score = if query.is_empty() {
-                    Some(0)
-                } else {
-                    fuzzy::fuzzy_score(k, query)
-                }?;
-                if seen.insert(k.to_lowercase()) {
-                    Some((k.clone(), score, freq))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        sort_scored(&mut entries, query.is_empty());
-        entries.into_iter().map(|(k, _, _)| k).collect()
+        self.candidates(CandidateScope::All, query)
     }
+
+    /// Sync filter for a scope (tests + empty-query fast path).
+    pub fn candidates(&self, scope: CandidateScope, query: &str) -> Vec<String> {
+        let entries = self.snapshot(scope);
+        let cancel = AtomicBool::new(false);
+        match scope {
+            CandidateScope::All => filter_all_entries(&entries, query, &cancel, usize::MAX),
+            CandidateScope::Tag | CandidateScope::Pkg | CandidateScope::Msg => {
+                filter_sort_entries(&entries, query, &cancel, usize::MAX)
+            }
+        }
+    }
+
+    /// Owned `(key, freq)` snapshot for background matching.
+    pub fn snapshot(&self, scope: CandidateScope) -> Vec<(String, u32)> {
+        match scope {
+            CandidateScope::Tag => cache_entries(&self.tag_cache),
+            CandidateScope::Pkg => cache_entries(&self.pkg_cache),
+            CandidateScope::Msg => cache_entries(&self.msg_cache),
+            CandidateScope::All => {
+                let mut out = Vec::with_capacity(
+                    self.tag_cache.len() + self.pkg_cache.len() + self.msg_cache.len(),
+                );
+                out.extend(cache_entries(&self.tag_cache));
+                out.extend(cache_entries(&self.pkg_cache));
+                out.extend(cache_entries(&self.msg_cache));
+                out
+            }
+        }
+    }
+}
+
+fn cache_entries(cache: &LruCache<String, u32>) -> Vec<(String, u32)> {
+    cache.iter().map(|(k, &f)| (k.clone(), f)).collect()
 }
 
 fn increment(cache: &mut LruCache<String, u32>, key: String) {
@@ -82,20 +107,64 @@ fn increment(cache: &mut LruCache<String, u32>, key: String) {
 }
 
 /// Empty query: frequency desc. Non-empty: nucleo score desc, then freq, then key.
-fn filter_sort(cache: &LruCache<String, u32>, query: &str) -> Vec<String> {
-    let mut entries: Vec<(String, u32, u32)> = cache
-        .iter()
-        .filter_map(|(k, &freq)| {
-            let score = if query.is_empty() {
-                Some(0)
-            } else {
-                fuzzy::fuzzy_score(k, query)
-            }?;
-            Some((k.clone(), score, freq))
-        })
-        .collect();
-    sort_scored(&mut entries, query.is_empty());
-    entries.into_iter().map(|(k, _, _)| k).collect()
+/// Checks `cancel` every `check_every` entries (use `usize::MAX` to disable).
+pub fn filter_sort_entries(
+    entries: &[(String, u32)],
+    query: &str,
+    cancel: &AtomicBool,
+    check_every: usize,
+) -> Vec<String> {
+    let check_every = check_every.max(1);
+    let mut scored: Vec<(String, u32, u32)> = Vec::new();
+    for (i, (k, freq)) in entries.iter().enumerate() {
+        if i % check_every == 0 && cancel.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        let score = if query.is_empty() {
+            Some(0)
+        } else {
+            fuzzy::fuzzy_score(k, query)
+        };
+        if let Some(score) = score {
+            scored.push((k.clone(), score, *freq));
+        }
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Vec::new();
+    }
+    sort_scored(&mut scored, query.is_empty());
+    scored.into_iter().map(|(k, _, _)| k).collect()
+}
+
+/// Like [`filter_sort_entries`] but dedupes by lowercase key (Highlight `all_candidates`).
+pub fn filter_all_entries(
+    entries: &[(String, u32)],
+    query: &str,
+    cancel: &AtomicBool,
+    check_every: usize,
+) -> Vec<String> {
+    let check_every = check_every.max(1);
+    let mut seen = HashSet::new();
+    let mut scored: Vec<(String, u32, u32)> = Vec::new();
+    for (i, (k, freq)) in entries.iter().enumerate() {
+        if i % check_every == 0 && cancel.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        let score = if query.is_empty() {
+            Some(0)
+        } else {
+            fuzzy::fuzzy_score(k, query)
+        };
+        let Some(score) = score else { continue };
+        if seen.insert(k.to_lowercase()) {
+            scored.push((k.clone(), score, *freq));
+        }
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Vec::new();
+    }
+    sort_scored(&mut scored, query.is_empty());
+    scored.into_iter().map(|(k, _, _)| k).collect()
 }
 
 fn sort_scored(entries: &mut [(String, u32, u32)], empty_query: bool) {
@@ -183,5 +252,13 @@ mod tests {
         v.feed("", "com.example.other", &[]);
         let cands = v.pkg_candidates("qq");
         assert_eq!(cands, vec!["com.tencent.mobileqq".to_string()]);
+    }
+
+    #[test]
+    fn filter_sort_entries_respects_cancel() {
+        let entries: Vec<(String, u32)> = (0..1000).map(|i| (format!("k{i}"), 1)).collect();
+        let cancel = AtomicBool::new(true);
+        let out = filter_sort_entries(&entries, "k", &cancel, 1);
+        assert!(out.is_empty());
     }
 }

@@ -1,5 +1,6 @@
 mod app;
 mod bookmark;
+mod candidate_match;
 mod config;
 mod export;
 mod filter_model;
@@ -540,6 +541,8 @@ fn run<B: ratatui::backend::Backend>(
             app.drain(ingest);
         }
         app.poll_file_store();
+        app.ensure_vocab_candidates();
+        app.poll_vocab_match();
         app.tick_flash();
         // P1: recompute highlight match stats once per frame (O(n) scan).
         // All mutation paths set match_stats_stale=true; here is the single
@@ -579,10 +582,8 @@ fn run<B: ratatui::backend::Backend>(
 
                     let modal_w = ui::modal_width(frame_area.width);
                     let mut hw_cursor: Option<Position> = None;
-                    let preview_limit = ui::picker_preview_capacity(
-                        frame_area,
-                        ui::PICKER_PREVIEW_LEFT_RATIO,
-                    );
+                    let preview_limit =
+                        ui::picker_preview_capacity(frame_area, ui::PICKER_PREVIEW_LEFT_RATIO);
                     if let Some(data) = picker_render_data(app, preview_limit) {
                         let picker_area = ui::picker_frame_rect(frame_area, data.show_preview);
                         let right_pane = match &data.detail_row {
@@ -909,9 +910,10 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                 actions = vec![crate::ui::ActionKind::Jump; vis.len()];
                 empty_msg = "无书签".to_string();
                 if show_preview {
-                    detail_row = Some(vis.get(session.selected).and_then(|&i| {
-                        app.row_by_id(app.bookmarks.items[i].row_id)
-                    }));
+                    detail_row = Some(
+                        vis.get(session.selected)
+                            .and_then(|&i| app.row_by_id(app.bookmarks.items[i].row_id)),
+                    );
                 }
                 let _ = selected; // bookmark panel reuses session.selected as-is
             }
@@ -985,7 +987,7 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
         PickerMode::New | PickerMode::Edit { .. } => match &session.kind {
             PickerKind::Highlight => {
                 if !session.draft.is_empty() {
-                    labels = app.vocab.all_candidates(session.draft.as_str());
+                    labels = app.vocab_match.display_labels().to_vec();
                     styles = vec![theme::muted(); labels.len()];
                 } else {
                     let highlight_box = crate::highlight_model::HighlightBox {
@@ -1027,12 +1029,11 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                         }
                         Some(field) => {
                             use crate::input::ChipField;
-                            let q = input.draft.as_str();
                             labels = match field {
-                                ChipField::Tag => app.vocab.tag_candidates(q),
-                                ChipField::Pkg => app.vocab.pkg_candidates(q),
-                                ChipField::Msg => app.vocab.msg_candidates(q),
-                                ChipField::Level => level_field_candidates(q),
+                                ChipField::Tag | ChipField::Pkg | ChipField::Msg => {
+                                    app.vocab_match.display_labels().to_vec()
+                                }
+                                ChipField::Level => level_field_candidates(input.draft.as_str()),
                                 ChipField::Pid | ChipField::Tid => vec![],
                             };
                             styles = vec![
@@ -1043,8 +1044,7 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                         }
                     }
                     if input.draft_field.is_some() && !input.draft.is_empty() {
-                        preview_lines =
-                            preview::preview_filter_lines(app, input, preview_limit);
+                        preview_lines = preview::preview_filter_lines(app, input, preview_limit);
                     }
                 }
                 empty_msg = "Enter 收 pill / 提交".to_string();
@@ -1686,7 +1686,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                     (s.draft.to_string(), s.selected)
                 };
                 if !draft.is_empty() {
-                    let n = app.vocab.all_candidates(&draft).len();
+                    let n = app.vocab_match.display_labels().len();
                     app.picker.as_mut().unwrap().selected = (sel + 1).min(n.saturating_sub(1));
                 } else {
                     let mut highlight_box = crate::highlight_model::HighlightBox {
@@ -1704,8 +1704,8 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                     (session.draft.to_string(), session.selected)
                 };
                 if !draft.is_empty() {
-                    let cands = app.vocab.all_candidates(&draft);
-                    if let Some(replacement) = cands.into_iter().nth(selected) {
+                    let replacement = app.vocab_match.display_labels().get(selected).cloned();
+                    if let Some(replacement) = replacement {
                         let new_draft = replace_last_token(&draft, &replacement);
                         let session = app.picker.as_mut().unwrap();
                         session.draft = crate::text_field::TextField::from_text(new_draft);
@@ -1745,9 +1745,9 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         let input = session.input.as_ref().unwrap();
                         use crate::input::ChipField;
                         match input.draft_field.unwrap() {
-                            ChipField::Tag => app.vocab.tag_candidates(input.draft.as_str()),
-                            ChipField::Pkg => app.vocab.pkg_candidates(input.draft.as_str()),
-                            ChipField::Msg => app.vocab.msg_candidates(input.draft.as_str()),
+                            ChipField::Tag | ChipField::Pkg | ChipField::Msg => {
+                                app.vocab_match.display_labels().to_vec()
+                            }
                             ChipField::Level => level_field_candidates(input.draft.as_str()),
                             ChipField::Pid | ChipField::Tid => vec![],
                         }
@@ -1803,9 +1803,9 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                         let input = session.input.as_ref().unwrap();
                         use crate::input::ChipField;
                         match input.draft_field.unwrap() {
-                            ChipField::Tag => app.vocab.tag_candidates(input.draft.as_str()).len(),
-                            ChipField::Pkg => app.vocab.pkg_candidates(input.draft.as_str()).len(),
-                            ChipField::Msg => app.vocab.msg_candidates(input.draft.as_str()).len(),
+                            ChipField::Tag | ChipField::Pkg | ChipField::Msg => {
+                                app.vocab_match.display_labels().len()
+                            }
                             ChipField::Level => level_field_candidates(input.draft.as_str()).len(),
                             ChipField::Pid | ChipField::Tid => 0,
                         }
@@ -4427,7 +4427,9 @@ mod dispatch_tests {
         handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         assert!(matches!(
-            app.picker.as_ref().map(|picker| (&picker.kind, &picker.mode)),
+            app.picker
+                .as_ref()
+                .map(|picker| (&picker.kind, &picker.mode)),
             Some((
                 PickerKind::MsgChip {
                     purpose: MsgChipPurpose::Chip { exclude: false }
@@ -5526,6 +5528,7 @@ mod dispatch_tests {
             let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
             input.set_field(crate::input::ChipField::Tag);
         }
+        app.flush_vocab_match();
 
         let data = picker_render_data(&app, 10).unwrap();
         assert!(
@@ -5629,6 +5632,7 @@ mod dispatch_tests {
             input.set_field(crate::input::ChipField::Tag);
             input.push_char('T');
         }
+        app.flush_vocab_match();
 
         handle_picker_key(
             &mut app,

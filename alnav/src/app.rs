@@ -287,6 +287,8 @@ pub struct App {
     pub config: crate::config::AppConfig,
     /// Vocabulary accumulated from ingested rows (tag/pkg/msg tokens).
     pub vocab: Vocab,
+    /// Async vocab fuzzy for Picker New candidates (gen-cancel).
+    pub vocab_match: crate::candidate_match::CandidateMatchService,
     /// Dirty flag for the highlight match stats cache (P1 perf optimisation).
     /// Set true on any change to visible / active highlight / highlight patterns.
     /// Cleared when `highlight_match_stats()` recomputes.
@@ -355,6 +357,7 @@ impl App {
             export_source: crate::export::ExportSource::default(),
             config: crate::config::AppConfig::default_config(),
             vocab: Vocab::default(),
+            vocab_match: crate::candidate_match::CandidateMatchService::default(),
             match_stats_stale: true,
             match_stats_cursor: usize::MAX, // sentinel: force first computation
             cached_match_stats: None,
@@ -455,6 +458,91 @@ impl App {
         self.picker = None;
         self.pending_leader = false;
         self.focus = Focus::LogList;
+        self.vocab_match.clear();
+    }
+
+    /// Kick / refresh async vocab candidate matching from current picker draft.
+    /// No-op when picker is closed or not on a vocab-backed New/Edit path.
+    pub fn ensure_vocab_candidates(&mut self) {
+        use crate::input::ChipField;
+        use crate::picker::{PickerKind, PickerMode};
+        use crate::vocab::CandidateScope;
+
+        enum Action {
+            Request {
+                scope: CandidateScope,
+                query: String,
+            },
+            Clear,
+            Nop,
+        }
+
+        let action = {
+            let Some(session) = self.picker.as_ref() else {
+                return;
+            };
+            if !matches!(session.mode, PickerMode::New | PickerMode::Edit { .. }) {
+                return;
+            }
+            match &session.kind {
+                PickerKind::Highlight => {
+                    if session.draft.is_empty() {
+                        // History candidates stay sync/small — cancel vocab job.
+                        Action::Clear
+                    } else {
+                        Action::Request {
+                            scope: CandidateScope::All,
+                            query: session.draft.to_string(),
+                        }
+                    }
+                }
+                PickerKind::Filter | PickerKind::Exclude => {
+                    let Some(input) = session.input.as_ref() else {
+                        return;
+                    };
+                    match input.draft_field {
+                        None => Action::Clear,
+                        Some(ChipField::Tag) => Action::Request {
+                            scope: CandidateScope::Tag,
+                            query: input.draft.to_string(),
+                        },
+                        Some(ChipField::Pkg) => Action::Request {
+                            scope: CandidateScope::Pkg,
+                            query: input.draft.to_string(),
+                        },
+                        Some(ChipField::Msg) => Action::Request {
+                            scope: CandidateScope::Msg,
+                            query: input.draft.to_string(),
+                        },
+                        Some(ChipField::Level | ChipField::Pid | ChipField::Tid) => Action::Clear,
+                    }
+                }
+                _ => Action::Nop,
+            }
+        };
+
+        match action {
+            Action::Request { scope, query } => {
+                self.vocab_match.request(&self.vocab, scope, &query);
+            }
+            Action::Clear => {
+                if self.vocab_match.pending() || !self.vocab_match.display_labels().is_empty() {
+                    self.vocab_match.clear();
+                }
+            }
+            Action::Nop => {}
+        }
+    }
+
+    /// Drain finished vocab match jobs (call each frame).
+    pub fn poll_vocab_match(&mut self) {
+        self.vocab_match.poll();
+    }
+
+    /// Block until the in-flight vocab match completes (tests).
+    pub fn flush_vocab_match(&mut self) {
+        self.ensure_vocab_candidates();
+        self.vocab_match.flush(std::time::Duration::from_secs(5));
     }
 
     /// H10: one-line `alnav grep` command for the current filter state.

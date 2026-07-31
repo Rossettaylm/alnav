@@ -31,7 +31,12 @@ pub fn fuzzy_str_labels(labels: &[&str], query: &str) -> Vec<String>;
 pub enum SameFieldOp { And, Or } // interactive And; startup CLI multi-value Or
 
 // vocab.rs — New-panel completion
-fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
+pub enum CandidateScope { All, Tag, Pkg, Msg }
+fn filter_sort_entries(entries, query, cancel, check_every) -> Vec<String>;
+fn filter_all_entries(entries, query, cancel, check_every) -> Vec<String>; // dedupe
+
+// candidate_match.rs — Picker New UI path
+CandidateMatchService::request / poll / clear  // gen-cancel async
 ```
 
 ### 3. Contracts
@@ -47,14 +52,14 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 | pid / tid | Exact string equality. |
 | level (row match) | Minimum level (`Level::from_str` + `>=`), same idea as CLI LevelGte. |
 | level (New candidates) | Fuzzy over `V/D/I/W/E/F` via `fuzzy_str_labels`. |
-| Vocab New completion | `tag`/`pkg`/`msg`/`all_candidates` use Pattern fuzzy; empty query → freq desc; else score desc then freq. |
+| Vocab New completion | `tag`/`pkg`/`msg`/`all_candidates` use Pattern fuzzy; empty query → freq desc; else score desc then freq. **Picker New UI** runs matching via `candidate_match` (async + gen-cancel); sync `Vocab::candidates` remains for tests / empty-query fast path. |
 | Field keyword candidates | `InputBox::field_candidates` fuzzy on keywords (`tag`/`msg`/…). |
 | Highlight history candidates | `HighlightBox::candidate_indices` fuzzy on patterns; cap 6; score-ordered. |
 | Group compose | Chips AND (interactive) / same-field OR at startup; groups OR; excludes AND NOT; then lock → time_bound → view_focus. |
 | Small lists | `fuzzy_label_indices`: empty query → all indices; else score-sorted. |
 | Paint (log) | Substring ranges mapped to `FieldSpan` on tag/msg (or Raw); `ui` must not use fuzzy gaps or `Regex::find_iter`. |
 | Paint (candidate list) | `candidate_label_spans` uses `fuzzy_char_indices` ranges — not substring `contains`. |
-| File progressive | MVP: existing File **FilterBatch / Highlight Inc** scans apply substring/chip predicates per row; status may show `idx a/b`. **No** separate high-level `nucleo` worker / dual corpus required for MVP. |
+| File progressive | MVP: existing File **FilterBatch / Highlight Inc** scans apply substring/chip predicates per row; status may show `idx a/b`. Picker New vocab completion uses a light **async gen-cancel** worker (`candidate_match.rs`); a full high-level `nucleo` corpus worker remains optional future work. |
 | Stream | Evaluate against current `rows`/`matched`; eviction drops reachability (no independent fuzzy corpus → no ghost hits). |
 | Startup CLI → TUI | Initial group chips use same substring match + `SameFieldOp::Or` for multi-values. |
 | `yc` | Still emits literal `alnav grep` approx (encoding / ring truncation); flash notes `approx`. |
@@ -103,4 +108,4 @@ fn filter_sort(cache, query) -> Vec<String>; // fuzzy_score + freq sort
 
 ### Design decision (MVP)
 
-A dedicated `FuzzyIndex` backed by the high-level `nucleo` crate (async inject/tick) was considered and **deferred**. MVP satisfies product ACs with `nucleo-matcher` + existing File scan threads. Future optimization may add a true corpus worker without changing the match text / field contracts above.
+A dedicated `FuzzyIndex` backed by the high-level `nucleo` crate (async inject/tick) was considered and **deferred** for log-row corpus matching. Picker New vocab completion now uses a lighter **snapshot + gen-cancel** worker in `candidate_match.rs` without changing match text / field contracts above.

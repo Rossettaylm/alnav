@@ -23,6 +23,7 @@ alnav/src/
 ├── model.rs        # EntryRow: owned line model, from_line()/from_line_or_raw()/as_log_entry()
 ├── filter_model.rs # Group/GroupList + TimeBound (global window matching)
 ├── fuzzy.rs        # TUI nucleo-matcher facade (Search/Filter/Picker; see fuzzy-matching.md)
+├── candidate_match.rs # Async vocab fuzzy for Picker New (gen+cancel)
 ├── time_panel.rs   # `-f` ts panel: date candidates from rows + HH:MM:SS clamp
 ├── highlight_model.rs # HighlightGroup/HighlightGroupList (pattern + fuzzy, no Regex)
 ├── picker.rs       # PickerSession/PickerKind/PickerMode/UnifiedKind/UnifiedItem
