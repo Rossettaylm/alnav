@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
-- **Last Active**: 2026-07-27
+- **Total Sessions**: 9
+- **Last Active**: 2026-07-31
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~278 | Active |
+| `journal-1.md` | ~312 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-07-31 | Picker vocab async-cancel match | `42b9557` | `master` |
 | 8 | 2026-07-27 | TUI status bar + Help panel | `490de5c` | `master` |
 | 7 | 2026-07-27 | TUI popup rounded borders + compact picker | `c895275` | `master` |
 | 6 | 2026-07-24 | File async Vis scans | `2dffcda` | `master` |

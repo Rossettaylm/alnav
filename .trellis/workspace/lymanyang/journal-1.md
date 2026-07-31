@@ -276,3 +276,37 @@ English status bar (icon badges, dim-key L1/L2), read-only ? Help with Active+ca
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Picker vocab async-cancel match
+
+**Date**: 2026-07-31
+**Task**: Picker vocab async-cancel match
+**Package**: alnav-core
+**Branch**: `master`
+
+### Summary
+
+Moved Picker New vocab fuzzy matching off the UI thread with generation-based cancel so paste/fast typing stays responsive; updated fuzzy-matching spec.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `42b9557` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
