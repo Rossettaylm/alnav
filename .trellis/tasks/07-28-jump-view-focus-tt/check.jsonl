@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "verify view_focus AND order and tt key contract"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "verify Help/status strings and flash English"}
+{"file": ".trellis/spec/alnav/backend/async-scans.md", "reason": "verify file highlight jump no longer wraps"}
+{"file": ".trellis/spec/alnav/backend/stream-visible-ingest.md", "reason": "verify filter_active includes view_focus"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "verify theme token usage for new status glyphs"}

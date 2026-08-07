@@ -571,6 +571,13 @@ impl FileStore {
     pub fn mark_vocab_started(&self) -> bool {
         !self.vocab_started.swap(true, Ordering::AcqRel)
     }
+
+    /// Snapshot mmap + line index for out-of-`FileStore` background workers
+    /// (e.g. the summary panel job; task `08-07-tui-summary-panel`). Read-only
+    /// `Arc`s: the caller's worker never blocks index growth or lazy `row_at`.
+    pub fn scan_snapshot(&self) -> (Arc<Mmap>, Arc<RwLock<Vec<LineSpan>>>) {
+        (Arc::clone(&self.mmap), Arc::clone(&self.lines))
+    }
 }
 
 /// Unified row backend.

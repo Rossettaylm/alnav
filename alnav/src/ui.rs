@@ -1,9 +1,14 @@
+use std::sync::OnceLock;
+
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use alnav::crash::{CrashDetector, CrashInfo, CrashType};
+use alnav::parser::LogEntry;
 
 use crate::app::{App, Focus, Mode};
 use crate::filter_model::Group;
@@ -396,12 +401,14 @@ pub fn render_candidate_list(
         return;
     }
     let sel = selected.min(labels.len() - 1);
-    // Reuse one FuzzyScorer across painted labels (same query × many haystacks).
+    // ViewportPaint: only build ListItems (+ fuzzy highlight) for visible rows.
+    let n = labels.len();
+    let (offset, end) = candidate_viewport_range(n, sel, inner.height as usize);
+    // Reuse one FuzzyScorer across the viewport (same query × many labels).
     let mut paint_scorer = crate::fuzzy::FuzzyScorer::new(query);
-    let items: Vec<ListItem> = labels
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
+    let items: Vec<ListItem> = (offset..end)
+        .map(|i| {
+            let label = &labels[i];
             let is_sel = i == sel;
             let is_checked = checked.get(i).copied().unwrap_or(false);
             let mut base = if is_sel {
@@ -433,8 +440,22 @@ pub fn render_candidate_list(
         .highlight_style(Style::default())
         .highlight_symbol("");
     let mut state = ListState::default();
-    state.select(Some(sel));
+    state.select(Some(sel.saturating_sub(offset)));
     frame.render_stateful_widget(list, inner, &mut state);
+}
+
+/// Visible `[offset, end)` window for a candidate list (ViewportPaint SLO).
+pub fn candidate_viewport_range(n: usize, selected: usize, view_h: usize) -> (usize, usize) {
+    if n == 0 {
+        return (0, 0);
+    }
+    let view_h = view_h.max(1);
+    let sel = selected.min(n - 1);
+    let offset = sel
+        .saturating_sub(view_h.saturating_sub(1) / 2)
+        .min(n.saturating_sub(view_h));
+    let end = (offset + view_h).min(n);
+    (offset, end)
 }
 
 /// Candidate popup height: `clamp(count,1,8)+2` for border, clamped to
@@ -468,6 +489,13 @@ pub fn picker_preview_capacity(frame: Rect, left_ratio: f32) -> usize {
     let picker = picker_frame_rect(frame, true);
     let (_left, right) = split_picker_lr_gapped(picker, left_ratio);
     preview_content_capacity(right)
+}
+
+/// Content columns inside the picker's right Preview shell (`width - 2` for borders).
+pub fn picker_preview_inner_width(frame: Rect, left_ratio: f32) -> u16 {
+    let picker = picker_frame_rect(frame, true);
+    let (_left, right) = split_picker_lr_gapped(picker, left_ratio);
+    right.width.saturating_sub(2)
 }
 
 /// Search modal outer height: draft row + borders (candidates float below).
@@ -656,9 +684,7 @@ fn tag_col_for_area_max(
     if available == 0 {
         return 0;
     }
-    preferred_max
-        .min(available)
-        .max(TAG_COL_MIN.min(available))
+    preferred_max.min(available).max(TAG_COL_MIN.min(available))
 }
 
 /// Choose tag column width: prefer [`TAG_COL_WIDTH`], shrink on narrow panes so
@@ -830,8 +856,7 @@ fn render_entry_line_single(
 ) -> Line<'static> {
     let ts = format!("{} ", row.timestamp);
     let level_badge = format!(" {} ", row.level.as_char());
-    let prefix_without_tag =
-        ts.chars().count() + level_badge.chars().count() + LEVEL_TAG_GAP;
+    let prefix_without_tag = ts.chars().count() + level_badge.chars().count() + LEVEL_TAG_GAP;
     let tag_col = tag_col_for_area_max(area_width, prefix_without_tag, PREVIEW_TAG_COL_MAX);
     let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
     let msg_budget = area_width.saturating_sub(header_width).max(1);
@@ -856,6 +881,69 @@ fn render_entry_line_single(
     if msg_budget == 0 {
         return Line::from(spans);
     }
+    if msg_chars <= msg_budget {
+        spans.extend(spans_for_range(
+            &row.msg,
+            (0, row.msg.len()),
+            &msg_matches,
+            Style::default(),
+        ));
+    } else if msg_budget == 1 {
+        spans.push(Span::styled("…".to_string(), Style::default()));
+    } else {
+        let visible_end = byte_end_for_chars(&row.msg, msg_budget - 1);
+        spans.extend(spans_for_range(
+            &row.msg,
+            (0, visible_end),
+            &msg_matches,
+            Style::default(),
+        ));
+        spans.push(Span::styled("…".to_string(), Style::default()));
+    }
+    Line::from(spans)
+}
+
+/// Collapsed (single-line) LogList entry: same header layout as
+/// `render_entry_lines` (lineno/timestamp/level/fixed tag column), but the
+/// message is truncated with `…` instead of word-wrapped across multiple
+/// `Line`s. Used when `App.collapsed_view` is toggled on (`w`).
+fn render_entry_line_collapsed(
+    row: &EntryRow,
+    patterns: &[PaintPattern<'_>],
+    area_width: usize,
+    lineno: usize,
+    lineno_width: usize,
+) -> Line<'static> {
+    let lineno_s = format!("{lineno:>lineno_width$} ");
+    let ts = format!("{} ", row.timestamp);
+    let level_badge = format!(" {} ", row.level.as_char());
+    let prefix_without_tag =
+        lineno_s.chars().count() + ts.chars().count() + level_badge.chars().count() + LEVEL_TAG_GAP;
+    let tag_col = tag_col_for_area(area_width, prefix_without_tag);
+    let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
+    let msg_budget = area_width.saturating_sub(header_width).max(1);
+
+    let tag_style = Style::default()
+        .fg(theme::accent())
+        .add_modifier(Modifier::BOLD);
+    let tag_matches = collect_field_matches(row, patterns, PaintField::Tag);
+    let msg_matches = collect_field_matches(row, patterns, PaintField::Msg);
+
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        lineno_s,
+        theme::muted().add_modifier(Modifier::DIM),
+    ));
+    spans.push(Span::styled(ts, theme::muted()));
+    spans.push(Span::styled(
+        level_badge,
+        theme::level_badge_style(row.level),
+    ));
+    spans.push(Span::styled(" ".repeat(LEVEL_TAG_GAP), Style::default()));
+    push_tag_column_spans(&mut spans, &row.tag, tag_col, &tag_matches, tag_style);
+    spans.push(Span::styled(" ".repeat(TAG_MSG_GAP), Style::default()));
+
+    let msg_chars = row.msg.chars().count();
     if msg_chars <= msg_budget {
         spans.extend(spans_for_range(
             &row.msg,
@@ -1126,13 +1214,18 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
         (window_start..window_end)
             .filter_map(|abs_i| {
                 let row = app.row_at(abs_i)?;
-                let mut item = ListItem::new(render_entry_lines(
-                    &row,
-                    &patterns,
-                    inner_width,
-                    abs_i + 1,
-                    lineno_width,
-                ));
+                let lines = if app.collapsed_view {
+                    vec![render_entry_line_collapsed(
+                        &row,
+                        &patterns,
+                        inner_width,
+                        abs_i + 1,
+                        lineno_width,
+                    )]
+                } else {
+                    render_entry_lines(&row, &patterns, inner_width, abs_i + 1, lineno_width)
+                };
+                let mut item = ListItem::new(lines);
                 if let Some((lo, hi)) = selection {
                     if abs_i >= lo && abs_i <= hi {
                         item = item.style(theme::log_visual_style());
@@ -1757,6 +1850,220 @@ pub fn detail_modal_height(frame: Rect, content_rows: usize) -> u16 {
     desired.min(max).max(3)
 }
 
+/// Horizontal Unicode-block bar (`█`/`░`), proportional to `count / max`.
+/// Shared by the summary panel's level-distribution and Top-tags sections
+/// (Top errors intentionally has no bar — see `render_summary_panel`).
+fn bar_line(label: &str, count: usize, max: usize, width: usize, color: Style) -> Line<'static> {
+    let ratio = if max == 0 {
+        0.0
+    } else {
+        count as f64 / max as f64
+    };
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    let empty = width.saturating_sub(filled);
+    Line::from(vec![
+        Span::styled(
+            pad_display(label, SUMMARY_LABEL_WIDTH),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(" "),
+        Span::styled("█".repeat(filled), color),
+        Span::styled(
+            "░".repeat(empty),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(format!(" {count}")),
+    ])
+}
+
+const SUMMARY_BAR_WIDTH: usize = 20;
+const SUMMARY_LABEL_WIDTH: usize = 12;
+
+/// Pad/truncate `s` to a fixed display width (Unicode-width aware).
+fn pad_display(s: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    while w < width {
+        out.push(' ');
+        w += 1;
+    }
+    out
+}
+
+/// Body lines for the Ready summary panel (used by render + height calc).
+/// Aligned with CLI `--summary` fields: total rows, time range, crashes,
+/// level distribution (bar), Top 10 tags (bar), Top 10 errors (no bar).
+fn summary_report_lines(report: &alnav::summary::SummaryOutput) -> Vec<Line<'static>> {
+    use alnav::parser::Level;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::raw(format!("Rows: {}", report.total))));
+    let first = if report.time_range.first.is_empty() {
+        "-"
+    } else {
+        report.time_range.first.as_str()
+    };
+    let last = if report.time_range.last.is_empty() {
+        "-"
+    } else {
+        report.time_range.last.as_str()
+    };
+    lines.push(Line::from(Span::raw(format!(
+        "Time range: {first} — {last}"
+    ))));
+    lines.push(Line::from(Span::raw(format!(
+        "Crashes: {}",
+        report.crashes
+    ))));
+    lines.push(Line::default());
+
+    lines.push(Line::from(Span::styled(
+        "Levels",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    let level_order = [Level::V, Level::D, Level::I, Level::W, Level::E, Level::F];
+    let level_max = level_order
+        .iter()
+        .map(|l| *report.levels.get(&l.as_char()).unwrap_or(&0))
+        .max()
+        .unwrap_or(0);
+    for level in level_order {
+        let count = *report.levels.get(&level.as_char()).unwrap_or(&0);
+        if count == 0 {
+            continue;
+        }
+        lines.push(bar_line(
+            &level.as_char().to_string(),
+            count,
+            level_max,
+            SUMMARY_BAR_WIDTH,
+            theme::level_bar_style(level),
+        ));
+    }
+    lines.push(Line::default());
+
+    lines.push(Line::from(Span::styled(
+        "Top tags",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if report.top_tags.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(none)",
+            theme::preview_placeholder_style(),
+        )));
+    }
+    let tag_max = report.top_tags.iter().map(|t| t.count).max().unwrap_or(0);
+    for entry in &report.top_tags {
+        lines.push(bar_line(
+            &entry.tag,
+            entry.count,
+            tag_max,
+            SUMMARY_BAR_WIDTH,
+            theme::accent_bar_style(),
+        ));
+        let mut parts: Vec<String> = entry
+            .levels
+            .iter()
+            .map(|(c, n)| format!("{c}:{n}"))
+            .collect();
+        parts.sort();
+        if !parts.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("    {}", parts.join(" ")),
+                Style::default().add_modifier(Modifier::DIM),
+            )));
+        }
+    }
+    lines.push(Line::default());
+
+    lines.push(Line::from(Span::styled(
+        "Top errors",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if report.top_errors.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(none)",
+            theme::preview_placeholder_style(),
+        )));
+    }
+    for (i, err) in report.top_errors.iter().enumerate() {
+        lines.push(Line::from(Span::raw(format!(
+            "{:>2}. [{}] {} ({})",
+            i + 1,
+            err.tag,
+            err.pattern,
+            err.count
+        ))));
+        lines.push(Line::from(Span::styled(
+            format!("    {}", err.sample),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    lines
+}
+
+/// Row count for `Loading` (1, the placeholder line) or `Ready` content —
+/// used by `main.rs` to size the modal before `render_summary_panel` runs.
+pub fn summary_content_row_count(app: &App) -> usize {
+    use crate::app::SummaryView;
+    match &app.summary_view {
+        SummaryView::Closed => 0,
+        SummaryView::Loading => 1,
+        SummaryView::Ready(report) => summary_report_lines(report).len(),
+    }
+    .max(1)
+}
+
+/// Height for the summary panel modal given frame size and content.
+pub fn summary_modal_height(frame: Rect, content_rows: usize) -> u16 {
+    let max = frame.height.saturating_sub(4).max(8);
+    let want = (content_rows as u16).saturating_add(2); // border
+    want.min(max).max(8)
+}
+
+/// Leader `i` summary panel: `Loading` placeholder or `Ready` stats body.
+/// `Esc` closes without resuming follow (`app.close_summary_panel`); content
+/// is a static snapshot — it never refreshes while open (see PRD R1).
+pub fn render_summary_panel(app: &App, frame: &mut Frame, area: Rect) {
+    use crate::app::SummaryView;
+    if area.height == 0 {
+        return;
+    }
+    let inner = render_modal_shell("Summary", frame, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    match &app.summary_view {
+        SummaryView::Closed => {}
+        SummaryView::Loading => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "计算中…",
+                    theme::log_loading_style(true),
+                ))),
+                inner,
+            );
+        }
+        SummaryView::Ready(report) => {
+            let lines = summary_report_lines(report);
+            let scroll = app.summary_scroll.min(lines.len().saturating_sub(1));
+            let visible: Vec<Line<'static>> = lines.into_iter().skip(scroll).collect();
+            frame.render_widget(
+                Paragraph::new(visible).wrap(ratatui::widgets::Wrap { trim: false }),
+                inner,
+            );
+        }
+    }
+}
+
 /// Build H4 Fields-mode lines for the current row (used by render + height).
 pub fn detail_field_lines(
     row: Option<&crate::model::EntryRow>,
@@ -1900,12 +2207,142 @@ pub fn detail_pretty_lines(
     lines
 }
 
+fn crash_detector() -> &'static CrashDetector {
+    static DETECTOR: OnceLock<CrashDetector> = OnceLock::new();
+    DETECTOR.get_or_init(CrashDetector::new)
+}
+
+/// Continuation-line scan cap for File-mode crash stack merging (R2).
+const CRASH_SCAN_LIMIT: usize = 500;
+
+/// Structured crash/ANR info for the cursor row's msg, when it matches a
+/// crash signature. `None` lets the caller fall back to the existing
+/// JSON/raw Pretty chain (R1). The `bool` flags a File-mode continuation
+/// scan that hit [`CRASH_SCAN_LIMIT`] before finding the next parsed row.
+pub fn crash_context_for_row(app: &App, row: &EntryRow) -> Option<(CrashInfo, bool)> {
+    let crash_type = crash_detector().detect(&row.as_log_entry())?;
+
+    let (merged_msg, truncated) = if app.store.is_file() {
+        let mut merged = row.msg.clone();
+        let mut truncated = false;
+        if let Some(start) = app.source_idx_for_visible(app.cursor) {
+            let mut idx = start + 1;
+            let mut scanned = 0usize;
+            loop {
+                if scanned >= CRASH_SCAN_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                let Some(next) = app.store.row_at_source(idx, false) else {
+                    break;
+                };
+                if next.parsed {
+                    break;
+                }
+                merged.push('\n');
+                merged.push_str(&next.msg);
+                idx += 1;
+                scanned += 1;
+            }
+        }
+        (merged, truncated)
+    } else {
+        (row.msg.clone(), false)
+    };
+
+    let entry = LogEntry {
+        timestamp: &row.timestamp,
+        pid: &row.pid,
+        tid: &row.tid,
+        level: row.level,
+        tag: &row.tag,
+        pkg: &row.pkg,
+        msg: &merged_msg,
+    };
+    Some((crash_detector().parse_crash(&entry, crash_type), truncated))
+}
+
+/// H_crash structured detail lines (R4). `is_stream` picks the empty-stack
+/// placeholder copy; `truncated` appends the 500-line scan-cap notice.
+pub fn render_crash_detail_lines(
+    info: &CrashInfo,
+    is_stream: bool,
+    truncated: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let type_label = match info.crash_type {
+        CrashType::FatalException => "FATAL EXCEPTION",
+        CrashType::Anr => "ANR",
+        CrashType::NativeCrash => "NATIVE CRASH",
+    };
+    let badge_style = Style::default()
+        .fg(theme::warning())
+        .add_modifier(Modifier::BOLD);
+    lines.push(Line::from(vec![
+        Span::styled(format!("{} ", theme::GLYPH_CRASH), badge_style),
+        Span::styled(type_label.to_string(), badge_style),
+    ]));
+    for (s, e) in wrap_ranges(&info.headline, width) {
+        lines.push(Line::from(Span::raw(info.headline[s..e].to_string())));
+    }
+    if let Some(exception) = &info.exception {
+        for (s, e) in wrap_ranges(exception, width) {
+            lines.push(Line::from(Span::styled(
+                exception[s..e].to_string(),
+                Style::default().fg(theme::warning()),
+            )));
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        format!(
+            "pid={} tid={} tag={} time={}",
+            info.pid, info.tid, info.tag, info.timestamp
+        ),
+        theme::muted(),
+    )));
+    if info.stack.is_empty() {
+        let placeholder = if is_stream {
+            "stream 模式无堆栈"
+        } else {
+            "无堆栈"
+        };
+        lines.push(Line::from(Span::styled(
+            placeholder.to_string(),
+            theme::preview_placeholder_style(),
+        )));
+    } else {
+        for frame in &info.stack {
+            for (s, e) in wrap_ranges(frame, width) {
+                lines.push(Line::from(Span::raw(frame[s..e].to_string())));
+            }
+        }
+    }
+    if truncated {
+        lines.push(Line::from(Span::styled(
+            "…(已截断)".to_string(),
+            theme::preview_placeholder_style(),
+        )));
+    }
+    lines
+}
+
 /// Content lines for the current detail mode (height estimation + render).
 pub fn detail_content_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
     use crate::app::DetailView;
     match app.detail {
         DetailView::Fields => detail_field_lines(app.current_row().as_deref(), inner_width),
-        DetailView::Pretty => detail_pretty_lines(app.current_row().as_deref(), inner_width),
+        DetailView::Pretty => {
+            if let Some(row) = app.current_row() {
+                if let Some((info, truncated)) = crash_context_for_row(app, &row) {
+                    let width = inner_width.max(1) as usize;
+                    return render_crash_detail_lines(&info, !app.store.is_file(), truncated, width);
+                }
+            }
+            detail_pretty_lines(app.current_row().as_deref(), inner_width)
+        }
         DetailView::Closed => Vec::new(),
     }
 }
@@ -2153,7 +2590,10 @@ pub fn render_picker_search_line(
         return None;
     }
 
-    let chip_h = chip_rows.min(area.height.saturating_sub(PICKER_SEARCH_HEIGHT.min(area.height)));
+    let chip_h = chip_rows.min(
+        area.height
+            .saturating_sub(PICKER_SEARCH_HEIGHT.min(area.height)),
+    );
     if chip_h > 0 && !chips.is_empty() {
         let chip_area = Rect {
             x: area.x,
@@ -2224,6 +2664,8 @@ pub enum PickerRightPane<'a> {
     /// Bookmark panel: reuse `p` Fields detail for the selected row.
     /// `None` means the bookmarked row is missing/evicted.
     Detail(Option<&'a crate::model::EntryRow>),
+    /// Preset panel: chip-strip style Filter → Exclude → Highlight.
+    ChipRules(&'a [Line<'static>]),
 }
 
 /// fzf-style picker shell: left candidates + bottom search, right Preview.
@@ -2303,17 +2745,144 @@ pub fn render_picker(
             PickerRightPane::Detail(row) => {
                 render_picker_detail(row, frame, right);
             }
+            PickerRightPane::ChipRules(lines) => {
+                render_preset_rules_preview(lines, frame, right);
+            }
         }
     }
     cursor
 }
 
-/// Bookmark picker right pane: same Fields shell/content as LogList `p`.
-pub fn render_picker_detail(
-    row: Option<&crate::model::EntryRow>,
+/// Preset Preview: stacked Filter / Exclude / Highlight chip rows (strip style).
+pub fn render_preset_rules_preview(lines: &[Line<'static>], frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let inner = render_modal_shell("Preview", frame, area);
+    if lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("无规则", theme::preview_placeholder_style())),
+            inner,
+        );
+        return;
+    }
+    frame.render_widget(Paragraph::new(lines.to_vec()), inner);
+}
+
+/// Build Preview lines for a preset (Filter → Exclude → Highlight), strip-like pills.
+pub fn preset_preview_lines(preset: &crate::preset::Preset, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let mut out = Vec::new();
+    if let Ok((groups, highlights)) = crate::preset::materialize(preset) {
+        if !groups.groups.is_empty() {
+            out.push(Line::from(Span::styled(
+                "Filter",
+                theme::muted().add_modifier(Modifier::BOLD),
+            )));
+            let groups_spans: Vec<Vec<Span<'static>>> = groups
+                .groups
+                .iter()
+                .map(|g| filter_group_spans(g, false))
+                .collect();
+            out.extend(flow_wrap_groups(groups_spans, width as u16));
+        }
+        if !groups.excludes.is_empty() {
+            if !out.is_empty() {
+                out.push(Line::from(""));
+            }
+            out.push(Line::from(Span::styled(
+                "Exclude",
+                theme::muted().add_modifier(Modifier::BOLD),
+            )));
+            let groups_spans: Vec<Vec<Span<'static>>> = groups
+                .excludes
+                .iter()
+                .map(|e| exclude_entry_spans(e, false))
+                .collect();
+            out.extend(flow_wrap_groups(groups_spans, width as u16));
+        }
+        if !highlights.groups.is_empty() {
+            if !out.is_empty() {
+                out.push(Line::from(""));
+            }
+            out.push(Line::from(Span::styled(
+                "Highlight",
+                theme::muted().add_modifier(Modifier::BOLD),
+            )));
+            let mut color_idx = 0usize;
+            let groups_spans: Vec<Vec<Span<'static>>> = highlights
+                .groups
+                .iter()
+                .map(|g| {
+                    let idx = if g.enabled {
+                        let c = color_idx;
+                        color_idx += 1;
+                        c
+                    } else {
+                        0
+                    };
+                    highlight_group_spans(g, idx, false, false)
+                })
+                .collect();
+            out.extend(flow_wrap_groups(groups_spans, width as u16));
+        }
+    }
+    out
+}
+
+/// Save / rename preset name dialog (no candidates, no preview).
+/// Returns hardware cursor position for the draft caret.
+pub fn render_preset_name_dialog(
+    dialog: &crate::preset::PresetNameDialog,
     frame: &mut Frame,
-    area: Rect,
-) {
+    frame_area: Rect,
+) -> Option<Position> {
+    use crate::preset::PresetNamePurpose;
+
+    let title = match &dialog.purpose {
+        PresetNamePurpose::Save => "Save preset",
+        PresetNamePurpose::Rename { .. } => "Rename preset",
+    };
+    let modal_w = modal_width(frame_area.width).min(48);
+    let area = centered_modal_rect(frame_area, modal_w, 5);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_shell(title, frame, area);
+    if dialog.confirm_overwrite {
+        let text = vec![
+            Line::from(Span::styled(
+                format!("覆盖 '{}'？", dialog.field.as_str()),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+            Line::from(Span::styled(
+                "y/Enter 确认  n/Esc 取消",
+                theme::context_help_style(),
+            ))
+            .alignment(Alignment::Center),
+        ];
+        frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), inner);
+        return None;
+    }
+    let mut spans = vec![theme::picker_mode_prefix(&crate::picker::PickerMode::New)];
+    let prefix_w = spans_display_width(&spans) as u16;
+    let draft_max = inner.width.saturating_sub(prefix_w);
+    let (draft_spans, caret_col) = editable_text_spans(
+        dialog.field.as_str(),
+        dialog.field.cursor(),
+        Some(draft_max),
+    );
+    spans.extend(draft_spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+    Some(Position {
+        x: inner
+            .x
+            .saturating_add(prefix_w.saturating_add(caret_col).min(inner.width)),
+        y: inner.y,
+    })
+}
+
+/// Bookmark picker right pane: same Fields shell/content as LogList `p`.
+pub fn render_picker_detail(row: Option<&crate::model::EntryRow>, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
@@ -2342,6 +2911,7 @@ fn confirm_dialog_question(confirm: &crate::picker::ConfirmKind) -> String {
             }
         }
         crate::picker::ConfirmKind::DeleteBookmark { .. } => "删除书签？".to_string(),
+        crate::picker::ConfirmKind::DeletePreset { name } => format!("删除规则 '{name}'？"),
     }
 }
 
@@ -2472,6 +3042,10 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw(" "));
         spans.push(theme::status_icon(theme::GLYPH_FOLLOWING, theme::success()));
     }
+    if !app.store.is_file() && app.ingest_done {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_icon(theme::GLYPH_DISCONNECT, theme::warning()));
+    }
     if let Some(lock) = app.lock_badge_label() {
         spans.push(Span::raw(" "));
         spans.push(theme::status_icon_value(
@@ -2593,6 +3167,54 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn candidate_viewport_range_bounds_paint_window() {
+        assert_eq!(candidate_viewport_range(0, 0, 10), (0, 0));
+        assert_eq!(candidate_viewport_range(5, 0, 10), (0, 5));
+        assert_eq!(candidate_viewport_range(100, 0, 8), (0, 8));
+        let (off, end) = candidate_viewport_range(100, 50, 8);
+        assert_eq!(end - off, 8);
+        assert!(off <= 50 && 50 < end);
+        let (off, end) = candidate_viewport_range(100, 99, 8);
+        assert_eq!(end, 100);
+        assert_eq!(end - off, 8);
+    }
+
+    #[test]
+    fn candidate_list_viewport_paint_stays_fast_with_many_labels() {
+        use std::time::Instant;
+        let labels: Vec<String> = (0..crate::fuzzy::CANDIDATE_RESULT_CAP)
+            .map(|i| format!("CandidateLabel_{i:03}"))
+            .collect();
+        let styles = vec![Style::default(); labels.len()];
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let t = Instant::now();
+        terminal
+            .draw(|f| {
+                render_candidate_list(
+                    "list",
+                    &labels,
+                    &styles,
+                    &[],
+                    &[],
+                    200,
+                    "empty",
+                    "Cand",
+                    f,
+                    f.area(),
+                    false,
+                );
+            })
+            .unwrap();
+        // ViewportPaint: even 256 labels must not approach the old O(n) ~90ms path.
+        assert!(
+            t.elapsed().as_millis() < 50,
+            "viewport paint took {:?} (expected << 50ms)",
+            t.elapsed()
+        );
     }
 
     #[test]
@@ -2909,12 +3531,18 @@ mod tests {
         let row = EntryRow::from_line(&line).unwrap();
         let rendered = render_entry_line_single(&row, &[], 60);
         let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains('…'), "single-line preview must ellipsize: {text}");
+        assert!(
+            text.contains('…'),
+            "single-line preview must ellipsize: {text}"
+        );
         assert!(
             !text.contains('\n'),
             "single-line preview must stay one physical line"
         );
-        assert!(text.starts_with("04-02 10:00:00.000"), "must start at timestamp");
+        assert!(
+            text.starts_with("04-02 10:00:00.000"),
+            "must start at timestamp"
+        );
     }
 
     #[test]
@@ -3133,6 +3761,89 @@ mod tests {
     }
 
     #[test]
+    fn test_render_entry_line_collapsed_truncates_msg_with_ellipsis() {
+        let long = "word ".repeat(40);
+        let line = format!("04-02 10:00:00.000  1  1 I Tag     : {long}");
+        let row = EntryRow::from_line(&line).unwrap();
+        let rendered = render_entry_line_collapsed(&row, &[], 60, 12, 3);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('…'), "collapsed line must ellipsize: {text}");
+        assert!(
+            !text.contains('\n'),
+            "collapsed line must stay a single physical line"
+        );
+        assert!(
+            text.contains(" 12 "),
+            "collapsed line must keep the lineno prefix like render_entry_lines"
+        );
+        assert!(
+            text.starts_with(" 12 04-02 10:00:00.000"),
+            "must start with lineno then timestamp"
+        );
+    }
+
+    #[test]
+    fn test_render_entry_line_collapsed_keeps_short_msg_untouched() {
+        let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I MyTag   : hello").unwrap();
+        let rendered = render_entry_line_collapsed(&row, &[], 200, 1, 1);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains('…'), "short msg must not be truncated");
+        assert!(text.contains("MyTag"));
+        assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn test_render_entry_line_collapsed_highlights_pattern() {
+        let row =
+            EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred").unwrap();
+        let patterns = [("error", 0usize, true)];
+        let rendered = render_entry_line_collapsed(&row, &patterns, 200, 1, 1);
+        let matched = rendered
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "error")
+            .expect("highlight span");
+        assert_eq!(matched.style, theme::highlight_style_active(0));
+    }
+
+    #[test]
+    fn test_render_log_list_collapsed_view_produces_single_line_items() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let long = "word ".repeat(40);
+        tx.send(
+            crate::model::EntryRow::from_line(&format!(
+                "04-02 10:00:00.000  1  1 I Tag     : {long}"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.following = false;
+        app.collapsed_view = true;
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut found_ellipsis = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == "…" {
+                    found_ellipsis = true;
+                }
+            }
+        }
+        assert!(
+            found_ellipsis,
+            "collapsed view must render truncated msg with ellipsis"
+        );
+    }
+
+    #[test]
     fn test_chip_pill_and_highlight_pill_styles() {
         let (text, body) = theme::chip_pill_style(crate::input::ChipField::Tag, "MyTag", false);
         assert!(text.contains("MyTag"));
@@ -3315,6 +4026,50 @@ mod tests {
         assert!(
             content.contains("1/2"),
             "first hit ordinal: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_shows_disconnect_icon_in_stream_mode() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.ingest_done = true;
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            content.contains(theme::GLYPH_DISCONNECT),
+            "stream mode + ingest_done should show disconnect icon: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_hides_disconnect_icon_in_file_mode() {
+        use crate::store::FileStore;
+        use std::io::Write;
+
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"04-02 10:00:00.000  1  1 I Tag     : ok\n")
+            .unwrap();
+        f.flush().unwrap();
+        let mut app = App::new(100);
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.following = false;
+        app.ingest_done = true;
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            !content.contains(theme::GLYPH_DISCONNECT),
+            "file mode must never show disconnect icon: got {content:?}"
         );
     }
 
@@ -3733,7 +4488,10 @@ mod tests {
             })
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
-        assert!(content.contains("AAAAAAAA"), "first chip visible: {content}");
+        assert!(
+            content.contains("AAAAAAAA"),
+            "first chip visible: {content}"
+        );
         assert!(
             content.contains("BBBBBBBB"),
             "wrapped second chip must remain visible: {content}"
@@ -3947,10 +4705,7 @@ mod tests {
         // Inject a long multi-line label (msg may contain hard newlines).
         app.update_bookmark_label(
             row_id,
-            format!(
-                "04-02 10:00:00.000 I Tag line1\n{}",
-                "x".repeat(200)
-            ),
+            format!("04-02 10:00:00.000 I Tag line1\n{}", "x".repeat(200)),
         );
 
         let lines = build_bookmark_strip_lines(&app, 30, 3);
@@ -3959,10 +4714,9 @@ mod tests {
 
     #[test]
     fn render_picker_detail_shows_fields() {
-        let row = crate::model::EntryRow::from_line(
-            "04-02 10:00:00.000  1  1 I TagA    : hello detail",
-        )
-        .unwrap();
+        let row =
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I TagA    : hello detail")
+                .unwrap();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -4044,7 +4798,11 @@ mod tests {
         let frame = Rect::new(0, 0, 80, 40);
         let anchor = Rect::new(10, 2, 40, 3);
         let prev = preview_popup_rect(anchor, frame);
-        assert!(prev.height > 12, "should fill below modal, got {}", prev.height);
+        assert!(
+            prev.height > 12,
+            "should fill below modal, got {}",
+            prev.height
+        );
         assert_eq!(prev.y + prev.height, frame.y + frame.height);
     }
 
@@ -4055,7 +4813,64 @@ mod tests {
         let picker = picker_frame_rect(frame, true);
         let (_l, r) = split_picker_lr_gapped(picker, PICKER_PREVIEW_LEFT_RATIO);
         assert_eq!(cap, r.height.saturating_sub(2) as usize);
-        assert!(cap > 10, "tall picker should expose more than old PREVIEW_LIMIT");
+        assert!(
+            cap > 10,
+            "tall picker should expose more than old PREVIEW_LIMIT"
+        );
+    }
+
+    #[test]
+    fn picker_preview_inner_width_matches_right_pane() {
+        let frame = Rect::new(0, 0, 120, 40);
+        let w = picker_preview_inner_width(frame, PICKER_PREVIEW_LEFT_RATIO);
+        let picker = picker_frame_rect(frame, true);
+        let (_l, r) = split_picker_lr_gapped(picker, PICKER_PREVIEW_LEFT_RATIO);
+        assert_eq!(w, r.width.saturating_sub(2));
+        assert!(
+            w > 40,
+            "real preview pane must be wider than the old hardcode"
+        );
+    }
+
+    #[test]
+    fn preset_preview_uses_width_so_chips_stay_unwrapped() {
+        use crate::preset::{Preset, PresetChip, PresetFilterGroup, PRESET_VERSION};
+
+        let preset = Preset {
+            version: PRESET_VERSION,
+            name: "trace".into(),
+            filters: vec![PresetFilterGroup {
+                chips: vec![
+                    PresetChip {
+                        field: "tag".into(),
+                        value: "NTKernel".into(),
+                    },
+                    PresetChip {
+                        field: "msg".into(),
+                        value: "OidbSvcTrpcTcp".into(),
+                    },
+                    PresetChip {
+                        field: "msg".into(),
+                        value: "trace=".into(),
+                    },
+                ],
+            }],
+            excludes: vec![],
+            highlights: vec![],
+        };
+        let narrow = preset_preview_lines(&preset, 40);
+        let wide = preset_preview_lines(&preset, 80);
+        // Title "Filter" + wrapped chip rows. Narrow width forces an extra wrap.
+        let narrow_chip_rows = narrow.len().saturating_sub(1);
+        let wide_chip_rows = wide.len().saturating_sub(1);
+        assert!(
+            narrow_chip_rows > wide_chip_rows,
+            "width=40 wraps earlier than width=80: narrow={narrow_chip_rows} wide={wide_chip_rows}"
+        );
+        assert_eq!(
+            wide_chip_rows, 1,
+            "three chips of the trace preset fit on one row at width=80"
+        );
     }
 
     #[test]
@@ -4128,5 +4943,251 @@ mod tests {
         let content = cell_text(terminal.backend().buffer());
         assert!(content.contains("y/Enter"));
         assert!(content.contains("n/Esc"));
+    }
+
+    #[test]
+    fn bar_line_proportional_fill_and_count_label() {
+        let line = bar_line("E", 5, 10, 20, Style::default());
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains('█'),
+            "partial bar should have some filled blocks"
+        );
+        assert!(
+            text.contains('░'),
+            "partial bar should have some empty blocks"
+        );
+        assert!(
+            text.trim_end().ends_with("5"),
+            "trailing count label: {text:?}"
+        );
+
+        let full = bar_line("E", 10, 10, 20, Style::default());
+        let full_text: String = full.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !full_text.contains('░'),
+            "max count should fill the whole bar"
+        );
+
+        let empty = bar_line("E", 0, 10, 20, Style::default());
+        let empty_text: String = empty.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !empty_text.contains('█'),
+            "zero count should have no filled blocks"
+        );
+    }
+
+    fn fake_summary_report() -> alnav::summary::SummaryOutput {
+        use std::collections::HashMap;
+        let mut levels = HashMap::new();
+        levels.insert('I', 3usize);
+        levels.insert('E', 2usize);
+        let mut tag_levels = HashMap::new();
+        tag_levels.insert('I', 2usize);
+        tag_levels.insert('E', 1usize);
+        alnav::summary::SummaryOutput {
+            total: 5,
+            matched: 5,
+            levels,
+            top_tags: vec![alnav::summary::TagEntry {
+                tag: "MyTag".into(),
+                count: 3,
+                levels: tag_levels,
+            }],
+            time_range: alnav::summary::TimeRange {
+                first: "04-02 10:00:00.000".into(),
+                last: "04-02 10:00:04.000".into(),
+            },
+            top_errors: vec![alnav::summary::ErrorEntry {
+                pattern: "timeout after <N>ms".into(),
+                count: 2,
+                tag: "MyTag".into(),
+                sample: "timeout after 100ms".into(),
+            }],
+            crashes: 1,
+        }
+    }
+
+    #[test]
+    fn render_summary_panel_loading_shows_placeholder() {
+        use crate::app::SummaryView;
+        let mut app = App::new(100);
+        app.summary_view = SummaryView::Loading;
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 60, 20);
+                render_summary_panel(&app, f, area);
+            })
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("Summary"));
+        // CJK glyphs occupy two buffer cells; assert on the border/title only
+        // (content reconstruction from `cell_text` isn't East-Asian-width aware).
+        assert!(content.contains("计"));
+    }
+
+    #[test]
+    fn render_summary_panel_ready_shows_sections() {
+        use crate::app::SummaryView;
+        let mut app = App::new(100);
+        app.summary_view = SummaryView::Ready(fake_summary_report());
+        let backend = TestBackend::new(60, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 60, 30);
+                render_summary_panel(&app, f, area);
+            })
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(content.contains("Rows: 5"));
+        assert!(content.contains("Crashes: 1"));
+        assert!(content.contains("Levels"));
+        assert!(content.contains("Top tags"));
+        assert!(content.contains("MyTag"));
+        assert!(content.contains("Top errors"));
+        assert!(content.contains("timeout after"));
+    }
+
+    #[test]
+    fn summary_content_row_count_matches_report_lines() {
+        use crate::app::SummaryView;
+        let mut app = App::new(100);
+        assert_eq!(summary_content_row_count(&app), 1); // Closed clamps to >=1
+        app.summary_view = SummaryView::Loading;
+        assert_eq!(summary_content_row_count(&app), 1);
+        let report = fake_summary_report();
+        let expected = summary_report_lines(&report).len();
+        app.summary_view = SummaryView::Ready(report);
+        assert_eq!(summary_content_row_count(&app), expected);
+    }
+}
+
+#[cfg(test)]
+mod crash_detail_tests {
+    use super::*;
+    use crate::store::FileStore;
+    use std::io::Write;
+
+    fn write_temp(contents: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    fn joined(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn push_stream_line(app: &mut App, line: &str) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::model::EntryRow::from_line(line).unwrap())
+            .unwrap();
+        drop(tx);
+        app.drain(&rx);
+    }
+
+    #[test]
+    fn crash_context_file_mode_merges_stack_continuation() {
+        let body = "04-02 10:00:00.000  1  1 E AndroidRuntime : FATAL EXCEPTION: main\n\
+             java.lang.RuntimeException: boom\n\
+             \tat com.example.Foo.bar(Foo.java:10)\n\
+             \tat com.example.Foo.baz(Foo.java:20)\n\
+             04-02 10:00:01.000  1  1 I Tag     : next entry\n";
+        let f = write_temp(body);
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.cursor = 0;
+        let row = app.current_row().unwrap();
+        let (info, truncated) = crash_context_for_row(&app, &row).expect("crash detected");
+        assert!(!truncated);
+        assert!(matches!(info.crash_type, CrashType::FatalException));
+        assert_eq!(info.headline, "FATAL EXCEPTION: main");
+        assert_eq!(info.exception.as_deref(), Some("java.lang.RuntimeException"));
+        assert_eq!(info.stack.len(), 2);
+        assert!(info.stack[0].contains("Foo.bar"));
+        assert!(info.stack[1].contains("Foo.baz"));
+
+        let rendered = joined(&render_crash_detail_lines(&info, false, truncated, 60));
+        assert!(rendered.contains("FATAL EXCEPTION"));
+        assert!(rendered.contains("Foo.bar"));
+        assert!(!rendered.contains("截断"));
+    }
+
+    #[test]
+    fn crash_context_file_mode_truncates_at_scan_limit() {
+        let mut body =
+            String::from("04-02 10:00:00.000  1  1 E AndroidRuntime : FATAL EXCEPTION: main\n");
+        for i in 0..600 {
+            body.push_str(&format!("junk continuation line {i}\n"));
+        }
+        let f = write_temp(&body);
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.cursor = 0;
+        let row = app.current_row().unwrap();
+        let (info, truncated) = crash_context_for_row(&app, &row).expect("crash detected");
+        assert!(truncated, "scan past 500 continuation lines must truncate");
+
+        let rendered = joined(&render_crash_detail_lines(&info, false, truncated, 60));
+        assert!(rendered.contains("截断"));
+    }
+
+    #[test]
+    fn crash_context_stream_mode_single_line_has_no_stack() {
+        let mut app = App::new(100);
+        push_stream_line(
+            &mut app,
+            "04-02 10:00:00.000  1  1 E AndroidRuntime : FATAL EXCEPTION: main",
+        );
+        app.cursor = 0;
+        let row = app.current_row().unwrap();
+        let (info, truncated) = crash_context_for_row(&app, &row).expect("crash detected");
+        assert!(!truncated);
+        assert!(info.stack.is_empty());
+        assert_eq!(info.headline, "FATAL EXCEPTION: main");
+
+        let rendered = joined(&render_crash_detail_lines(&info, true, truncated, 60));
+        assert!(rendered.contains("stream"));
+    }
+
+    #[test]
+    fn crash_context_none_for_non_crash_signature() {
+        let mut app = App::new(100);
+        push_stream_line(
+            &mut app,
+            r#"04-02 10:00:00.000  1  1 E Tag     : {"a":1}"#,
+        );
+        app.cursor = 0;
+        let row = app.current_row().unwrap();
+        assert!(crash_context_for_row(&app, &row).is_none());
+    }
+
+    #[test]
+    fn crash_context_none_for_bare_continuation_line() {
+        let body = "04-02 10:00:00.000  1  1 E AndroidRuntime : FATAL EXCEPTION: main\n\
+             \tat com.example.Foo.bar(Foo.java:10)\n";
+        let f = write_temp(body);
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.cursor = 1;
+        let row = app.current_row().unwrap();
+        assert!(!row.is_parsed());
+        assert!(crash_context_for_row(&app, &row).is_none());
     }
 }

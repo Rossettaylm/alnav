@@ -32,7 +32,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 ## Pre-Development Checklist
 
 - [ ] Read [session-filters.md](./session-filters.md) before changing filter/lock/time matching or `yc` export.
-- [ ] Read [fuzzy-matching.md](./fuzzy-matching.md) before changing TUI text match, Highlight paint, or Filter chip evaluation.
+- [ ] Read [fuzzy-matching.md](./fuzzy-matching.md) before changing TUI text match, Highlight paint, Filter chip evaluation, or **candidate panel / vocab / Picker list** paths (Candidate panel SLOs).
 - [ ] Read [stream-visible-ingest.md](./stream-visible-ingest.md) before changing `visible`, `push_row` eviction, or live ingest.
 - [ ] Read [file-store.md](./file-store.md) before changing `-f` ingest, `RowStore`, or file filter scanning.
 - [ ] Read [async-scans.md](./async-scans.md) before changing File highlight/`nN`/severe/minimap cache paths or LogList loading.

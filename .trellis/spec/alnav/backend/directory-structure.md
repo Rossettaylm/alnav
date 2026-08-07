@@ -26,11 +26,12 @@ alnav/src/
 ├── candidate_match.rs # Async vocab fuzzy for Picker New (gen+cancel)
 ├── time_panel.rs   # `-f` ts panel: date candidates from rows + HH:MM:SS clamp
 ├── highlight_model.rs # HighlightGroup/HighlightGroupList (pattern + fuzzy, no Regex)
-├── picker.rs       # PickerSession/PickerKind/PickerMode/UnifiedKind/UnifiedItem
+├── picker.rs       # PickerSession/PickerKind(incl. Preset)/PickerMode/UnifiedKind/UnifiedItem
 ├── input.rs        # ChipField/Chip/InputBox/Popup (Enter two-phase)
 ├── ui.rs           # Render: log list, strips, picker, minimap, modals, time panel
 ├── theme.rs        # SINGLE color source (UiTokens + logcolor derivation)
 ├── bookmark.rs     # Bookmark/BookmarkList/JumpResult/label helpers
+├── preset.rs       # Named Filter/Exclude/Highlight presets (`presets/*.toml`)
 ├── help.rs         # HintEntry L1/L2 + Help catalog; FAST_SCROLL_STEP; help_available
 ├── export.rs       # H10 yc CLI export (filters + lock + time_bound)
 ├── config.rs       # theme.toml/config.toml loading
@@ -62,6 +63,9 @@ Manage mode is dispatched **by `session.kind`** in two places:
   `Unified` supports Tab multi-select + Ctrl-X edit; `Bookmark` disables
   edit (Tab = no-op, Ctrl-X = flash) and binds Enter = jump, Delete /
   Ctrl-Backspace = delete-via-`ConfirmKind::DeleteBookmark`.
+  `Preset` is Manage-only (no auto-New): Enter = apply, Ctrl-X = rename
+  name dialog, Delete = `ConfirmKind::DeletePreset`; save is `Space w`
+  outside the picker.
 
 **Convention**: to add a new per-kind Manage panel, add a `PickerKind`
 variant, branch in both `picker_render_data` and `handle_picker_key`, and

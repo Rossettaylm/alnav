@@ -4,11 +4,14 @@
 //! follow-up keys while an operator is pending. Status-bar rendering uses
 //! dim keys + normal labels with spacing (no `:` / `|` separators). Help
 //! reuses the same entries as a detailed Active block plus a full catalog.
+//!
+//! Key strings come from [`App::keymap`]; labels/details stay in this module.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{App, Focus};
+use crate::keymap::ActionId;
 use crate::theme;
 
 /// Minimum remaining character budget before we bother showing help.
@@ -18,19 +21,19 @@ pub const MIN_HELP_WIDTH: usize = 8;
 pub const FAST_SCROLL_STEP: isize = 7;
 
 /// One keybinding hint (status short label + optional longer Help detail).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HintEntry {
-    pub key: &'static str,
+    pub key: String,
     pub label: &'static str,
     pub detail: &'static str,
 }
 
 impl HintEntry {
-    const fn new(key: &'static str, label: &'static str, detail: &'static str) -> Self {
+    fn new(key: String, label: &'static str, detail: &'static str) -> Self {
         Self { key, label, detail }
     }
 
-    const fn short(key: &'static str, label: &'static str) -> Self {
+    fn short(key: String, label: &'static str) -> Self {
         Self {
             key,
             label,
@@ -97,285 +100,63 @@ pub enum SectionId {
     Help,
 }
 
-/// Fixed catalog chapter.
-#[derive(Debug, Clone, Copy)]
-pub struct HintSection {
-    pub id: SectionId,
-    pub title: &'static str,
-    pub entries: &'static [HintEntry],
+fn key_of(app: &App, id: ActionId) -> Option<String> {
+    let file_mode = app.is_file_mode();
+    if !id.meta().allowed(file_mode) {
+        return None;
+    }
+    app.keymap.display(id)
 }
 
-// ---------------------------------------------------------------------------
-// L1 / L2 entry tables
-// ---------------------------------------------------------------------------
+fn agg(app: &App, ids: &[ActionId]) -> Option<String> {
+    let file_mode = app.is_file_mode();
+    let mut parts = Vec::new();
+    for &id in ids {
+        if !id.meta().allowed(file_mode) {
+            continue;
+        }
+        if let Some(s) = app.keymap.display(id) {
+            parts.push(s);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
 
-const L1_LOGLIST: &[HintEntry] = &[
-    HintEntry::short("j/k", "move"),
-    HintEntry::new("Esc", "follow", "resume following"),
-    HintEntry::new("?", "help", "open help"),
-    HintEntry::new("Space", "menu", "leader then Space for manage"),
-    HintEntry::new(";", "filter", "open filter new"),
-    HintEntry::new("/", "highlight", "open highlight new"),
-    HintEntry::new("`", "exclude", "open exclude new"),
-    HintEntry::new("mm", "marks", "bookmark manage"),
-    HintEntry::short("n/N", "next"),
-    HintEntry::short("e/E", "error"),
-    HintEntry::new("m", "mark", "bookmark operator"),
-    HintEntry::new("f", "focus", "lock pid/tid or view focus"),
-    HintEntry::new("t", "time", "time window"),
-    HintEntry::new("c", "chip", "filter from row"),
-    HintEntry::new("C", "exclude", "exclude from row"),
-    HintEntry::new("y", "yank", "yank operator"),
-    HintEntry::new("p/P", "detail", "fields / pretty"),
-];
+fn push_single(
+    out: &mut Vec<HintEntry>,
+    app: &App,
+    id: ActionId,
+    label: &'static str,
+    detail: &'static str,
+) {
+    if let Some(key) = key_of(app, id) {
+        out.push(HintEntry::new(key, label, detail));
+    }
+}
 
-const L1_LOGLIST_LIVE: &[HintEntry] = &[
-    HintEntry::short("j/k", "move"),
-    HintEntry::new("Esc", "follow", "resume following"),
-    HintEntry::new("?", "help", "open help"),
-    HintEntry::new("Space", "menu", "leader then Space for manage"),
-    HintEntry::new(";", "filter", "open filter new"),
-    HintEntry::new("/", "highlight", "open highlight new"),
-    HintEntry::new("`", "exclude", "open exclude new"),
-    HintEntry::new("mm", "marks", "bookmark manage"),
-    HintEntry::short("n/N", "next"),
-    HintEntry::short("e/E", "error"),
-    HintEntry::new("m", "mark", "bookmark operator"),
-    HintEntry::new("f", "focus", "lock pid/tid or view focus"),
-    HintEntry::new("c", "chip", "filter from row"),
-    HintEntry::new("C", "exclude", "exclude from row"),
-    HintEntry::new("y", "yank", "yank operator"),
-    HintEntry::new("p/P", "detail", "fields / pretty"),
-    HintEntry::new("^L", "clear", "clear buffered logs"),
-];
+fn push_agg(
+    out: &mut Vec<HintEntry>,
+    app: &App,
+    ids: &[ActionId],
+    label: &'static str,
+    detail: &'static str,
+) {
+    if let Some(key) = agg(app, ids) {
+        out.push(HintEntry::new(key, label, detail));
+    }
+}
 
-const L1_CHIP_STRIP: &[HintEntry] = &[
-    HintEntry::short("h/l", "group"),
-    HintEntry::new("d", "del…", "dd delete / di disable"),
-    HintEntry::short("Tab", "focus"),
-    HintEntry::new("Esc", "follow", "resume following"),
-    HintEntry::new("?", "help", "open help"),
-];
+fn push_short(out: &mut Vec<HintEntry>, app: &App, id: ActionId, label: &'static str) {
+    push_single(out, app, id, label, label);
+}
 
-const L1_EXCLUDE_STRIP: &[HintEntry] = L1_CHIP_STRIP;
-const L1_HIGHLIGHT_STRIP: &[HintEntry] = L1_CHIP_STRIP;
-
-const L1_INPUT: &[HintEntry] = &[
-    HintEntry::new("Space", "draft", "space in draft"),
-    HintEntry::new("Enter", "commit", "pill then submit group"),
-    HintEntry::new("!", "exclude", "toggle exclude draft"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L1_HIGHLIGHT_MODAL: &[HintEntry] = &[
-    HintEntry::new("Space", "draft", "space in draft"),
-    HintEntry::new("Enter/Tab", "ok", "confirm pattern"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L1_PICKER: &[HintEntry] = &[
-    HintEntry::short("type", "filter"),
-    HintEntry::short("↑/↓", "select"),
-    HintEntry::new("Tab", "multi", "toggle multi-select"),
-    HintEntry::new("Enter", "toggle", "enable/disable or submit"),
-    HintEntry::new("^X", "edit", "edit selected"),
-    HintEntry::new("Del/^⌫", "delete", "delete with confirm"),
-    HintEntry::short("Esc", "close"),
-];
-
-const L1_CONFIRM: &[HintEntry] = &[
-    HintEntry::short("y/Enter", "confirm"),
-    HintEntry::short("n/Esc", "cancel"),
-];
-
-const L1_DETAIL: &[HintEntry] = &[
-    HintEntry::short("p", "close"),
-    HintEntry::short("P", "swap"),
-    HintEntry::new("c/C", "chip", "filter / exclude field"),
-    HintEntry::short("j/k", "row"),
-    HintEntry::short("Esc", "close"),
-];
-
-const L1_TIME_PANEL: &[HintEntry] = &[
-    HintEntry::new("Tab/Enter", "next", "next field"),
-    HintEntry::short("↑↓", "date"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L2_LEADER: &[HintEntry] = &[
-    HintEntry::new("Space", "manage", "open manage panel"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L2_BOOKMARK: &[HintEntry] = &[
-    HintEntry::short("a", "add"),
-    HintEntry::short("d", "delete"),
-    HintEntry::short("m", "manage"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L2_LOCK: &[HintEntry] = &[
-    HintEntry::short("p", "pid"),
-    HintEntry::short("t", "tid"),
-    HintEntry::short("h", "hl"),
-    HintEntry::short("e", "err"),
-    HintEntry::short("u", "clear"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L2_TIME: &[HintEntry] = &[
-    HintEntry::short("t", "set"),
-    HintEntry::short("u", "clear"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L2_CHIP_FIELD: &[HintEntry] = &[
-    HintEntry::short("t", "tag"),
-    HintEntry::short("m", "msg"),
-    HintEntry::short("g", "pkg"),
-    HintEntry::short("p", "pid"),
-    HintEntry::short("T", "tid"),
-    HintEntry::short("l", "level"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L2_YANK: &[HintEntry] = &[
-    HintEntry::short("c", "cli"),
-    HintEntry::short("t", "tag"),
-    HintEntry::short("m", "msg"),
-    HintEntry::short("g", "pkg"),
-    HintEntry::short("p", "pid"),
-    HintEntry::short("T", "tid"),
-    HintEntry::short("l", "level"),
-    HintEntry::short("r", "raw"),
-    HintEntry::short("y", "line"),
-    HintEntry::short("s", "time"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-const L2_STRIP_D: &[HintEntry] = &[
-    HintEntry::short("d", "delete"),
-    HintEntry::short("i", "disable"),
-    HintEntry::short("Esc", "cancel"),
-];
-
-// ---------------------------------------------------------------------------
-// Full catalog (file mode). Live sources omit interactive time entries.
-// ---------------------------------------------------------------------------
-
-const CAT_NAVIGATION: &[HintEntry] = &[
-    HintEntry::new("j/k", "move", "move cursor one line"),
-    HintEntry::new("J/K", "jump", "move 7 lines"),
-    HintEntry::new(
-        "g/G",
-        "top/bottom",
-        "jump top or bottom (G does not resume follow)",
-    ),
-    HintEntry::new("Esc", "follow", "resume following and pin to bottom"),
-    HintEntry::new("n/N", "next hit", "next / previous highlight match"),
-    HintEntry::new("e/E", "error", "next / previous severe line"),
-    HintEntry::new(
-        "1-5",
-        "focus",
-        "focus filter / exclude / highlight / log / input",
-    ),
-];
-
-const CAT_LEADER: &[HintEntry] = &[
-    HintEntry::new("Space Space", "manage", "unified manage picker"),
-    HintEntry::new(";", "filter new", "open filter picker in new mode"),
-    HintEntry::new("/", "highlight new", "open highlight picker in new mode"),
-    HintEntry::new("`", "exclude new", "open exclude picker in new mode"),
-    HintEntry::new("mm", "bookmarks", "open bookmark manage"),
-];
-
-const CAT_OPERATORS: &[HintEntry] = &[
-    HintEntry::new(
-        "c",
-        "chip",
-        "filter/highlight from row (msg → tokens → Filter|Highlight)",
-    ),
-    HintEntry::new("C", "exclude", "exclude chip from current row field"),
-    HintEntry::new("h/l", "strip", "prev / next group on focused strip"),
-    HintEntry::new("dd", "delete", "delete selected strip group"),
-    HintEntry::new("di", "disable", "toggle disable selected strip group"),
-];
-
-const CAT_SESSION: &[HintEntry] = &[
-    HintEntry::new("f p/t/u", "lock", "lock pid / tid / clear"),
-    HintEntry::new(
-        "f h/e",
-        "view",
-        "highlight-only / severe-only (independent toggles; both = AND)",
-    ),
-    HintEntry::new(
-        "t t/u",
-        "time",
-        "set / clear global time window (file only)",
-    ),
-    HintEntry::new("ma/md", "bookmark", "add / remove bookmark on current row"),
-    HintEntry::new(
-        "y c",
-        "export",
-        "yank filters as alnav grep CLI (literal approx)",
-    ),
-    HintEntry::new(
-        "y …",
-        "yank field",
-        "yank tag/msg(token picker)/pkg/pid/tid/level/raw/line/time",
-    ),
-    HintEntry::new("^L", "clear", "clear buffered live logs"),
-];
-
-const CAT_OVERLAYS: &[HintEntry] = &[
-    HintEntry::new("p/P", "detail", "toggle fields / pretty overlay"),
-    HintEntry::new("V", "visual", "visual line mode"),
-    HintEntry::new(
-        "Picker",
-        "fuzzy",
-        "type to fuzzy-filter; Enter toggle; ^X edit; Del delete",
-    ),
-];
-
-const CAT_HELP: &[HintEntry] = &[
-    HintEntry::new("?", "help", "toggle this help panel"),
-    HintEntry::new("j/k", "scroll", "scroll help content one line"),
-    HintEntry::new("J/K", "jump", "scroll help content 7 lines"),
-    HintEntry::new("Esc", "close", "close help without resuming follow"),
-];
-
-const CATALOG: &[HintSection] = &[
-    HintSection {
-        id: SectionId::Navigation,
-        title: "Navigation",
-        entries: CAT_NAVIGATION,
-    },
-    HintSection {
-        id: SectionId::LeaderPickers,
-        title: "Leader & pickers",
-        entries: CAT_LEADER,
-    },
-    HintSection {
-        id: SectionId::Operators,
-        title: "Filter operators",
-        entries: CAT_OPERATORS,
-    },
-    HintSection {
-        id: SectionId::Session,
-        title: "Session",
-        entries: CAT_SESSION,
-    },
-    HintSection {
-        id: SectionId::Overlays,
-        title: "Overlays",
-        entries: CAT_OVERLAYS,
-    },
-    HintSection {
-        id: SectionId::Help,
-        title: "Help",
-        entries: CAT_HELP,
-    },
-];
+fn push_literal(out: &mut Vec<HintEntry>, key: &str, label: &'static str, detail: &'static str) {
+    out.push(HintEntry::new(key.to_string(), label, detail));
+}
 
 /// Resolve the active hint context (modal > pending > focus).
 pub fn context_kind(app: &App) -> ContextKind {
@@ -434,27 +215,416 @@ pub fn context_kind(app: &App) -> ContextKind {
     }
 }
 
+fn l1_loglist(app: &App, live: bool) -> Vec<HintEntry> {
+    let mut out = Vec::new();
+    push_agg(
+        &mut out,
+        app,
+        &[ActionId::LogListMoveDown, ActionId::LogListMoveUp],
+        "move",
+        "move",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListResumeFollow,
+        "follow",
+        "resume following",
+    );
+    push_single(&mut out, app, ActionId::GlobalOpenHelp, "help", "open help");
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListLeader,
+        "menu",
+        "leader then Space for manage",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::GlobalFilterNew,
+        "filter",
+        "open filter new",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::GlobalHighlightNew,
+        "highlight",
+        "open highlight new",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::GlobalExcludeNew,
+        "exclude",
+        "open exclude new",
+    );
+    // mm = bookmark prefix + manage
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::LogListBookmark),
+        key_of(app, ActionId::BookmarkManage),
+    ) {
+        out.push(HintEntry::new(
+            format!("{a}{b}"),
+            "marks",
+            "bookmark manage",
+        ));
+    }
+    push_agg(
+        &mut out,
+        app,
+        &[ActionId::LogListNextMatch, ActionId::LogListPrevMatch],
+        "next",
+        "next",
+    );
+    push_agg(
+        &mut out,
+        app,
+        &[ActionId::LogListNextSevere, ActionId::LogListPrevSevere],
+        "error",
+        "error",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListBookmark,
+        "mark",
+        "bookmark operator",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListLock,
+        "focus",
+        "lock pid/tid or view focus",
+    );
+    if !live {
+        push_single(&mut out, app, ActionId::LogListTime, "time", "time window");
+    }
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListChip,
+        "chip",
+        "filter from row",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListExcludeChip,
+        "exclude",
+        "exclude from row",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListYank,
+        "yank",
+        "yank operator",
+    );
+    push_agg(
+        &mut out,
+        app,
+        &[ActionId::LogListDetailFields, ActionId::LogListDetailPretty],
+        "detail",
+        "fields / pretty",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListWrapToggle,
+        "wrap",
+        "toggle single-line collapsed view",
+    );
+    if live {
+        push_single(
+            &mut out,
+            app,
+            ActionId::LogListClearLive,
+            "clear",
+            "clear buffered logs",
+        );
+    }
+    out
+}
+
+fn l1_strip(app: &App) -> Vec<HintEntry> {
+    let mut out = Vec::new();
+    push_agg(
+        &mut out,
+        app,
+        &[ActionId::StripPrevGroup, ActionId::StripNextGroup],
+        "group",
+        "group",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::StripPendingD,
+        "del…",
+        "dd delete / di disable",
+    );
+    push_short(&mut out, app, ActionId::StripFocusNext, "focus");
+    push_single(
+        &mut out,
+        app,
+        ActionId::StripResumeFollow,
+        "follow",
+        "resume following",
+    );
+    push_single(&mut out, app, ActionId::StripOpenHelp, "help", "open help");
+    out
+}
+
 /// Entries for the current status-bar / Help Active context.
-pub fn context_entries(app: &App) -> &'static [HintEntry] {
+pub fn context_entries(app: &App) -> Vec<HintEntry> {
     match context_kind(app) {
-        ContextKind::Confirm => L1_CONFIRM,
-        ContextKind::Picker => L1_PICKER,
-        ContextKind::HighlightModal => L1_HIGHLIGHT_MODAL,
-        ContextKind::TimePanel => L1_TIME_PANEL,
-        ContextKind::Detail => L1_DETAIL,
-        ContextKind::Leader => L2_LEADER,
-        ContextKind::Bookmark => L2_BOOKMARK,
-        ContextKind::Lock => L2_LOCK,
-        ContextKind::Time => L2_TIME,
-        ContextKind::ChipField => L2_CHIP_FIELD,
-        ContextKind::Yank => L2_YANK,
-        ContextKind::StripD => L2_STRIP_D,
-        ContextKind::Input => L1_INPUT,
-        ContextKind::ChipStrip => L1_CHIP_STRIP,
-        ContextKind::ExcludeStrip => L1_EXCLUDE_STRIP,
-        ContextKind::HighlightStrip => L1_HIGHLIGHT_STRIP,
-        ContextKind::LogList => L1_LOGLIST,
-        ContextKind::LogListLive => L1_LOGLIST_LIVE,
+        ContextKind::Confirm => {
+            let mut out = Vec::new();
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::ConfirmYes, ActionId::ConfirmYesEnter],
+                "confirm",
+                "confirm",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::ConfirmNo, ActionId::ConfirmCancel],
+                "cancel",
+                "cancel",
+            );
+            out
+        }
+        ContextKind::Picker => {
+            let mut out = Vec::new();
+            push_literal(&mut out, "type", "filter", "filter");
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::PickerUp, ActionId::PickerDown],
+                "select",
+                "select",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::PickerMulti,
+                "multi",
+                "toggle multi-select",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::PickerSubmit,
+                "toggle",
+                "enable/disable or submit",
+            );
+            push_single(&mut out, app, ActionId::PickerEdit, "edit", "edit selected");
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::PickerDelete, ActionId::PickerDeleteAlt],
+                "delete",
+                "delete with confirm",
+            );
+            push_short(&mut out, app, ActionId::PickerClose, "close");
+            out
+        }
+        ContextKind::HighlightModal => {
+            let mut out = Vec::new();
+            push_single(
+                &mut out,
+                app,
+                ActionId::HighlightModalDraftSpace,
+                "draft",
+                "space in draft",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[
+                    ActionId::HighlightModalConfirm,
+                    ActionId::HighlightModalConfirmTab,
+                ],
+                "ok",
+                "confirm pattern",
+            );
+            push_short(&mut out, app, ActionId::HighlightModalCancel, "cancel");
+            out
+        }
+        ContextKind::TimePanel => {
+            let mut out = Vec::new();
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::TimePanelNext, ActionId::TimePanelSubmit],
+                "next",
+                "next field",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::TimePanelDateUp, ActionId::TimePanelDateDown],
+                "date",
+                "date",
+            );
+            push_short(&mut out, app, ActionId::TimePanelCancel, "cancel");
+            out
+        }
+        ContextKind::Detail => {
+            let mut out = Vec::new();
+            push_short(&mut out, app, ActionId::DetailCloseFields, "close");
+            push_short(&mut out, app, ActionId::DetailSwap, "swap");
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::DetailChip, ActionId::DetailExclude],
+                "chip",
+                "filter / exclude field",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::DetailMoveDown, ActionId::DetailMoveUp],
+                "row",
+                "row",
+            );
+            push_short(&mut out, app, ActionId::DetailClose, "close");
+            out
+        }
+        ContextKind::Leader => {
+            let mut out = Vec::new();
+            push_single(
+                &mut out,
+                app,
+                ActionId::LeaderManage,
+                "manage",
+                "open manage panel",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LeaderPresetSave,
+                "save",
+                "save filter preset",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LeaderPresetOpen,
+                "open",
+                "open filter preset",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LeaderSummary,
+                "stats",
+                "open summary panel",
+            );
+            push_short(&mut out, app, ActionId::LeaderCancel, "cancel");
+            out
+        }
+        ContextKind::Bookmark => {
+            let mut out = Vec::new();
+            push_short(&mut out, app, ActionId::BookmarkAdd, "add");
+            push_short(&mut out, app, ActionId::BookmarkRemove, "delete");
+            push_short(&mut out, app, ActionId::BookmarkManage, "manage");
+            push_short(&mut out, app, ActionId::BookmarkCancel, "cancel");
+            out
+        }
+        ContextKind::Lock => {
+            let mut out = Vec::new();
+            push_short(&mut out, app, ActionId::LockPid, "pid");
+            push_short(&mut out, app, ActionId::LockTid, "tid");
+            push_short(&mut out, app, ActionId::LockViewHighlight, "hl");
+            push_short(&mut out, app, ActionId::LockViewSevere, "err");
+            push_short(&mut out, app, ActionId::LockClear, "clear");
+            push_short(&mut out, app, ActionId::LockCancel, "cancel");
+            out
+        }
+        ContextKind::Time => {
+            let mut out = Vec::new();
+            push_short(&mut out, app, ActionId::TimeSet, "set");
+            push_short(&mut out, app, ActionId::TimeClear, "clear");
+            push_short(&mut out, app, ActionId::TimeCancel, "cancel");
+            out
+        }
+        ContextKind::ChipField => {
+            let mut out = Vec::new();
+            for (id, label) in [
+                (ActionId::ChipFieldTag, "tag"),
+                (ActionId::ChipFieldMsg, "msg"),
+                (ActionId::ChipFieldPkg, "pkg"),
+                (ActionId::ChipFieldPid, "pid"),
+                (ActionId::ChipFieldTid, "tid"),
+                (ActionId::ChipFieldLevel, "level"),
+                (ActionId::ChipFieldCancel, "cancel"),
+            ] {
+                push_short(&mut out, app, id, label);
+            }
+            out
+        }
+        ContextKind::Yank => {
+            let mut out = Vec::new();
+            for (id, label) in [
+                (ActionId::YankCli, "cli"),
+                (ActionId::YankTag, "tag"),
+                (ActionId::YankMsg, "msg"),
+                (ActionId::YankPkg, "pkg"),
+                (ActionId::YankPid, "pid"),
+                (ActionId::YankTid, "tid"),
+                (ActionId::YankLevel, "level"),
+                (ActionId::YankRaw, "raw"),
+                (ActionId::YankLine, "line"),
+                (ActionId::YankTime, "time"),
+                (ActionId::YankCancel, "cancel"),
+            ] {
+                push_short(&mut out, app, id, label);
+            }
+            out
+        }
+        ContextKind::StripD => {
+            let mut out = Vec::new();
+            push_short(&mut out, app, ActionId::StripDDelete, "delete");
+            push_short(&mut out, app, ActionId::StripDDisable, "disable");
+            push_short(&mut out, app, ActionId::StripDCancel, "cancel");
+            out
+        }
+        ContextKind::Input => {
+            let mut out = Vec::new();
+            push_single(
+                &mut out,
+                app,
+                ActionId::InputDraftSpace,
+                "draft",
+                "space in draft",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::InputCommit,
+                "commit",
+                "pill then submit group",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::InputToggleExclude,
+                "exclude",
+                "toggle exclude draft",
+            );
+            push_short(&mut out, app, ActionId::InputCancel, "cancel");
+            out
+        }
+        ContextKind::ChipStrip | ContextKind::ExcludeStrip | ContextKind::HighlightStrip => {
+            l1_strip(app)
+        }
+        ContextKind::LogList => l1_loglist(app, false),
+        ContextKind::LogListLive => l1_loglist(app, true),
     }
 }
 
@@ -479,9 +649,315 @@ pub fn active_section_id(kind: ContextKind) -> SectionId {
     }
 }
 
-/// Full catalog sections (live modes hide interactive time entry detail in UI).
-pub fn catalog_sections() -> &'static [HintSection] {
-    CATALOG
+fn catalog_entries(app: &App, live: bool) -> Vec<(SectionId, &'static str, Vec<HintEntry>)> {
+    let mut nav = Vec::new();
+    push_agg(
+        &mut nav,
+        app,
+        &[ActionId::LogListMoveDown, ActionId::LogListMoveUp],
+        "move",
+        "move cursor one line",
+    );
+    push_agg(
+        &mut nav,
+        app,
+        &[ActionId::LogListJumpDown, ActionId::LogListJumpUp],
+        "jump",
+        "move 7 lines",
+    );
+    push_agg(
+        &mut nav,
+        app,
+        &[ActionId::LogListJumpTop, ActionId::LogListJumpBottom],
+        "top/bottom",
+        "jump top or bottom (G resumes follow)",
+    );
+    push_single(
+        &mut nav,
+        app,
+        ActionId::LogListResumeFollow,
+        "follow",
+        "resume following and pin to bottom",
+    );
+    push_agg(
+        &mut nav,
+        app,
+        &[ActionId::LogListNextMatch, ActionId::LogListPrevMatch],
+        "next hit",
+        "next / previous highlight match",
+    );
+    push_agg(
+        &mut nav,
+        app,
+        &[ActionId::LogListNextSevere, ActionId::LogListPrevSevere],
+        "error",
+        "next / previous severe line",
+    );
+    push_literal(
+        &mut nav,
+        "1-5",
+        "focus",
+        "focus filter / exclude / highlight / log / input",
+    );
+
+    let mut leader = Vec::new();
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::LogListLeader),
+        key_of(app, ActionId::LeaderManage),
+    ) {
+        leader.push(HintEntry::new(
+            format!("{a} {b}"),
+            "manage",
+            "unified manage picker",
+        ));
+    }
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::LogListLeader),
+        key_of(app, ActionId::LeaderPresetSave),
+    ) {
+        leader.push(HintEntry::new(
+            format!("{a} {b}"),
+            "save preset",
+            "save Filter/Exclude/Highlight preset",
+        ));
+    }
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::LogListLeader),
+        key_of(app, ActionId::LeaderPresetOpen),
+    ) {
+        leader.push(HintEntry::new(
+            format!("{a} {b}"),
+            "open preset",
+            "search and apply named preset",
+        ));
+    }
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::LogListLeader),
+        key_of(app, ActionId::LeaderSummary),
+    ) {
+        leader.push(HintEntry::new(
+            format!("{a} {b}"),
+            "stats",
+            "open summary panel (level / tags / errors)",
+        ));
+    }
+    push_single(
+        &mut leader,
+        app,
+        ActionId::GlobalFilterNew,
+        "filter new",
+        "open filter picker in new mode",
+    );
+    push_single(
+        &mut leader,
+        app,
+        ActionId::GlobalHighlightNew,
+        "highlight new",
+        "open highlight picker in new mode",
+    );
+    push_single(
+        &mut leader,
+        app,
+        ActionId::GlobalExcludeNew,
+        "exclude new",
+        "open exclude picker in new mode",
+    );
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::LogListBookmark),
+        key_of(app, ActionId::BookmarkManage),
+    ) {
+        leader.push(HintEntry::new(
+            format!("{a}{b}"),
+            "bookmarks",
+            "open bookmark manage",
+        ));
+    }
+
+    let mut ops = Vec::new();
+    push_single(
+        &mut ops,
+        app,
+        ActionId::LogListChip,
+        "chip",
+        "filter/highlight from row (msg → tokens → Filter|Highlight)",
+    );
+    push_single(
+        &mut ops,
+        app,
+        ActionId::LogListExcludeChip,
+        "exclude",
+        "exclude chip from current row field",
+    );
+    push_agg(
+        &mut ops,
+        app,
+        &[ActionId::StripPrevGroup, ActionId::StripNextGroup],
+        "strip",
+        "prev / next group on focused strip",
+    );
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::StripPendingD),
+        key_of(app, ActionId::StripDDelete),
+    ) {
+        ops.push(HintEntry::new(
+            format!("{a}{b}"),
+            "delete",
+            "delete selected strip group",
+        ));
+    }
+    if let (Some(a), Some(b)) = (
+        key_of(app, ActionId::StripPendingD),
+        key_of(app, ActionId::StripDDisable),
+    ) {
+        ops.push(HintEntry::new(
+            format!("{a}{b}"),
+            "disable",
+            "toggle disable selected strip group",
+        ));
+    }
+
+    let mut session = Vec::new();
+    if let (Some(p), Some(fp), Some(ft), Some(fu)) = (
+        key_of(app, ActionId::LogListLock),
+        key_of(app, ActionId::LockPid),
+        key_of(app, ActionId::LockTid),
+        key_of(app, ActionId::LockClear),
+    ) {
+        session.push(HintEntry::new(
+            format!("{p} {fp}/{ft}/{fu}"),
+            "lock",
+            "lock pid / tid / clear",
+        ));
+    }
+    if let (Some(p), Some(h), Some(e)) = (
+        key_of(app, ActionId::LogListLock),
+        key_of(app, ActionId::LockViewHighlight),
+        key_of(app, ActionId::LockViewSevere),
+    ) {
+        session.push(HintEntry::new(
+            format!("{p} {h}/{e}"),
+            "view",
+            "highlight-only / severe-only (independent toggles; both = AND)",
+        ));
+    }
+    if !live {
+        if let (Some(t), Some(tt), Some(tu)) = (
+            key_of(app, ActionId::LogListTime),
+            key_of(app, ActionId::TimeSet),
+            key_of(app, ActionId::TimeClear),
+        ) {
+            session.push(HintEntry::new(
+                format!("{t} {tt}/{tu}"),
+                "time",
+                "set / clear global time window (file only)",
+            ));
+        }
+    }
+    if let (Some(m), Some(a), Some(d)) = (
+        key_of(app, ActionId::LogListBookmark),
+        key_of(app, ActionId::BookmarkAdd),
+        key_of(app, ActionId::BookmarkRemove),
+    ) {
+        session.push(HintEntry::new(
+            format!("{m}{a}/{m}{d}"),
+            "bookmark",
+            "add / remove bookmark on current row",
+        ));
+    }
+    if let (Some(y), Some(c)) = (
+        key_of(app, ActionId::LogListYank),
+        key_of(app, ActionId::YankCli),
+    ) {
+        session.push(HintEntry::new(
+            format!("{y} {c}"),
+            "export",
+            "yank filters as alnav grep CLI (literal approx)",
+        ));
+    }
+    if let Some(y) = key_of(app, ActionId::LogListYank) {
+        session.push(HintEntry::new(
+            format!("{y} …"),
+            "yank field",
+            "yank tag/msg(token picker)/pkg/pid/tid/level/raw/line/time",
+        ));
+    }
+    if live {
+        push_single(
+            &mut session,
+            app,
+            ActionId::LogListClearLive,
+            "clear",
+            "clear buffered live logs",
+        );
+    }
+
+    let mut overlays = Vec::new();
+    push_agg(
+        &mut overlays,
+        app,
+        &[ActionId::LogListDetailFields, ActionId::LogListDetailPretty],
+        "detail",
+        "toggle fields / pretty overlay",
+    );
+    push_single(
+        &mut overlays,
+        app,
+        ActionId::LogListWrapToggle,
+        "wrap",
+        "toggle multi-line wrap / single-line collapsed view",
+    );
+    push_single(
+        &mut overlays,
+        app,
+        ActionId::LogListVisualLine,
+        "visual",
+        "visual line mode",
+    );
+    push_literal(
+        &mut overlays,
+        "Picker",
+        "fuzzy",
+        "type to fuzzy-filter; Enter toggle; ^X edit; Del delete",
+    );
+
+    let mut help = Vec::new();
+    push_single(
+        &mut help,
+        app,
+        ActionId::GlobalOpenHelp,
+        "help",
+        "toggle this help panel",
+    );
+    push_agg(
+        &mut help,
+        app,
+        &[ActionId::HelpScrollDown, ActionId::HelpScrollUp],
+        "scroll",
+        "scroll help content one line",
+    );
+    push_agg(
+        &mut help,
+        app,
+        &[ActionId::HelpJumpDown, ActionId::HelpJumpUp],
+        "jump",
+        "scroll help content 7 lines",
+    );
+    push_single(
+        &mut help,
+        app,
+        ActionId::HelpClose,
+        "close",
+        "close help without resuming follow",
+    );
+
+    vec![
+        (SectionId::Navigation, "Navigation", nav),
+        (SectionId::LeaderPickers, "Leader & pickers", leader),
+        (SectionId::Operators, "Filter operators", ops),
+        (SectionId::Session, "Session", session),
+        (SectionId::Overlays, "Overlays", overlays),
+        (SectionId::Help, "Help", help),
+    ]
 }
 
 /// Whether Help may open for the current app state.
@@ -537,20 +1013,19 @@ pub fn context_hint_spans(app: &App, max_chars: usize) -> Option<Vec<Span<'stati
             if gap > 0 {
                 spans.push(Span::raw("  "));
             }
-            spans.push(Span::styled(entry.key.to_string(), key_style()));
+            spans.push(Span::styled(entry.key.clone(), key_style()));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(entry.label.to_string(), label_style()));
             used += need;
             continue;
         }
-        // Partial last entry: keep key + truncated label when budget allows.
         let key_w = entry.key.chars().count();
         let remain = max_chars.saturating_sub(used + gap + key_w + 1);
         if remain >= 1 && used + gap + key_w + 1 < max_chars {
             if gap > 0 {
                 spans.push(Span::raw("  "));
             }
-            spans.push(Span::styled(entry.key.to_string(), key_style()));
+            spans.push(Span::styled(entry.key.clone(), key_style()));
             spans.push(Span::raw(" "));
             let trunc: String = entry.label.chars().take(remain).collect();
             spans.push(Span::styled(trunc, label_style()));
@@ -585,7 +1060,7 @@ pub fn help_body_lines(app: &App) -> Vec<Line<'static>> {
     ]));
 
     for entry in context_entries(app) {
-        lines.push(detail_line(entry));
+        lines.push(detail_line(&entry));
     }
 
     lines.push(Line::from(""));
@@ -596,21 +1071,15 @@ pub fn help_body_lines(app: &App) -> Vec<Line<'static>> {
             .add_modifier(Modifier::BOLD),
     )));
 
-    for section in catalog_sections() {
-        let is_active = section.id == active_id;
+    for (id, title, entries) in catalog_entries(app, live) {
+        let is_active = id == active_id;
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            section.title.to_string(),
+            title.to_string(),
             theme::help_section_style(is_active),
         )));
-        for entry in section.entries {
-            if live && entry.key.starts_with("t t") {
-                continue;
-            }
-            if !live && entry.key == "^L" {
-                continue;
-            }
-            lines.push(detail_line(entry));
+        for entry in entries {
+            lines.push(detail_line(&entry));
         }
     }
     lines
@@ -668,6 +1137,15 @@ mod tests {
     }
 
     #[test]
+    fn loglist_entries_include_wrap_toggle() {
+        let entries = context_entries(&app_with_focus(Focus::LogList));
+        assert!(
+            entries.iter().any(|e| e.key == "w" && e.label == "wrap"),
+            "LogList L1 must expose w wrap toggle"
+        );
+    }
+
+    #[test]
     fn context_loglist_live_appends_clear_hint() {
         let mut app = app_with_focus(Focus::LogList);
         assert_eq!(context_kind(&app), ContextKind::LogList);
@@ -675,7 +1153,7 @@ mod tests {
         assert_eq!(context_kind(&app), ContextKind::LogListLive);
         let entries = context_entries(&app);
         assert!(
-            entries.iter().any(|e| e.key == "^L"),
+            entries.iter().any(|e| e.key == "C-l"),
             "live LogList hint must expose Ctrl-L clear"
         );
         assert!(
@@ -832,12 +1310,24 @@ mod tests {
 
     #[test]
     fn catalog_jk_details_match_fast_scroll_step() {
+        let app = app_with_focus(Focus::LogList);
         let step = FAST_SCROLL_STEP.to_string();
-        let nav_jk = CAT_NAVIGATION
+        let catalog = catalog_entries(&app, false);
+        let nav = &catalog
             .iter()
-            .find(|e| e.key == "J/K")
-            .expect("nav J/K");
-        let help_jk = CAT_HELP.iter().find(|e| e.key == "J/K").expect("help J/K");
+            .find(|(id, _, _)| *id == SectionId::Navigation)
+            .expect("nav")
+            .2;
+        let help = &catalog
+            .iter()
+            .find(|(id, _, _)| *id == SectionId::Help)
+            .expect("help")
+            .2;
+        let nav_jk = nav
+            .iter()
+            .find(|e| e.key.contains('/') && e.label == "jump")
+            .expect("nav jump");
+        let help_jk = help.iter().find(|e| e.label == "jump").expect("help jump");
         assert!(
             nav_jk.detail.contains(&step),
             "nav detail {:?} must mention FAST_SCROLL_STEP={step}",
@@ -847,6 +1337,23 @@ mod tests {
             help_jk.detail.contains(&step),
             "help detail {:?} must mention FAST_SCROLL_STEP={step}",
             help_jk.detail
+        );
+    }
+
+    #[test]
+    fn rebound_key_shows_in_status_hints() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.keymap = crate::keymap::merge_user_toml(
+            r#"
+[log_list]
+move_down = "Down"
+"#,
+        )
+        .unwrap();
+        let entries = context_entries(&app);
+        assert!(
+            entries.iter().any(|e| e.key.contains("Down")),
+            "custom move_down must appear: {entries:?}"
         );
     }
 }

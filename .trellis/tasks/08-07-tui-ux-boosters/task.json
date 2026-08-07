@@ -1,0 +1,31 @@
+{
+  "id": "tui-ux-boosters",
+  "name": "tui-ux-boosters",
+  "title": "TUI 体验增强四件套",
+  "description": "崩溃详情浮层 / 统计面板 / 断线提示 / 单行折叠切换，四个独立可验收的 TUI 体验增强",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": "alnav",
+  "priority": "P2",
+  "creator": "lymanyang",
+  "assignee": "lymanyang",
+  "createdAt": "2026-08-07",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "08-07-tui-crash-detail-overlay",
+    "08-07-tui-summary-panel",
+    "08-07-tui-disconnect-indicator",
+    "08-07-tui-line-wrap-toggle"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

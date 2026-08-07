@@ -41,6 +41,7 @@ pub const GLYPH_ACTION_JUMP: &str = "\u{f061}"; //  nf-fa-arrow_right
 pub const GLYPH_ACTION_TOGGLE_ON: &str = "\u{f205}"; //  nf-fa-toggle_on
 pub const GLYPH_ACTION_TOGGLE_OFF: &str = "\u{f204}"; //  nf-fa-toggle_off
 pub const GLYPH_LOCK: &str = "\u{f023}"; //
+pub const GLYPH_DISCONNECT: &str = "\u{f127}"; // nf-fa-chain-broken
 pub const GLYPH_TIME: &str = "\u{f017}"; // nf-fa-clock_o
 pub const GLYPH_VIEW_FOCUS: &str = "\u{f06e}"; // nf-fa-eye
 pub const GLYPH_FOLLOWING: &str = "\u{f062}"; //
@@ -179,6 +180,18 @@ pub fn level_badge_style(level: Level) -> Style {
             .bg(Color::Red)
             .add_modifier(Modifier::BOLD),
     }
+}
+
+/// Foreground-only variant of [`level_badge_style`]'s color, for the summary
+/// panel's per-level bar chart (bar glyphs, not badge text-on-bg).
+pub fn level_bar_style(level: Level) -> Style {
+    let bg = level_badge_style(level).bg.unwrap_or(Color::White);
+    Style::default().fg(bg)
+}
+
+/// Bar-chart color for the summary panel's Top-tags section (single accent).
+pub fn accent_bar_style() -> Style {
+    Style::default().fg(accent())
 }
 
 /// One of the 8 reading-friendly highlight-palette colors, cycled by index.

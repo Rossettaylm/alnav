@@ -167,7 +167,10 @@ mod tests {
         let label = bookmark_label("04-02 10:00:00.000", 'I', "Tag", &msg);
         assert!(label.len() > 56, "must not eagerly truncate at 56");
         assert!(label.starts_with("04-02 10:00:00.000 I Tag "));
-        assert_eq!(label.chars().count(), "04-02 10:00:00.000 I Tag ".chars().count() + 80);
+        assert_eq!(
+            label.chars().count(),
+            "04-02 10:00:00.000 I Tag ".chars().count() + 80
+        );
     }
 
     #[test]

@@ -6,9 +6,10 @@
 
 ## Overview
 
-`help.rs` owns keybinding copy as structured `HintEntry` data. The status
-bar and Help panel both render from that source — do not maintain a second
-Chinese/`key:label` string table.
+`help.rs` owns keybinding **labels/details** as structured `HintEntry` data.
+**Key strings** come from `App.keymap` (`keymap.toml` / builtin registry).
+The status bar and Help panel both render from that source — do not maintain
+a second Chinese/`key:label` string table or hard-code key glyphs in `ui.rs`.
 
 ---
 
@@ -27,9 +28,10 @@ Update this spec when changing:
 
 | Item | Location | Contract |
 |------|----------|----------|
-| `HintEntry { key, label, detail }` | `help.rs` | Status uses `key`+`label`; Help Active/catalog uses `detail` |
+| `HintEntry { key, label, detail }` | `help.rs` | `key` from `KeymapStore::display`; Status uses `key`+`label`; Help uses `detail` |
 | `context_kind(app) -> ContextKind` | `help.rs` | modal/confirm > pending > focus |
-| `context_entries(app) -> &[HintEntry]` | `help.rs` | Current L1 or L2 set |
+| `context_entries(app) -> Vec<HintEntry>` | `help.rs` | Current L1 or L2 set (keys from keymap) |
+| `keymap.toml` / `KeymapStore` | `keymap.rs` | Startup deep-merge; `--init` serializes defaults |
 | `context_hint_spans(app, max)` | `help.rs` | Dim key + normal label; gap `"  "`; no `:`/`\|` |
 | `help_available(app) -> bool` | `help.rs` | Gate for opening Help |
 | `help_body_lines(app)` | `help.rs` | Active block + fixed catalog |

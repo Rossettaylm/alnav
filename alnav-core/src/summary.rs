@@ -6,35 +6,35 @@ use crate::dedupe::Normalizer;
 use crate::parser::{Level, LogEntry};
 
 #[derive(Serialize)]
-struct SummaryOutput {
-    total: usize,
-    matched: usize,
-    levels: HashMap<char, usize>,
-    top_tags: Vec<TagEntry>,
-    time_range: TimeRange,
-    top_errors: Vec<ErrorEntry>,
-    crashes: usize,
+pub struct SummaryOutput {
+    pub total: usize,
+    pub matched: usize,
+    pub levels: HashMap<char, usize>,
+    pub top_tags: Vec<TagEntry>,
+    pub time_range: TimeRange,
+    pub top_errors: Vec<ErrorEntry>,
+    pub crashes: usize,
 }
 
 #[derive(Serialize)]
-struct TagEntry {
-    tag: String,
-    count: usize,
-    levels: HashMap<char, usize>,
+pub struct TagEntry {
+    pub tag: String,
+    pub count: usize,
+    pub levels: HashMap<char, usize>,
 }
 
 #[derive(Serialize)]
-struct TimeRange {
-    first: String,
-    last: String,
+pub struct TimeRange {
+    pub first: String,
+    pub last: String,
 }
 
 #[derive(Serialize)]
-struct ErrorEntry {
-    pattern: String,
-    count: usize,
-    tag: String,
-    sample: String,
+pub struct ErrorEntry {
+    pub pattern: String,
+    pub count: usize,
+    pub tag: String,
+    pub sample: String,
 }
 
 pub struct Summary {
@@ -137,7 +137,7 @@ impl Summary {
         }
     }
 
-    pub fn to_json(self, matched: usize) -> String {
+    pub fn into_report(self, matched: usize) -> SummaryOutput {
         let mut top_tags: Vec<TagEntry> = self
             .tags
             .into_iter()
@@ -163,7 +163,7 @@ impl Summary {
         top_errors.sort_by(|a, b| b.count.cmp(&a.count));
         top_errors.truncate(10);
 
-        let output = SummaryOutput {
+        SummaryOutput {
             total: self.total,
             matched,
             levels: self.levels,
@@ -174,8 +174,11 @@ impl Summary {
             },
             top_errors,
             crashes: self.crashes,
-        };
+        }
+    }
 
+    pub fn to_json(self, matched: usize) -> String {
+        let output = self.into_report(matched);
         serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string())
     }
 }

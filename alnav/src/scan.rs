@@ -160,7 +160,7 @@ impl HighlightScanState {
     }
 }
 
-fn parse_line_at(mmap: &Mmap, lines: &[LineSpan], i: usize) -> Option<EntryRow> {
+pub(crate) fn parse_line_at(mmap: &Mmap, lines: &[LineSpan], i: usize) -> Option<EntryRow> {
     let span = *lines.get(i)?;
     let start = span.start as usize;
     let end = start.saturating_add(span.len as usize).min(mmap.len());

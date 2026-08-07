@@ -60,6 +60,8 @@ pub enum PickerKind {
     Highlight,
     Bookmark,
     Exclude,
+    /// Named filter presets (Manage-only: search / apply / rename / delete).
+    Preset,
     MsgChip {
         purpose: MsgChipPurpose,
     },
@@ -82,6 +84,8 @@ pub enum ConfirmKind {
     DeleteMany { items: Vec<UnifiedId> },
     /// Delete a single bookmark by index into `bookmarks.items` (F2/F4).
     DeleteBookmark { index: usize },
+    /// Delete a named preset file (`presets/<name>.toml`).
+    DeletePreset { name: String },
 }
 
 pub struct PickerSession {
@@ -167,10 +171,12 @@ impl PickerSession {
         crate::fuzzy::fuzzy_label_indices(labels, query)
     }
 
-    /// Ignore-case substring filter (not fuzzy). Returns source indices in order.
+    /// Ignore-case substring filter (not fuzzy). Returns source indices in order,
+    /// truncated to [`crate::fuzzy::CANDIDATE_RESULT_CAP`].
     pub fn contains_indices(labels: &[String], query: &str) -> Vec<usize> {
+        use crate::fuzzy::CANDIDATE_RESULT_CAP;
         if query.is_empty() {
-            return (0..labels.len()).collect();
+            return (0..labels.len().min(CANDIDATE_RESULT_CAP)).collect();
         }
         let q = query.to_ascii_lowercase();
         labels
@@ -178,6 +184,7 @@ impl PickerSession {
             .enumerate()
             .filter(|(_, label)| label.to_ascii_lowercase().contains(&q))
             .map(|(i, _)| i)
+            .take(CANDIDATE_RESULT_CAP)
             .collect()
     }
 

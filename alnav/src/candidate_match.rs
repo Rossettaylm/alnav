@@ -3,6 +3,9 @@
 //! Keystroke updates only bump generation + spawn a worker; the UI reads
 //! [`CandidateMatchService::display_labels`] (stale-while-revalidate). A newer
 //! request cancels the previous worker via [`AtomicBool`].
+//!
+//! Same-scope snapshots are reused as [`Arc`] so fast typing does not re-clone
+//! the full vocab on the UI thread each keystroke.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,6 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::fuzzy::CANDIDATE_RESULT_CAP;
 use crate::vocab::{self, CandidateScope, Vocab};
 
 const CANCEL_CHECK_EVERY: usize = 4096;
@@ -39,6 +43,9 @@ pub struct CandidateMatchService {
     desired_scope: Option<CandidateScope>,
     desired_query: String,
     cache: CandidateMatchCache,
+    /// Reused vocab snapshot for the current scope (invalidate on clear / scope change).
+    snap_scope: Option<CandidateScope>,
+    snap: Option<Arc<Vec<(String, u32)>>>,
 }
 
 impl Default for CandidateMatchService {
@@ -53,6 +60,8 @@ impl Default for CandidateMatchService {
             desired_scope: None,
             desired_query: String::new(),
             cache: CandidateMatchCache::default(),
+            snap_scope: None,
+            snap: None,
         }
     }
 }
@@ -84,7 +93,21 @@ impl CandidateMatchService {
         self.desired_scope = None;
         self.desired_query.clear();
         self.cache = CandidateMatchCache::default();
+        self.snap_scope = None;
+        self.snap = None;
         while self.rx.try_recv().is_ok() {}
+    }
+
+    fn snapshot_for(&mut self, vocab: &Vocab, scope: CandidateScope) -> Arc<Vec<(String, u32)>> {
+        if self.snap_scope == Some(scope) {
+            if let Some(s) = &self.snap {
+                return Arc::clone(s);
+            }
+        }
+        let entries = Arc::new(vocab.snapshot(scope));
+        self.snap_scope = Some(scope);
+        self.snap = Some(Arc::clone(&entries));
+        entries
     }
 
     /// Request a match for `scope`/`query`. No-ops if already desired+done/in-flight.
@@ -112,11 +135,15 @@ impl CandidateMatchService {
                 query: String::new(),
                 labels: Vec::new(),
             };
+            self.snap_scope = None;
+            self.snap = None;
         }
 
-        // Empty query: freq sort only — cheap; apply synchronously to avoid flicker.
+        // Empty query: freq sort only — cheap + ResultCap; apply synchronously.
         if query.is_empty() {
-            let labels = vocab.candidates(scope, "");
+            let mut labels = vocab.candidates(scope, "");
+            debug_assert!(labels.len() <= CANDIDATE_RESULT_CAP);
+            labels.truncate(CANDIDATE_RESULT_CAP);
             self.cache = CandidateMatchCache {
                 scope,
                 query: String::new(),
@@ -126,7 +153,7 @@ impl CandidateMatchService {
             return;
         }
 
-        let entries = vocab.snapshot(scope);
+        let entries = self.snapshot_for(vocab, scope);
         let cancel = Arc::clone(&self.cancel);
         let tx = self.tx.clone();
         let query = query.to_string();
@@ -150,6 +177,7 @@ impl CandidateMatchService {
             if result.gen != self.gen {
                 continue;
             }
+            debug_assert!(result.labels.len() <= CANDIDATE_RESULT_CAP);
             self.cache = CandidateMatchCache {
                 scope: result.scope,
                 query: result.query,
@@ -206,6 +234,7 @@ fn match_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fuzzy::CANDIDATE_RESULT_CAP;
 
     fn feed_vocab() -> Vocab {
         let mut v = Vocab::default();
@@ -280,5 +309,34 @@ mod tests {
         svc.clear();
         assert!(svc.cache().labels.is_empty());
         assert!(!svc.pending());
+    }
+
+    #[test]
+    fn result_cap_on_large_msg_vocab() {
+        let mut svc = CandidateMatchService::default();
+        let mut v = Vocab::default();
+        for i in 0..10_000u32 {
+            v.feed("", "", &[format!("token_{i:05}")]);
+        }
+        svc.request(&v, CandidateScope::Msg, "");
+        assert!(svc.display_labels().len() <= CANDIDATE_RESULT_CAP);
+        svc.request(&v, CandidateScope::Msg, "tok");
+        svc.flush(Duration::from_secs(10));
+        assert!(svc.display_labels().len() <= CANDIDATE_RESULT_CAP);
+        assert!(!svc.display_labels().is_empty());
+    }
+
+    #[test]
+    fn same_scope_reuses_snapshot_without_panic() {
+        let mut svc = CandidateMatchService::default();
+        let mut v = Vocab::default();
+        for i in 0..1000u32 {
+            v.feed("", "", &[format!("m{i}")]);
+        }
+        svc.request(&v, CandidateScope::Msg, "m1");
+        svc.request(&v, CandidateScope::Msg, "m12");
+        svc.request(&v, CandidateScope::Msg, "m123");
+        svc.flush(Duration::from_secs(5));
+        assert!(svc.cache_matches(CandidateScope::Msg, "m123"));
     }
 }

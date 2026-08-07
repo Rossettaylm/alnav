@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "extend filter pipeline with view_focus; update ts→tt contracts"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "L1/L2/status copy for f h/e, t t/u, NO MORE flashes"}
+{"file": ".trellis/spec/alnav/backend/async-scans.md", "reason": "HighlightScanState.find_next no-wrap contract for file n/N"}
+{"file": ".trellis/spec/alnav/backend/stream-visible-ingest.md", "reason": "filter_active + matched buffer when view_focus alone"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "theme-only colors; no ui.rs Color hardcode"}

@@ -9,8 +9,10 @@ mod help;
 mod highlight_model;
 mod ingest;
 mod input;
+mod keymap;
 mod model;
 mod picker;
+mod preset;
 mod preview;
 mod scan;
 mod store;
@@ -45,6 +47,16 @@ use fuzzy::SameFieldOp;
 /// fixed page size is the simplest correct approach.
 const PAGE_SIZE: isize = 10;
 const LEVEL_CANDIDATES: &[&str] = &["V", "D", "I", "W", "E", "F"];
+
+#[inline]
+fn km_code(app: &App, id: keymap::ActionId, code: KeyCode) -> bool {
+    app.keymap.matches_code(id, code)
+}
+
+#[inline]
+fn km_event(app: &App, id: keymap::ActionId, key: event::KeyEvent) -> bool {
+    app.keymap.matches_event(id, key)
+}
 
 fn level_field_candidates(query: &str) -> Vec<String> {
     crate::fuzzy::fuzzy_str_labels(LEVEL_CANDIDATES, query)
@@ -104,9 +116,17 @@ struct TuiCli {
     #[arg(long, value_name = "SERIAL")]
     device: Option<String>,
 
-    /// Config directory override (reads `theme.toml`/`config.toml`; default: `$ALNAV_HOME` or `~/.config/alnav`)
+    /// Config directory override (reads `theme.toml`/`config.toml`/`keymap.toml`; default: `$ALNAV_HOME` or `~/.config/alnav`)
     #[arg(long, value_name = "DIR")]
     config_path: Option<PathBuf>,
+
+    /// Write default `config.toml` and `keymap.toml` into the config directory, then exit.
+    #[arg(long)]
+    init: bool,
+
+    /// With `--init`, overwrite existing config/keymap files.
+    #[arg(long)]
+    force: bool,
 }
 
 fn validate_source(cli: &TuiCli) -> Result<(), String> {
@@ -394,6 +414,14 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         default_panic(info);
     }));
 
+    let config_dir = config::resolve_config_dir(cli.config_path.as_deref());
+    if cli.init {
+        for line in keymap::init_config_dir(&config_dir, cli.force)? {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+
     if let Err(error) = validate_source(&cli) {
         eprintln!("alnav: {error}");
         std::process::exit(2);
@@ -404,14 +432,16 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         std::process::exit(2);
     }
 
-    let config_dir = config::resolve_config_dir(cli.config_path.as_deref());
     let theme_status = config::load_theme(&config_dir);
     let (app_config, config_status) = config::load_config(&config_dir);
+    let (keymap_store, keymap_status) = keymap::load_keymap(&config_dir);
 
     let groups = initial_group(&cli)?;
     let time_bound = initial_time_bound(&cli);
     let mut app = App::new(cli.max_lines);
     app.config = app_config;
+    app.keymap = keymap_store;
+    app.config_dir = config_dir.clone();
     app.groups = groups;
     app.time_bound = time_bound;
     app.export_source = if cli.hdc {
@@ -429,6 +459,11 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         app.set_flash(hint);
     }
     if let Some(hint) = config_status.status_hint() {
+        app.set_flash(hint);
+    }
+    if let Some(hint) = keymap_status.status_hint() {
+        app.set_flash(hint);
+    } else if let Some(hint) = keymap::KeymapLoadStatus::warning_hint(&app.keymap.warnings) {
         app.set_flash(hint);
     }
 
@@ -543,6 +578,7 @@ fn run<B: ratatui::backend::Backend>(
         app.poll_file_store();
         app.ensure_vocab_candidates();
         app.poll_vocab_match();
+        app.poll_summary_job();
         app.tick_flash();
         // P1: recompute highlight match stats once per frame (O(n) scan).
         // All mutation paths set match_stats_stale=true; here is the single
@@ -584,11 +620,14 @@ fn run<B: ratatui::backend::Backend>(
                     let mut hw_cursor: Option<Position> = None;
                     let preview_limit =
                         ui::picker_preview_capacity(frame_area, ui::PICKER_PREVIEW_LEFT_RATIO);
-                    if let Some(data) = picker_render_data(app, preview_limit) {
+                    let preview_inner_w =
+                        ui::picker_preview_inner_width(frame_area, ui::PICKER_PREVIEW_LEFT_RATIO);
+                    if let Some(data) = picker_render_data(app, preview_limit, preview_inner_w) {
                         let picker_area = ui::picker_frame_rect(frame_area, data.show_preview);
-                        let right_pane = match &data.detail_row {
-                            Some(row) => ui::PickerRightPane::Detail(row.as_ref()),
-                            None => ui::PickerRightPane::Hits(&data.preview),
+                        let right_pane = match (&data.detail_row, &data.preset_preview) {
+                            (Some(row), _) => ui::PickerRightPane::Detail(row.as_ref()),
+                            (None, Some(lines)) => ui::PickerRightPane::ChipRules(lines),
+                            (None, None) => ui::PickerRightPane::Hits(&data.preview),
                         };
                         hw_cursor = ui::render_picker(
                             &data.title,
@@ -668,7 +707,7 @@ fn run<B: ratatui::backend::Backend>(
                         let prev = ui::preview_popup_rect(stack_bottom, frame_area);
                         if prev.height > 0 {
                             let limit = ui::preview_content_capacity(prev);
-                            let preview_lines = preview::preview_filter_lines(app, input, limit);
+                            let preview_lines = app.preview_filter_throttled(input, limit);
                             ui::render_preview("Preview", &preview_lines, "无匹配行", frame, prev);
                         }
                     } else if app.time_panel.is_some() {
@@ -686,6 +725,15 @@ fn run<B: ratatui::backend::Backend>(
                         let h = ui::detail_modal_height(frame_area, content_rows);
                         let area = ui::top_modal_rect(frame_area, modal_w, h);
                         ui::render_detail(app, frame, area);
+                    } else if app.summary_open() {
+                        let content_rows = ui::summary_content_row_count(app);
+                        let h = ui::summary_modal_height(frame_area, content_rows);
+                        let area = ui::top_modal_rect(frame_area, modal_w.max(56), h);
+                        ui::render_summary_panel(app, frame, area);
+                    }
+                    // Preset name dialog paints above picker (rename) or alone (save).
+                    if let Some(dialog) = app.preset_name.as_ref() {
+                        hw_cursor = ui::render_preset_name_dialog(dialog, frame, frame_area);
                     }
                     if let Some(pos) = hw_cursor {
                         frame.set_cursor_position(pos);
@@ -720,8 +768,12 @@ fn run<B: ratatui::backend::Backend>(
             _ => continue,
         };
 
-        // Picker / Search-box / time panel are checked before Ctrl+C / Normal/Insert
+        // Name dialog / Picker / Search-box / time panel before Ctrl+C / Normal/Insert
         // so Ctrl+C cancels the draft like Esc, instead of quitting in Normal.
+        if app.preset_name.is_some() {
+            handle_preset_name_key(app, key);
+            continue;
+        }
         if app.picker.is_some() {
             handle_picker_key(app, key);
             continue;
@@ -738,6 +790,10 @@ fn run<B: ratatui::backend::Backend>(
             handle_help_key(app, key);
             continue;
         }
+        if app.summary_open() {
+            handle_summary_key(app, key);
+            continue;
+        }
         // Ctrl+C: quit from Normal (like `q`), but only cancel in-progress
         // input from Insert (like Esc) — mirrors the shell/readline
         // "abort current line" convention instead of nuking the session.
@@ -746,29 +802,20 @@ fn run<B: ratatui::backend::Backend>(
             continue;
         }
 
-        // Ctrl-d/Ctrl-u page the log list when it has focus in Normal mode.
-        // Ctrl-L clears buffered live logs (see `try_handle_ctrl_l`).
-        // Intercepted here (like Ctrl+C above) rather than threading the full
-        // KeyEvent into `handle_normal_key`, which deliberately only takes a
-        // bare `KeyCode`.
-        if key.modifiers.contains(event::KeyModifiers::CONTROL)
-            && app.mode == Mode::Normal
-            && app.focus == app::Focus::LogList
-        {
-            match key.code {
-                KeyCode::Char('d') => {
-                    app.move_cursor_manual(PAGE_SIZE);
-                    continue;
-                }
-                KeyCode::Char('u') => {
-                    app.move_cursor_manual(-PAGE_SIZE);
-                    continue;
-                }
-                KeyCode::Char('l') => {
-                    try_handle_ctrl_l(app);
-                    continue;
-                }
-                _ => {}
+        // Page / clear-live chords (may include Ctrl) — resolved via keymap.
+        // Intercepted here rather than threading KeyEvent into `handle_normal_key`.
+        if app.mode == Mode::Normal && app.focus == app::Focus::LogList {
+            if km_event(app, keymap::ActionId::LogListPageDown, key) {
+                app.move_cursor_manual(PAGE_SIZE);
+                continue;
+            }
+            if km_event(app, keymap::ActionId::LogListPageUp, key) {
+                app.move_cursor_manual(-PAGE_SIZE);
+                continue;
+            }
+            if km_event(app, keymap::ActionId::LogListClearLive, key) {
+                try_handle_ctrl_l(app);
+                continue;
             }
         }
 
@@ -804,11 +851,17 @@ struct PickerRenderData {
     /// Bookmark panel: right pane shows Fields detail for this row (`None` = stale).
     /// When set, overrides [`Self::preview`] hits rendering.
     detail_row: Option<Option<crate::model::EntryRow>>,
+    /// Preset panel: chip-strip Preview lines (overrides hits when set).
+    preset_preview: Option<Vec<ratatui::text::Line<'static>>>,
     /// Search-line leading nerdfont; `None` derives from [`PickerMode`].
     prompt_icon: Option<&'static str>,
 }
 
-fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderData> {
+fn picker_render_data(
+    app: &App,
+    preview_limit: usize,
+    preview_inner_width: u16,
+) -> Option<PickerRenderData> {
     use crate::picker::{PickerKind, PickerMode, PickerSession, UnifiedKind};
 
     let session = app.picker.as_ref()?;
@@ -827,6 +880,7 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                 PickerKind::Highlight => "Highlight",
                 PickerKind::Bookmark => "Bookmark",
                 PickerKind::Exclude => "Exclude",
+                PickerKind::Preset => "Preset",
                 PickerKind::MsgChip { .. } => "Message",
                 PickerKind::ActionList { .. } => unreachable!(),
             };
@@ -879,6 +933,7 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
     let mut preview_lines = Vec::new();
     let mut detail_row: Option<Option<crate::model::EntryRow>> = None;
     let mut empty_msg = "无项目".to_string();
+    let mut preset_preview: Option<Vec<ratatui::text::Line<'static>>> = None;
 
     match session.mode {
         PickerMode::Manage => match &session.kind {
@@ -916,6 +971,25 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                     );
                 }
                 let _ = selected; // bookmark panel reuses session.selected as-is
+            }
+            PickerKind::Preset => {
+                let vis = preset_visible_indices(app);
+                labels = vis
+                    .iter()
+                    .map(|&i| app.preset_catalog[i].name.clone())
+                    .collect();
+                styles = vec![theme::muted(); labels.len()];
+                checked = vec![false; labels.len()];
+                actions = vec![crate::ui::ActionKind::Jump; labels.len()];
+                empty_msg = "无规则".to_string();
+                if show_preview {
+                    if let Some(&idx) = vis.get(session.selected) {
+                        preset_preview = Some(ui::preset_preview_lines(
+                            &app.preset_catalog[idx],
+                            preview_inner_width,
+                        ));
+                    }
+                }
             }
             _ => {
                 // Unified panel: Filter/Highlight/Exclude only (bookmark arm removed).
@@ -965,8 +1039,7 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                                     chips: app.groups.groups[item.id.source_index].chips.clone(),
                                     ..input::InputBox::default()
                                 };
-                                preview_lines =
-                                    preview::preview_filter_lines(app, &input, preview_limit);
+                                preview_lines = app.preview_filter_throttled(&input, preview_limit);
                             }
                             UnifiedKind::Exclude => {
                                 let input = input::InputBox {
@@ -976,8 +1049,7 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                                     exclude_mode: true,
                                     ..input::InputBox::default()
                                 };
-                                preview_lines =
-                                    preview::preview_filter_lines(app, &input, preview_limit);
+                                preview_lines = app.preview_filter_throttled(&input, preview_limit);
                             }
                         }
                     }
@@ -1044,12 +1116,12 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
                         }
                     }
                     if input.draft_field.is_some() && !input.draft.is_empty() {
-                        preview_lines = preview::preview_filter_lines(app, input, preview_limit);
+                        preview_lines = app.preview_filter_throttled(input, preview_limit);
                     }
                 }
                 empty_msg = "Enter 收 pill / 提交".to_string();
             }
-            PickerKind::Bookmark => {}
+            PickerKind::Bookmark | PickerKind::Preset => {}
             PickerKind::MsgChip { .. } => {
                 let visible =
                     PickerSession::filtered_indices(&session.choices, session.draft.as_str());
@@ -1070,6 +1142,7 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
 
     let prompt_icon = match &session.kind {
         PickerKind::Bookmark => Some(theme::GLYPH_BOOKMARK),
+        PickerKind::Preset => Some(theme::GLYPH_GROUP_ON),
         _ => None,
     };
 
@@ -1091,8 +1164,20 @@ fn picker_render_data(app: &App, preview_limit: usize) -> Option<PickerRenderDat
         preview: preview_lines,
         show_preview,
         detail_row,
+        preset_preview,
         prompt_icon,
     })
+}
+
+/// Visible indices into `app.preset_catalog` for Preset Manage (fuzzy by name).
+fn preset_visible_indices(app: &App) -> Vec<usize> {
+    use crate::picker::PickerSession;
+    let session = match app.picker.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let labels: Vec<String> = app.preset_catalog.iter().map(|p| p.name.clone()).collect();
+    PickerSession::filtered_indices(&labels, session.query.as_str())
 }
 /// Aggregate Filter → Highlight → Exclude for Manage (bookmark segment removed, F2).
 fn unified_picker_items(app: &App) -> Vec<crate::picker::UnifiedItem> {
@@ -1140,8 +1225,11 @@ fn unified_visible_ids(app: &App) -> Vec<crate::picker::UnifiedId> {
         Some(s) => s,
         None => return Vec::new(),
     };
-    // Bookmark panel keys off its own helpers; never enters the unified path.
-    if session.kind == crate::picker::PickerKind::Bookmark {
+    // Bookmark / Preset panels key off their own helpers; never enter unified path.
+    if matches!(
+        session.kind,
+        crate::picker::PickerKind::Bookmark | crate::picker::PickerKind::Preset
+    ) {
         return Vec::new();
     }
     let all = unified_picker_items(app);
@@ -1152,7 +1240,10 @@ fn unified_visible_ids(app: &App) -> Vec<crate::picker::UnifiedId> {
 
 fn unified_selected_id(app: &App) -> Option<crate::picker::UnifiedId> {
     let session = app.picker.as_ref()?;
-    if session.kind == crate::picker::PickerKind::Bookmark {
+    if matches!(
+        session.kind,
+        crate::picker::PickerKind::Bookmark | crate::picker::PickerKind::Preset
+    ) {
         return None;
     }
     let ids = unified_visible_ids(app);
@@ -1223,6 +1314,16 @@ fn confirm_picker_delete(app: &mut App) {
             app.delete_bookmark_at_index(index);
             let count = bookmark_visible_indices(app).len();
             if let Some(session) = app.picker.as_mut() {
+                session.cancel_confirm();
+                session.selected = session.selected.min(count.saturating_sub(1));
+            }
+        }
+        ConfirmKind::DeletePreset { name } => {
+            app.delete_preset_named(&name);
+            let count = preset_visible_indices(app).len();
+            if count == 0 {
+                app.close_picker();
+            } else if let Some(session) = app.picker.as_mut() {
                 session.cancel_confirm();
                 session.selected = session.selected.min(count.saturating_sub(1));
             }
@@ -1617,6 +1718,54 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                 }
                 return;
             }
+            PickerKind::Preset => {
+                let vis = preset_visible_indices(app);
+                let is_delete = matches!(key.code, KeyCode::Delete)
+                    || (matches!(key.code, KeyCode::Backspace) && ctrl);
+                match key.code {
+                    KeyCode::Up => {
+                        app.picker.as_mut().unwrap().selected =
+                            app.picker.as_ref().unwrap().selected.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        let session = app.picker.as_mut().unwrap();
+                        session.selected = (session.selected + 1).min(vis.len().saturating_sub(1));
+                    }
+                    KeyCode::Tab => {}
+                    KeyCode::Char('x') if ctrl => {
+                        if let Some(&idx) = vis.get(app.picker.as_ref().unwrap().selected) {
+                            let name = app.preset_catalog[idx].name.clone();
+                            app.preset_name = Some(crate::preset::PresetNameDialog::rename(&name));
+                        }
+                    }
+                    _ if is_delete => {
+                        if let Some(&idx) = vis.get(app.picker.as_ref().unwrap().selected) {
+                            let name = app.preset_catalog[idx].name.clone();
+                            app.picker.as_mut().unwrap().confirm =
+                                Some(crate::picker::ConfirmKind::DeletePreset { name });
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(&idx) = vis.get(app.picker.as_ref().unwrap().selected) {
+                            let preset = app.preset_catalog[idx].clone();
+                            match app.apply_preset(&preset) {
+                                Ok(()) => {
+                                    app.close_picker();
+                                    app.set_flash("PRESET APPLIED");
+                                }
+                                Err(e) => app.set_flash(&e),
+                            }
+                        }
+                    }
+                    code => {
+                        let session = app.picker.as_mut().unwrap();
+                        if apply_text_field_key(&mut session.query, code, ctrl) {
+                            session.selected = 0;
+                        }
+                    }
+                }
+                return;
+            }
             _ => {
                 // Unified panel (Filter/Highlight/Exclude).
                 let ids = unified_visible_ids(app);
@@ -1879,7 +2028,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             }
         },
         PickerKind::Unified | PickerKind::ActionList { .. } => {}
-        PickerKind::Bookmark => {}
+        PickerKind::Bookmark | PickerKind::Preset => {}
     }
 }
 
@@ -2026,6 +2175,7 @@ fn handle_highlight_box_key(app: &mut App, key: event::KeyEvent) {
 
 fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> bool {
     use app::StripKind;
+    use keymap::ActionId;
     if !matches!(
         (kind, app.focus),
         (StripKind::Filter, app::Focus::ChipStrip)
@@ -2035,24 +2185,20 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
         return false;
     }
     if app.pending_d {
-        match code {
-            KeyCode::Char('d') => {
-                app.delete_focused_strip_group(kind);
-                app.pending_d = false;
-                return true;
-            }
-            KeyCode::Char('i') => {
-                app.toggle_disable_focused(kind);
-                app.pending_d = false;
-                return true;
-            }
-            _ => {
-                app.pending_d = false;
-                return false;
-            }
+        if km_code(app, ActionId::StripDDelete, code) {
+            app.delete_focused_strip_group(kind);
+            app.pending_d = false;
+            return true;
         }
+        if km_code(app, ActionId::StripDDisable, code) {
+            app.toggle_disable_focused(kind);
+            app.pending_d = false;
+            return true;
+        }
+        app.pending_d = false;
+        return false;
     }
-    if code == KeyCode::Char('d') {
+    if km_code(app, ActionId::StripPendingD, code) {
         app.pending_leader = false;
         app.pending_d = true;
         return true;
@@ -2060,19 +2206,68 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
     false
 }
 
+fn handle_preset_name_key(app: &mut App, key: event::KeyEvent) {
+    let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
+    let is_ctrl_c = key.code == KeyCode::Char('c') && ctrl;
+    let confirming = app
+        .preset_name
+        .as_ref()
+        .is_some_and(|d| d.confirm_overwrite);
+
+    if confirming {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                let _ = app.submit_preset_name(true);
+            }
+            KeyCode::Esc | KeyCode::Char('n') => {
+                if let Some(d) = app.preset_name.as_mut() {
+                    d.confirm_overwrite = false;
+                }
+            }
+            KeyCode::Char('c') if ctrl => {
+                if let Some(d) = app.preset_name.as_mut() {
+                    d.confirm_overwrite = false;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if key.code == KeyCode::Esc || is_ctrl_c {
+        app.preset_name = None;
+        return;
+    }
+    if key.code == KeyCode::Enter {
+        let _ = app.submit_preset_name(false);
+        return;
+    }
+    if let Some(dialog) = app.preset_name.as_mut() {
+        let _ = apply_text_field_key(&mut dialog.field, key.code, ctrl);
+    }
+}
+
 fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
+    use keymap::ActionId;
     if app.pending_leader {
         app.pending_leader = false;
-        match code {
-            // Leader+Leader → unified Manage search panel
-            KeyCode::Char(' ') => app.open_unified_picker(),
-            KeyCode::Esc => {}
-            _ => app.set_flash("UNKNOWN LEADER"),
+        if km_code(app, ActionId::LeaderManage, code) {
+            app.open_unified_picker();
+        } else if km_code(app, ActionId::LeaderPresetSave, code) {
+            app.begin_preset_save();
+        } else if km_code(app, ActionId::LeaderPresetOpen, code) {
+            app.begin_preset_open();
+        } else if km_code(app, ActionId::LeaderSummary, code) {
+            app.open_summary_panel();
+        } else if km_code(app, ActionId::LeaderCancel, code) {
+            // cancel
+        } else {
+            app.set_flash("UNKNOWN LEADER");
         }
         return true;
     }
 
-    if code == KeyCode::Char(' ') {
+    if km_code(app, ActionId::LogListLeader, code) {
         app.clear_visual();
         app.pending_d = false;
         app.pending_yank = false;
@@ -2089,19 +2284,62 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
 
 /// Read-only Help panel keys. Esc / `?` / Ctrl+C close without resuming follow.
 fn handle_help_key(app: &mut App, key: event::KeyEvent) {
+    use keymap::ActionId;
     let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('?') => app.close_help(),
-        KeyCode::Char('c') if ctrl => app.close_help(),
-        KeyCode::Char('j') | KeyCode::Down => app.scroll_help(1),
-        KeyCode::Char('k') | KeyCode::Up => app.scroll_help(-1),
-        KeyCode::Char('J') => app.scroll_help(FAST_SCROLL_STEP),
-        KeyCode::Char('K') => app.scroll_help(-FAST_SCROLL_STEP),
-        KeyCode::Char('G') => {
-            let n = crate::help::help_body_lines(app).len();
-            app.help_scroll = n.saturating_sub(1);
+    if key.code == KeyCode::Char('c') && ctrl {
+        app.close_help();
+        return;
+    }
+    if km_event(app, ActionId::HelpClose, key) || km_event(app, ActionId::HelpToggle, key) {
+        app.close_help();
+    } else if km_event(app, ActionId::HelpScrollDown, key) || key.code == KeyCode::Down {
+        app.scroll_help(1);
+    } else if km_event(app, ActionId::HelpScrollUp, key) || key.code == KeyCode::Up {
+        app.scroll_help(-1);
+    } else if km_event(app, ActionId::HelpJumpDown, key) {
+        app.scroll_help(FAST_SCROLL_STEP);
+    } else if km_event(app, ActionId::HelpJumpUp, key) {
+        app.scroll_help(-FAST_SCROLL_STEP);
+    } else if km_event(app, ActionId::HelpBottom, key) {
+        let n = crate::help::help_body_lines(app).len();
+        app.help_scroll = n.saturating_sub(1);
+    } else if km_event(app, ActionId::HelpTop, key) {
+        app.help_scroll = 0;
+    }
+}
+
+/// Read-only summary panel keys (Leader `i`). `j`/`k`/`Down`/`Up` scroll the
+/// body; `Esc`/Ctrl+C close without resuming follow (same convention as
+/// Detail/Help). Re-pressing the `Leader i` chord while open also closes it
+/// (toggle semantics) — this is the only place `pending_leader` is armed
+/// while the panel owns key routing.
+fn handle_summary_key(app: &mut App, key: event::KeyEvent) {
+    use keymap::ActionId;
+    let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
+    if key.code == KeyCode::Char('c') && ctrl {
+        app.close_summary_panel();
+        return;
+    }
+    if app.pending_leader {
+        app.pending_leader = false;
+        if km_code(app, ActionId::LeaderSummary, key.code) {
+            app.close_summary_panel();
         }
-        KeyCode::Char('g') => app.help_scroll = 0,
+        return;
+    }
+    if key.code == KeyCode::Esc {
+        app.close_summary_panel();
+        return;
+    }
+    if km_code(app, ActionId::LogListLeader, key.code) {
+        app.pending_leader = true;
+        return;
+    }
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => app.scroll_summary(1),
+        KeyCode::Char('k') | KeyCode::Up => app.scroll_summary(-1),
+        KeyCode::Char('J') => app.scroll_summary(FAST_SCROLL_STEP),
+        KeyCode::Char('K') => app.scroll_summary(-FAST_SCROLL_STEP),
         _ => {}
     }
 }
@@ -2136,54 +2374,51 @@ fn handle_time_panel_key(app: &mut App, key: event::KeyEvent) {
 
 fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
     use app::{Focus, StripKind, YankField};
+    use keymap::ActionId;
 
     // Visual-line: handle selection motions / yank before anything else.
     if app.visual_anchor.is_some() && app.focus == Focus::LogList {
-        match code {
-            KeyCode::Char('j') => {
-                app.move_cursor_manual(1);
-                return;
-            }
-            KeyCode::Char('k') => {
-                app.move_cursor_manual(-1);
-                return;
-            }
-            KeyCode::Char('J') => {
-                app.move_cursor_manual(FAST_SCROLL_STEP);
-                return;
-            }
-            KeyCode::Char('K') => {
-                app.move_cursor_manual(-FAST_SCROLL_STEP);
-                return;
-            }
-            KeyCode::Char('y') => {
-                if let Some((lo, hi)) = app.selection_range() {
-                    if let Some(text) = app.yank_range(lo, hi, YankField::Raw) {
-                        apply_yank(app, text);
-                    }
-                }
-                app.clear_visual();
-                return;
-            }
-            KeyCode::Char('Y') => {
-                if let Some((lo, hi)) = app.selection_range() {
-                    if let Some(text) = app.yank_range(lo, hi, YankField::Msg) {
-                        apply_yank(app, text);
-                    }
-                }
-                app.clear_visual();
-                return;
-            }
-            KeyCode::Esc => {
-                app.clear_visual();
-                focus_loglist_and_follow(app);
-                return;
-            }
-            _ => {
-                app.clear_visual();
-                // fall through so the key still does its Normal action
-            }
+        if km_code(app, ActionId::VisualMoveDown, code) {
+            app.move_cursor_manual(1);
+            return;
         }
+        if km_code(app, ActionId::VisualMoveUp, code) {
+            app.move_cursor_manual(-1);
+            return;
+        }
+        if km_code(app, ActionId::VisualJumpDown, code) {
+            app.move_cursor_manual(FAST_SCROLL_STEP);
+            return;
+        }
+        if km_code(app, ActionId::VisualJumpUp, code) {
+            app.move_cursor_manual(-FAST_SCROLL_STEP);
+            return;
+        }
+        if km_code(app, ActionId::VisualYankRaw, code) {
+            if let Some((lo, hi)) = app.selection_range() {
+                if let Some(text) = app.yank_range(lo, hi, YankField::Raw) {
+                    apply_yank(app, text);
+                }
+            }
+            app.clear_visual();
+            return;
+        }
+        if km_code(app, ActionId::VisualYankMsg, code) {
+            if let Some((lo, hi)) = app.selection_range() {
+                if let Some(text) = app.yank_range(lo, hi, YankField::Msg) {
+                    apply_yank(app, text);
+                }
+            }
+            app.clear_visual();
+            return;
+        }
+        if km_code(app, ActionId::VisualCancel, code) {
+            app.clear_visual();
+            focus_loglist_and_follow(app);
+            return;
+        }
+        app.clear_visual();
+        // fall through so the key still does its Normal action
     }
 
     if handle_leader_key(app, code) {
@@ -2194,204 +2429,163 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
     if app.pending_yank {
         app.pending_yank = false;
         if app.focus == Focus::LogList {
-            match code {
-                KeyCode::Esc => {
-                    return;
-                }
-                KeyCode::Char(c) => {
-                    // H10: `yc` exports CLI command (before YankField — `c` is not a field).
-                    if c == 'c' {
-                        let cmd = app.export_cli_command();
-                        apply_yank(app, cmd);
-                        return;
-                    }
-                    // `ym`: msg token picker (same shell as `cm`), then yank selection.
-                    if c == 'm' {
-                        app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Yank);
-                        return;
-                    }
-                    if let Some(field) = YankField::from_char(c) {
-                        if let Some(text) = app.yank_field(field) {
-                            apply_yank(app, text);
-                        }
-                    }
-                    return;
-                }
-                _ => {
-                    return;
-                }
+            if km_code(app, ActionId::YankCancel, code) {
+                return;
             }
-        }
-    }
-
-    // Chip-from-cursor operator pending (`c` + field letter). Esc clears pending
-    // without resume_following (same as Search cancel / yank Esc).
-    if app.pending_chip {
-        app.pending_chip = false;
-        if app.focus == Focus::LogList {
-            match code {
-                KeyCode::Esc => {
-                    app.cancel_chip_from_cursor();
-                    return;
-                }
-                KeyCode::Char(c) => {
-                    use app::ChipFieldKey;
-                    use input::ChipField;
-                    match ChipFieldKey::from_char(c) {
-                        ChipFieldKey::Field(ChipField::Msg) => {
-                            app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Chip {
-                                exclude: false,
-                            });
-                        }
-                        ChipFieldKey::Field(field) => {
-                            let _ = app.push_chip_from_field(field);
-                        }
-                        ChipFieldKey::Unsupported => {
-                            app.set_flash("NO RAW/TIMESTAMP");
-                        }
-                        ChipFieldKey::Unknown => {
-                            app.set_flash("UNKNOWN FIELD");
-                        }
-                    }
-                    return;
-                }
-                _ => {
-                    app.set_flash("UNKNOWN FIELD");
-                    return;
-                }
+            if km_code(app, ActionId::YankCli, code) {
+                let cmd = app.export_cli_command();
+                apply_yank(app, cmd);
+                return;
             }
-        }
-    }
-
-    // Exclude-from-cursor operator pending (`C` + field). Esc clears pending only.
-    if app.pending_exclude {
-        app.pending_exclude = false;
-        if app.focus == Focus::LogList {
-            match code {
-                KeyCode::Esc => {
-                    app.cancel_chip_from_cursor();
-                    return;
-                }
-                KeyCode::Char(c) => {
-                    use app::ChipFieldKey;
-                    use input::ChipField;
-                    match ChipFieldKey::from_char(c) {
-                        ChipFieldKey::Field(ChipField::Msg) => {
-                            app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Chip {
-                                exclude: true,
-                            });
-                        }
-                        ChipFieldKey::Field(field) => {
-                            let _ = app.push_exclude_from_field(field);
-                        }
-                        ChipFieldKey::Unsupported => {
-                            app.set_flash("NO RAW/TIMESTAMP");
-                        }
-                        ChipFieldKey::Unknown => {
-                            app.set_flash("UNKNOWN FIELD");
-                        }
-                    }
-                    return;
-                }
-                _ => {
-                    app.set_flash("UNKNOWN FIELD");
-                    return;
-                }
+            if km_code(app, ActionId::YankMsg, code) {
+                app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Yank);
+                return;
             }
-        }
-    }
-
-    // Session lock / view-focus operator pending (`f` + p/t/u/h/e).
-    // Esc clears pending only; does not clear lock/focus or resume_following.
-    if app.pending_lock {
-        app.pending_lock = false;
-        if app.focus == Focus::LogList {
-            match code {
-                KeyCode::Esc => {
-                    app.cancel_lock_pending();
-                    return;
+            let field = if km_code(app, ActionId::YankTag, code) {
+                Some(YankField::Tag)
+            } else if km_code(app, ActionId::YankPkg, code) {
+                Some(YankField::Pkg)
+            } else if km_code(app, ActionId::YankPid, code) {
+                Some(YankField::Pid)
+            } else if km_code(app, ActionId::YankTid, code) {
+                Some(YankField::Tid)
+            } else if km_code(app, ActionId::YankLevel, code) {
+                Some(YankField::Level)
+            } else if km_code(app, ActionId::YankRaw, code)
+                || km_code(app, ActionId::YankLine, code)
+            {
+                // Historical: both `y` and `r` yank the raw line.
+                Some(YankField::Raw)
+            } else if km_code(app, ActionId::YankTime, code) {
+                Some(YankField::Timestamp)
+            } else {
+                None
+            };
+            if let Some(field) = field {
+                if let Some(text) = app.yank_field(field) {
+                    apply_yank(app, text);
                 }
-                KeyCode::Char('p') => {
-                    app.apply_session_lock(app::LockKind::Pid);
-                    return;
-                }
-                KeyCode::Char('t') => {
-                    app.apply_session_lock(app::LockKind::Tid);
-                    return;
-                }
-                KeyCode::Char('u') => {
-                    app.clear_session_lock();
-                    return;
-                }
-                KeyCode::Char('h') => {
-                    app.toggle_view_focus(app::ViewFocusKind::Highlight);
-                    return;
-                }
-                KeyCode::Char('e') => {
-                    app.toggle_view_focus(app::ViewFocusKind::Severe);
-                    return;
-                }
-                KeyCode::Char(_) => {
-                    app.set_flash("UNKNOWN");
-                    return;
-                }
-                _ => {
-                    app.set_flash("UNKNOWN");
-                    return;
-                }
-            }
-        }
-    }
-
-    // Global time-window operator pending (`t` + t/u). File mode only.
-    // Esc clears pending only; does not resume_following. `s` abandoned → UNKNOWN.
-    if app.pending_time {
-        app.pending_time = false;
-        if app.focus == Focus::LogList {
-            match code {
-                KeyCode::Esc => {
-                    app.cancel_time_pending();
-                    return;
-                }
-                KeyCode::Char('t') => {
-                    let _ = app.open_time_panel();
-                    return;
-                }
-                KeyCode::Char('u') => {
-                    app.clear_time_bound();
-                    return;
-                }
-                KeyCode::Char(_) => {
-                    app.set_flash("UNKNOWN");
-                    return;
-                }
-                _ => {
-                    app.set_flash("UNKNOWN");
-                    return;
-                }
-            }
-        }
-    }
-
-    // Bookmark operator pending (`m`/`M` + a/d/m). Esc clears pending only.
-    // `mm` → Manage; `MM` falls through to `_ => 未知` (out of scope, F-doc).
-    if app.pending_m {
-        app.pending_m = false;
-        if app.focus == Focus::LogList {
-            match code {
-                KeyCode::Esc => app.cancel_bookmark_op(),
-                KeyCode::Char('a') => app.bookmark_add_current(),
-                KeyCode::Char('d') => app.bookmark_remove_current(),
-                KeyCode::Char('m') => {
-                    app.open_picker(crate::picker::PickerKind::Bookmark);
-                }
-                _ => app.set_flash("UNKNOWN"),
             }
         }
         return;
     }
 
-    // Filter / Exclude / Search strip: `dd` delete, `di` toggle disable.
+    // Chip-from-cursor operator pending.
+    if app.pending_chip {
+        app.pending_chip = false;
+        if app.focus == Focus::LogList {
+            if km_code(app, ActionId::ChipFieldCancel, code) {
+                app.cancel_chip_from_cursor();
+                return;
+            }
+            if let Some(field) = chip_field_from_keymap(app, code) {
+                match field {
+                    input::ChipField::Msg => {
+                        app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Chip {
+                            exclude: false,
+                        });
+                    }
+                    other => {
+                        let _ = app.push_chip_from_field(other);
+                    }
+                }
+            } else if chip_field_unsupported_key(app, code) {
+                app.set_flash("NO RAW/TIMESTAMP");
+            } else {
+                app.set_flash("UNKNOWN FIELD");
+            }
+        }
+        return;
+    }
+
+    // Exclude-from-cursor operator pending.
+    if app.pending_exclude {
+        app.pending_exclude = false;
+        if app.focus == Focus::LogList {
+            if km_code(app, ActionId::ChipFieldCancel, code) {
+                app.cancel_chip_from_cursor();
+                return;
+            }
+            if let Some(field) = chip_field_from_keymap(app, code) {
+                match field {
+                    input::ChipField::Msg => {
+                        app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Chip {
+                            exclude: true,
+                        });
+                    }
+                    other => {
+                        let _ = app.push_exclude_from_field(other);
+                    }
+                }
+            } else if chip_field_unsupported_key(app, code) {
+                app.set_flash("NO RAW/TIMESTAMP");
+            } else {
+                app.set_flash("UNKNOWN FIELD");
+            }
+        }
+        return;
+    }
+
+    // Session lock / view-focus operator pending.
+    if app.pending_lock {
+        app.pending_lock = false;
+        if app.focus == Focus::LogList {
+            if km_code(app, ActionId::LockCancel, code) {
+                app.cancel_lock_pending();
+            } else if km_code(app, ActionId::LockPid, code) {
+                app.apply_session_lock(app::LockKind::Pid);
+            } else if km_code(app, ActionId::LockTid, code) {
+                app.apply_session_lock(app::LockKind::Tid);
+            } else if km_code(app, ActionId::LockClear, code) {
+                app.clear_session_lock();
+            } else if km_code(app, ActionId::LockViewHighlight, code) {
+                app.toggle_view_focus(app::ViewFocusKind::Highlight);
+            } else if km_code(app, ActionId::LockViewSevere, code) {
+                app.toggle_view_focus(app::ViewFocusKind::Severe);
+            } else {
+                app.set_flash("UNKNOWN");
+            }
+        }
+        return;
+    }
+
+    // Global time-window operator pending (file mode).
+    if app.pending_time {
+        app.pending_time = false;
+        if app.focus == Focus::LogList {
+            if km_code(app, ActionId::TimeCancel, code) {
+                app.cancel_time_pending();
+            } else if km_code(app, ActionId::TimeSet, code) {
+                let _ = app.open_time_panel();
+            } else if km_code(app, ActionId::TimeClear, code) {
+                app.clear_time_bound();
+            } else {
+                app.set_flash("UNKNOWN");
+            }
+        }
+        return;
+    }
+
+    // Bookmark operator pending.
+    if app.pending_m {
+        app.pending_m = false;
+        if app.focus == Focus::LogList {
+            if km_code(app, ActionId::BookmarkCancel, code) {
+                app.cancel_bookmark_op();
+            } else if km_code(app, ActionId::BookmarkAdd, code) {
+                app.bookmark_add_current();
+            } else if km_code(app, ActionId::BookmarkRemove, code) {
+                app.bookmark_remove_current();
+            } else if km_code(app, ActionId::BookmarkManage, code) {
+                app.open_picker(crate::picker::PickerKind::Bookmark);
+            } else {
+                app.set_flash("UNKNOWN");
+            }
+        }
+        return;
+    }
+
+    // Filter / Exclude / Highlight strip: dd delete, di toggle disable.
     if handle_strip_d_chord(app, StripKind::Filter, code) {
         return;
     }
@@ -2401,64 +2595,118 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
     if handle_strip_d_chord(app, StripKind::Highlight, code) {
         return;
     }
-    if code != KeyCode::Char('d') {
+    if !km_code(app, ActionId::StripPendingD, code) {
         app.pending_d = false;
     }
 
-    match (app.focus, code) {
-        (_, KeyCode::Char('q')) => app.should_quit = true,
-        (_, KeyCode::Tab) => app.cycle_visible_focus_forward(),
-        (_, KeyCode::BackTab) => app.cycle_visible_focus_backward(),
-        (_, KeyCode::Char('1')) => app.focus = Focus::ChipStrip,
-        (_, KeyCode::Char('2')) => app.focus = Focus::ExcludeStrip,
-        (_, KeyCode::Char('3')) => app.focus = Focus::HighlightStrip,
-        (_, KeyCode::Char('4')) => app.focus = Focus::LogList,
-        (_, KeyCode::Char('5')) => app.open_unified_picker(),
-        (_, KeyCode::Esc) => {
-            // H4: Esc closes detail only — does not resume_following.
-            if app.detail_open() {
-                app.close_detail();
-                app.focus = Focus::LogList;
-            } else if app.focus == Focus::LogList {
-                focus_loglist_and_follow(app);
-            } else {
-                focus_loglist(app);
-            }
+    if km_code(app, ActionId::GlobalQuit, code) {
+        app.should_quit = true;
+        return;
+    }
+    if km_code(app, ActionId::GlobalFocusNext, code) {
+        app.cycle_visible_focus_forward();
+        return;
+    }
+    if km_code(app, ActionId::GlobalFocusPrev, code) {
+        app.cycle_visible_focus_backward();
+        return;
+    }
+    if km_code(app, ActionId::GlobalFocusFilter, code) {
+        app.focus = Focus::ChipStrip;
+        return;
+    }
+    if km_code(app, ActionId::GlobalFocusExclude, code) {
+        app.focus = Focus::ExcludeStrip;
+        return;
+    }
+    if km_code(app, ActionId::GlobalFocusHighlight, code) {
+        app.focus = Focus::HighlightStrip;
+        return;
+    }
+    if km_code(app, ActionId::GlobalFocusLog, code) {
+        app.focus = Focus::LogList;
+        return;
+    }
+    if km_code(app, ActionId::GlobalFocusInput, code) {
+        app.open_unified_picker();
+        return;
+    }
+
+    // Esc / resume: detail close, follow, or return to log list.
+    let esc = km_code(app, ActionId::LogListResumeFollow, code)
+        || km_code(app, ActionId::StripResumeFollow, code)
+        || km_code(app, ActionId::DetailClose, code);
+    if esc {
+        if app.detail_open() {
+            app.close_detail();
+            app.focus = Focus::LogList;
+        } else if app.focus == Focus::LogList {
+            focus_loglist_and_follow(app);
+        } else {
+            focus_loglist(app);
         }
-        (Focus::LogList, KeyCode::Char('j')) => app.move_cursor_manual(1),
-        (Focus::LogList, KeyCode::Char('k')) => app.move_cursor_manual(-1),
-        (Focus::LogList, KeyCode::Char('J')) => app.move_cursor_manual(FAST_SCROLL_STEP),
-        (Focus::LogList, KeyCode::Char('K')) => app.move_cursor_manual(-FAST_SCROLL_STEP),
-        (Focus::LogList, KeyCode::Char('g')) => {
+        return;
+    }
+
+    if app.focus == Focus::LogList {
+        if km_code(app, ActionId::LogListMoveDown, code) {
+            app.move_cursor_manual(1);
+            return;
+        }
+        if km_code(app, ActionId::LogListMoveUp, code) {
+            app.move_cursor_manual(-1);
+            return;
+        }
+        if km_code(app, ActionId::LogListJumpDown, code) {
+            app.move_cursor_manual(FAST_SCROLL_STEP);
+            return;
+        }
+        if km_code(app, ActionId::LogListJumpUp, code) {
+            app.move_cursor_manual(-FAST_SCROLL_STEP);
+            return;
+        }
+        if km_code(app, ActionId::LogListJumpTop, code) {
             app.following = false;
             app.jump_top();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('G')) => {
-            app.following = false;
-            app.jump_bottom();
+        if km_code(app, ActionId::LogListJumpBottom, code) {
+            app.resume_following();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('p')) => {
+        if km_code(app, ActionId::LogListDetailFields, code) {
             app.toggle_detail_fields();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('P')) => {
+        if km_code(app, ActionId::LogListDetailPretty, code) {
             app.toggle_detail_pretty();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('c')) => {
+        if km_code(app, ActionId::LogListWrapToggle, code) {
+            app.toggle_collapsed_view();
+            return;
+        }
+        if km_code(app, ActionId::LogListChip, code) {
             app.begin_chip_from_cursor();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('C')) => {
+        if km_code(app, ActionId::LogListExcludeChip, code) {
             app.begin_exclude_from_cursor();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('f')) => {
+        if km_code(app, ActionId::LogListLock, code) {
             app.begin_lock_from_cursor();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('t')) if app.is_file_mode() => {
+        if km_code(app, ActionId::LogListTime, code) && app.is_file_mode() {
             app.begin_time_op();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('m') | KeyCode::Char('M')) => {
+        if km_code(app, ActionId::LogListBookmark, code) {
             app.begin_bookmark_op();
+            return;
         }
-        (Focus::LogList, KeyCode::Char('y')) => {
+        if km_code(app, ActionId::LogListYank, code) {
             app.pending_chip = false;
             app.pending_exclude = false;
             app.pending_lock = false;
@@ -2466,59 +2714,117 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             app.pending_m = false;
             app.pending_leader = false;
             app.pending_yank = true;
+            return;
         }
-        (Focus::LogList, KeyCode::Char('Y')) => {
+        if km_code(app, ActionId::LogListYankMsgLine, code) {
             if let Some(text) = app.yank_field(YankField::Msg) {
                 apply_yank(app, text);
             }
+            return;
         }
-        (Focus::LogList, KeyCode::Char('V')) => app.enter_visual_line(),
-        (Focus::LogList, KeyCode::Char('n')) => match app.find_match(1) {
-            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
-            _ => {}
-        },
-        (Focus::LogList, KeyCode::Char('N')) => match app.find_match(-1) {
-            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
-            _ => {}
-        },
-        (Focus::LogList, KeyCode::Char('e')) => match app.find_severe(1) {
-            app::FindJumpResult::None => app.set_flash("NO ERROR"),
-            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
-            app::FindJumpResult::Moved => {}
-        },
-        (Focus::LogList, KeyCode::Char('E')) => match app.find_severe(-1) {
-            app::FindJumpResult::None => app.set_flash("NO ERROR"),
-            app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
-            app::FindJumpResult::Moved => {}
-        },
-        (Focus::ChipStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Filter, -1),
-        (Focus::ChipStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Filter, 1),
-        (Focus::ExcludeStrip, KeyCode::Char('h')) => app.move_strip_cursor(StripKind::Exclude, -1),
-        (Focus::ExcludeStrip, KeyCode::Char('l')) => app.move_strip_cursor(StripKind::Exclude, 1),
-        (Focus::HighlightStrip, KeyCode::Char('h')) => {
-            app.move_strip_cursor(StripKind::Highlight, -1)
+        if km_code(app, ActionId::LogListVisualLine, code) {
+            app.enter_visual_line();
+            return;
         }
-        (Focus::HighlightStrip, KeyCode::Char('l')) => {
-            app.move_strip_cursor(StripKind::Highlight, 1)
+        if km_code(app, ActionId::LogListNextMatch, code) {
+            if matches!(app.find_match(1), app::FindJumpResult::NoMore) {
+                app.set_flash("NO MORE");
+            }
+            return;
         }
-        // Unified Manage: Space Space · New: `;` Filter · `/` Highlight · `` ` `` Exclude · `mm` Bookmark
-        (_, KeyCode::Char(';')) => {
-            app.open_picker_new(crate::picker::PickerKind::Filter);
+        if km_code(app, ActionId::LogListPrevMatch, code) {
+            if matches!(app.find_match(-1), app::FindJumpResult::NoMore) {
+                app.set_flash("NO MORE");
+            }
+            return;
         }
-        (_, KeyCode::Char('/')) => {
-            app.open_picker_new(crate::picker::PickerKind::Highlight);
+        if km_code(app, ActionId::LogListNextSevere, code) {
+            match app.find_severe(1) {
+                app::FindJumpResult::None => app.set_flash("NO ERROR"),
+                app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
+                app::FindJumpResult::Moved => {}
+            }
+            return;
         }
-        (_, KeyCode::Char('`')) => {
-            app.open_picker_new(crate::picker::PickerKind::Exclude);
+        if km_code(app, ActionId::LogListPrevSevere, code) {
+            match app.find_severe(-1) {
+                app::FindJumpResult::None => app.set_flash("NO ERROR"),
+                app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
+                app::FindJumpResult::Moved => {}
+            }
+            return;
         }
-        (
-            Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip,
-            KeyCode::Char('?'),
-        ) if crate::help::help_available(app) => {
+    }
+
+    if matches!(
+        app.focus,
+        Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
+    ) {
+        let kind = match app.focus {
+            Focus::ChipStrip => StripKind::Filter,
+            Focus::ExcludeStrip => StripKind::Exclude,
+            Focus::HighlightStrip => StripKind::Highlight,
+            _ => unreachable!(),
+        };
+        if km_code(app, ActionId::StripPrevGroup, code) {
+            app.move_strip_cursor(kind, -1);
+            return;
+        }
+        if km_code(app, ActionId::StripNextGroup, code) {
+            app.move_strip_cursor(kind, 1);
+            return;
+        }
+    }
+
+    if km_code(app, ActionId::GlobalFilterNew, code) {
+        app.open_picker_new(crate::picker::PickerKind::Filter);
+        return;
+    }
+    if km_code(app, ActionId::GlobalHighlightNew, code) {
+        app.open_picker_new(crate::picker::PickerKind::Highlight);
+        return;
+    }
+    if km_code(app, ActionId::GlobalExcludeNew, code) {
+        app.open_picker_new(crate::picker::PickerKind::Exclude);
+        return;
+    }
+    if km_code(app, ActionId::GlobalOpenHelp, code) || km_code(app, ActionId::StripOpenHelp, code) {
+        if matches!(
+            app.focus,
+            Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
+        ) && crate::help::help_available(app)
+        {
             app.open_help();
         }
-        _ => {}
     }
+}
+
+fn chip_field_from_keymap(app: &App, code: KeyCode) -> Option<input::ChipField> {
+    use input::ChipField;
+    use keymap::ActionId;
+    if km_code(app, ActionId::ChipFieldTag, code) {
+        Some(ChipField::Tag)
+    } else if km_code(app, ActionId::ChipFieldMsg, code) {
+        Some(ChipField::Msg)
+    } else if km_code(app, ActionId::ChipFieldPkg, code) {
+        Some(ChipField::Pkg)
+    } else if km_code(app, ActionId::ChipFieldPid, code) {
+        Some(ChipField::Pid)
+    } else if km_code(app, ActionId::ChipFieldTid, code) {
+        Some(ChipField::Tid)
+    } else if km_code(app, ActionId::ChipFieldLevel, code) {
+        Some(ChipField::Level)
+    } else {
+        None
+    }
+}
+
+/// Keys that are valid yank fields but not chip fields (`r`/`y`/`s` by default).
+fn chip_field_unsupported_key(app: &App, code: KeyCode) -> bool {
+    use keymap::ActionId;
+    km_code(app, ActionId::YankRaw, code)
+        || km_code(app, ActionId::YankLine, code)
+        || km_code(app, ActionId::YankTime, code)
 }
 
 fn handle_insert_key(
@@ -2740,6 +3046,77 @@ mod dispatch_tests {
         let picker = app.picker.as_ref().expect("unified picker");
         assert_eq!(picker.kind, PickerKind::Unified);
         assert_eq!(picker.mode, PickerMode::Manage);
+    }
+
+    #[test]
+    fn space_i_opens_summary_panel_and_esc_closes_without_follow() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        assert!(app.pending_leader);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+        assert!(!app.pending_leader);
+        assert!(app.summary_open());
+
+        handle_summary_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.summary_open());
+        assert!(!app.following, "Esc must not resume following");
+    }
+
+    #[test]
+    fn space_i_while_open_toggles_close() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+        assert!(app.summary_open());
+
+        handle_summary_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+        assert!(app.pending_leader);
+        handle_summary_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        );
+        assert!(!app.pending_leader);
+        assert!(!app.summary_open(), "Leader i while open re-toggles closed");
+    }
+
+    #[test]
+    fn summary_jk_scrolls_ready_body() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..3 {
+            tx.send(
+                crate::model::EntryRow::from_line(&format!(
+                    "04-02 10:00:00.000  1  1 I Tag{i}   : line{i}"
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+        app.flush_summary_job(std::time::Duration::from_secs(5));
+        assert!(matches!(app.summary_view, app::SummaryView::Ready(_)));
+
+        assert_eq!(app.summary_scroll, 0);
+        handle_summary_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.summary_scroll, 1);
+        handle_summary_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.summary_scroll, 0);
     }
 
     #[test]
@@ -3363,7 +3740,7 @@ mod dispatch_tests {
             app.picker.as_ref().map(|session| &session.mode),
             Some(PickerMode::New)
         ));
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert_eq!(data.draft_field, Some(input::ChipField::Tag));
         assert!(data.text.is_empty());
     }
@@ -4008,7 +4385,7 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn test_g_jump_bottom_does_not_resume_follow() {
+    fn test_g_jump_bottom_resumes_follow() {
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4022,10 +4399,48 @@ mod dispatch_tests {
         assert!(!app.following);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('G'));
         assert_eq!(app.cursor, 1);
-        assert!(
-            !app.following,
-            "G must not resume following; only Esc on LogList does"
-        );
+        assert!(app.following, "G jumps to bottom and resumes following");
+    }
+
+    #[test]
+    fn test_j_to_bottom_resumes_follow() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap())
+            .unwrap();
+        tx.send(model::EntryRow::from_line("04-02 10:00:01.000  1  1 I T   : b").unwrap())
+            .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.move_cursor_manual(-1);
+        assert!(!app.following);
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('j'));
+        assert_eq!(app.cursor, 1);
+        assert!(app.following, "j to bottom resumes following");
+    }
+
+    #[test]
+    fn test_shift_j_to_bottom_resumes_follow() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..10 {
+            tx.send(
+                model::EntryRow::from_line(&format!(
+                    "04-02 10:00:00.000  1  1 I Tag     : line{i}"
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 5;
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('J'));
+        assert_eq!(app.cursor, 9);
+        assert!(app.following, "J landing on bottom resumes following");
     }
 
     #[test]
@@ -4482,7 +4897,7 @@ mod dispatch_tests {
                 event::KeyEvent::new(KeyCode::Char(c), event::KeyModifiers::NONE),
             );
         }
-        assert!(picker_render_data(&app, 10).unwrap().labels.is_empty());
+        assert!(picker_render_data(&app, 10, 80).unwrap().labels.is_empty());
         handle_picker_key(
             &mut app,
             event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
@@ -4604,7 +5019,7 @@ mod dispatch_tests {
             event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
         );
         // Input starts empty (not prefilled with the msg token).
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert_eq!(data.title, "Create");
         assert!(data.text.is_empty(), "query must not carry msg token");
         assert_eq!(data.labels, vec!["Filter", "Highlight"]);
@@ -4613,7 +5028,7 @@ mod dispatch_tests {
             &mut app,
             event::KeyEvent::new(KeyCode::Char('h'), event::KeyModifiers::NONE),
         );
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert_eq!(data.text, "h");
         assert_eq!(data.labels, vec!["Highlight"]);
         handle_picker_key(
@@ -4984,6 +5399,35 @@ mod dispatch_tests {
         assert!(joined2.contains("TagB"), "detail follows cursor");
         handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
         assert_eq!(app.detail, DetailView::Closed);
+    }
+
+    #[test]
+    fn test_w_toggles_collapsed_view() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : hello"]);
+        assert!(
+            !app.collapsed_view,
+            "collapsed_view must default to false (multi-line)"
+        );
+        let cursor_before = app.cursor;
+        let following_before = app.following;
+        let list_offset_before = app.list_offset;
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('w'));
+        assert!(app.collapsed_view, "w must toggle into collapsed view");
+        assert_eq!(app.cursor, cursor_before, "w must not move cursor");
+        assert_eq!(
+            app.following, following_before,
+            "w must not change following"
+        );
+        assert_eq!(
+            app.list_offset, list_offset_before,
+            "w must not change list_offset"
+        );
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('w'));
+        assert!(!app.collapsed_view, "w must toggle back to multi-line");
     }
 
     #[test]
@@ -5402,7 +5846,7 @@ mod dispatch_tests {
         app.bookmark_add_current();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert!(
             data.actions
                 .iter()
@@ -5434,7 +5878,7 @@ mod dispatch_tests {
         app.bookmark_row_ids.insert(999_999);
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert!(data.show_preview);
         assert!(
             matches!(data.detail_row, Some(None)),
@@ -5530,7 +5974,7 @@ mod dispatch_tests {
         }
         app.flush_vocab_match();
 
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert!(
             data.labels.iter().any(|l| l == "TargetTag"),
             "Tag vocab should appear in labels after field pick, got: {:?}",
@@ -5546,7 +5990,7 @@ mod dispatch_tests {
             let input = app.picker.as_mut().unwrap().input.as_mut().unwrap();
             input.set_field(crate::input::ChipField::Level);
         }
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert!(data.labels.contains(&"W".to_string()));
         assert!(data.labels.contains(&"E".to_string()));
     }
@@ -5556,7 +6000,7 @@ mod dispatch_tests {
         use crate::picker::PickerKind;
         let mut app = App::new(100);
         app.open_picker(PickerKind::Unified);
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert!(
             !data.show_preview,
             "Unified picker must never render preview"
@@ -5569,7 +6013,7 @@ mod dispatch_tests {
         use crate::picker::PickerKind;
         let mut app = App::new(100);
         app.open_picker_new(PickerKind::Filter);
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         // draft_field == None, draft empty: field keyword candidates shown, preview empty
         assert!(data.draft_field.is_none());
         assert!(data.preview.is_empty());
@@ -5597,7 +6041,7 @@ mod dispatch_tests {
             input.set_field(ChipField::Tag);
         }
         // field set but draft still empty: no preview content yet
-        let data = picker_render_data(&app, 10).unwrap();
+        let data = picker_render_data(&app, 10, 80).unwrap();
         assert!(data.draft_field == Some(ChipField::Tag));
         assert!(
             data.preview.is_empty(),
@@ -5655,5 +6099,125 @@ mod dispatch_tests {
             draft, "TabTestTag",
             "Tab should fill vocab candidate into draft"
         );
+    }
+
+    #[test]
+    fn space_w_opens_save_dialog_and_space_o_applies_preset() {
+        use crate::input::{build_group_from_chips, Chip, ChipField};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let mut app = App::new(100);
+        app.config_dir = dir.path().to_path_buf();
+        let mut input = input::InputBox::default();
+        drain_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 E MyApp   : error one",
+                "04-02 10:00:01.000  1  1 I Other   : ok",
+            ],
+        );
+        app.groups.groups.push(
+            build_group_from_chips(
+                vec![Chip {
+                    field: ChipField::Tag,
+                    value: "MyApp".into(),
+                }],
+                true,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        app.rebuild_visible();
+        app.following = true;
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('w'));
+        assert!(app.preset_name.is_some());
+        {
+            let d = app.preset_name.as_mut().unwrap();
+            for c in "crash-login".chars() {
+                d.field.insert(c);
+            }
+        }
+        handle_preset_name_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.preset_name.is_none());
+        assert!(crate::preset::exists(dir.path(), "crash-login"));
+        assert_eq!(app.status_msg.as_deref(), Some("PRESET SAVED"));
+
+        app.groups.groups.clear();
+        app.rebuild_visible();
+        assert_eq!(app.groups.groups.len(), 0);
+
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
+        assert!(matches!(
+            app.picker.as_ref().map(|p| &p.kind),
+            Some(crate::picker::PickerKind::Preset)
+        ));
+        let data = picker_render_data(&app, 10, 80).unwrap();
+        assert!(data.show_preview);
+        assert!(data.preset_preview.is_some());
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.picker.is_none());
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.groups.groups[0].chips[0].value, "MyApp");
+        assert!(!app.following);
+        assert_eq!(app.status_msg.as_deref(), Some("PRESET APPLIED"));
+    }
+
+    #[test]
+    fn space_o_empty_library_flashes_without_opening() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let mut app = App::new(100);
+        app.config_dir = dir.path().to_path_buf();
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
+        assert!(app.picker.is_none());
+        assert_eq!(app.status_msg.as_deref(), Some("NO PRESETS"));
+    }
+
+    #[test]
+    fn apply_preset_keeps_time_lock_and_bookmarks() {
+        use crate::filter_model::{GroupList, TimeBound};
+        use crate::highlight_model::HighlightGroupList;
+        use crate::input::{build_group_from_chips, Chip, ChipField};
+
+        let mut app = App::new(100);
+        drain_lines(&mut app, &["04-02 10:00:00.000  9  8 E MyApp   : boom"]);
+        app.lock_pid = Some("9".into());
+        app.time_bound = Some(TimeBound {
+            since: Some("04-02 10:00:00.000".into()),
+            until: None,
+        });
+        app.bookmark_add_current();
+        let bm_len = app.bookmarks.len();
+
+        let preset = crate::preset::capture(
+            &GroupList {
+                groups: vec![build_group_from_chips(
+                    vec![Chip {
+                        field: ChipField::Tag,
+                        value: "MyApp".into(),
+                    }],
+                    true,
+                )
+                .unwrap()
+                .unwrap()],
+                excludes: vec![],
+            },
+            &HighlightGroupList::default(),
+            "keep-extra",
+        )
+        .unwrap()
+        .unwrap();
+        app.apply_preset(&preset).unwrap();
+        assert_eq!(app.lock_pid.as_deref(), Some("9"));
+        assert!(app.time_bound.is_some());
+        assert_eq!(app.bookmarks.len(), bm_len);
+        assert_eq!(app.groups.groups.len(), 1);
     }
 }

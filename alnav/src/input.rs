@@ -591,9 +591,7 @@ mod msg_tokenize_tests {
         let tokens = tokenize_msg_tokens("ab cd!ef_gh AB xy z more1 more2 more3 more4");
         assert_eq!(
             tokens,
-            vec![
-                "ab", "cd", "ef", "gh", "xy", "more1", "more2", "more3", "more4"
-            ]
+            vec!["ab", "cd", "ef", "gh", "xy", "more1", "more2", "more3", "more4"]
         );
         assert!(!tokens.iter().any(|t| t == "z"));
     }

@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -209,6 +210,73 @@ pub enum DetailView {
     Pretty,
 }
 
+/// H? Leader `i` summary panel: static snapshot over `visible`, computed on a
+/// background thread (File: mmap+`LineSpan`; Stream: `Vec<EntryRow>` clone).
+/// Never auto-refreshes; close + reopen to get a new snapshot.
+pub enum SummaryView {
+    Closed,
+    Loading,
+    Ready(alnav::summary::SummaryOutput),
+}
+
+/// Result of a background summary job, tagged with the request generation so
+/// stale results (panel closed/reopened) can be dropped on arrival.
+struct SummaryJobMsg {
+    gen: u64,
+    report: alnav::summary::SummaryOutput,
+}
+
+/// File-mode summary job target: the physical line indices to scan, captured
+/// once at open time (identity range or a filtered subset).
+enum SummaryTarget {
+    All(usize),
+    Subset(Vec<usize>),
+}
+
+fn spawn_file_summary_job(
+    mmap: Arc<memmap2::Mmap>,
+    lines: Arc<std::sync::RwLock<Vec<crate::store::LineSpan>>>,
+    target: SummaryTarget,
+    gen: u64,
+    tx: std::sync::mpsc::Sender<SummaryJobMsg>,
+) {
+    std::thread::spawn(move || {
+        let mut summary = alnav::summary::Summary::new();
+        let mut count = 0usize;
+        let indices: Box<dyn Iterator<Item = usize>> = match target {
+            SummaryTarget::All(len) => Box::new(0..len),
+            SummaryTarget::Subset(hits) => Box::new(hits.into_iter()),
+        };
+        for i in indices {
+            let row = {
+                let guard = lines.read().expect("lines");
+                crate::scan::parse_line_at(&mmap, &guard, i)
+            };
+            if let Some(row) = row {
+                summary.record(&row.as_log_entry());
+                count += 1;
+            }
+        }
+        let report = summary.into_report(count);
+        let _ = tx.send(SummaryJobMsg { gen, report });
+    });
+}
+
+fn spawn_stream_summary_job(
+    rows: Vec<EntryRow>,
+    gen: u64,
+    tx: std::sync::mpsc::Sender<SummaryJobMsg>,
+) {
+    std::thread::spawn(move || {
+        let mut summary = alnav::summary::Summary::new();
+        for row in &rows {
+            summary.record(&row.as_log_entry());
+        }
+        let report = summary.into_report(rows.len());
+        let _ = tx.send(SummaryJobMsg { gen, report });
+    });
+}
+
 pub struct App {
     /// Stream (live/tests) or mmap file (`-f`) row backend.
     pub store: RowStore,
@@ -269,6 +337,10 @@ pub struct App {
     pub visual_anchor: Option<usize>,
     pub following: bool,
     pub list_offset: usize,
+    /// Session-level LogList display density (`w`); `false` = multi-line
+    /// wrap (default), `true` = single-line collapsed with `…` truncation.
+    /// Never persisted to `config.toml`; resets to `false` on new sessions.
+    pub collapsed_view: bool,
     /// Transient flash toast (`YANKED`, `NO ERROR`, errors); auto-clears after 3s.
     pub status_msg: Option<String>,
     /// When `status_msg` flash should disappear (`None` = not a timed flash).
@@ -285,6 +357,14 @@ pub struct App {
     pub export_source: crate::export::ExportSource,
     /// App settings loaded from config.toml (picker layout, etc.).
     pub config: crate::config::AppConfig,
+    /// Effective TUI keymap (builtin defaults deep-merged with keymap.toml).
+    pub keymap: crate::keymap::KeymapStore,
+    /// Config directory (`--config-path` / `$ALNAV_HOME` / `~/.config/alnav`).
+    pub config_dir: PathBuf,
+    /// Cached preset catalog for `PickerKind::Preset` Manage.
+    pub preset_catalog: Vec<crate::preset::Preset>,
+    /// Save / rename name dialog (`Space w` / Ctrl-X).
+    pub preset_name: Option<crate::preset::PresetNameDialog>,
     /// Vocabulary accumulated from ingested rows (tag/pkg/msg tokens).
     pub vocab: Vocab,
     /// Async vocab fuzzy for Picker New candidates (gen-cancel).
@@ -307,10 +387,29 @@ pub struct App {
     /// Set to true the first time `drain` finds the ingest channel disconnected
     /// (file fully read or live session ended). Used by P4 draw throttle.
     pub ingest_done: bool,
+    /// Throttled Filter/Exclude draft Preview cache (key = chips fingerprint).
+    /// `RefCell` so picker render can refresh under `&App`.
+    preview_cache: std::cell::RefCell<PreviewThrottleCache>,
+    /// Leader `i` summary panel state (static `visible` snapshot).
+    pub summary_view: SummaryView,
+    /// Bumped on open/close; background job results with a stale gen are dropped.
+    summary_gen: u64,
+    /// Scroll offset (lines) inside the summary panel body.
+    pub summary_scroll: usize,
+    summary_tx: std::sync::mpsc::Sender<SummaryJobMsg>,
+    summary_rx: std::sync::mpsc::Receiver<SummaryJobMsg>,
+}
+
+#[derive(Debug, Default)]
+struct PreviewThrottleCache {
+    key: String,
+    lines: Vec<crate::preview::PreviewHit>,
+    at: Option<std::time::Instant>,
 }
 
 impl App {
     pub fn new(max_lines: usize) -> Self {
+        let (summary_tx, summary_rx) = std::sync::mpsc::channel();
         Self {
             store: RowStore::stream(max_lines, MATCHED_HARD_CAP),
             matched_cap: MATCHED_HARD_CAP,
@@ -348,6 +447,7 @@ impl App {
             visual_anchor: None,
             following: true,
             list_offset: 0,
+            collapsed_view: false,
             status_msg: None,
             status_flash_until: None,
             last_yanked: None,
@@ -356,6 +456,10 @@ impl App {
             help_scroll: 0,
             export_source: crate::export::ExportSource::default(),
             config: crate::config::AppConfig::default_config(),
+            keymap: crate::keymap::KeymapStore::builtin(),
+            config_dir: crate::config::resolve_config_dir(None),
+            preset_catalog: Vec::new(),
+            preset_name: None,
             vocab: Vocab::default(),
             vocab_match: crate::candidate_match::CandidateMatchService::default(),
             match_stats_stale: true,
@@ -365,7 +469,58 @@ impl App {
             highlight_domain: None,
             pending_jump_first: None,
             ingest_done: false,
+            preview_cache: std::cell::RefCell::new(PreviewThrottleCache::default()),
+            summary_view: SummaryView::Closed,
+            summary_gen: 0,
+            summary_scroll: 0,
+            summary_tx,
+            summary_rx,
         }
+    }
+
+    /// Filter/Exclude draft Preview with 50ms throttle (Candidate panel SLO).
+    /// Fast typing reuses the last computed hits until the throttle window elapses.
+    pub fn preview_filter_throttled(
+        &self,
+        input: &crate::input::InputBox,
+        limit: usize,
+    ) -> Vec<crate::preview::PreviewHit> {
+        use std::time::{Duration, Instant};
+
+        const PREVIEW_THROTTLE: Duration = Duration::from_millis(50);
+        let key = {
+            let chips = crate::preview::input_estimated_chips(input);
+            let mut s = String::new();
+            if input.exclude_mode {
+                s.push('!');
+            }
+            for c in &chips {
+                s.push_str(c.field.keyword());
+                s.push('=');
+                s.push_str(&c.value);
+                s.push('\n');
+            }
+            s.push_str(&limit.to_string());
+            s
+        };
+        let now = Instant::now();
+        {
+            let cache = self.preview_cache.borrow();
+            if cache.key == key {
+                return cache.lines.clone();
+            }
+            if let Some(t) = cache.at {
+                if now.duration_since(t) < PREVIEW_THROTTLE {
+                    return cache.lines.clone();
+                }
+            }
+        }
+        let lines = crate::preview::preview_filter_lines(self, input, limit);
+        let mut cache = self.preview_cache.borrow_mut();
+        cache.key = key;
+        cache.lines = lines.clone();
+        cache.at = Some(now);
+        lines
     }
 
     /// Install a mmap file backend (replaces the default stream store).
@@ -577,6 +732,91 @@ impl App {
         self.help_scroll = 0;
     }
 
+    /// Whether the summary panel is open (Loading or Ready).
+    pub fn summary_open(&self) -> bool {
+        !matches!(self.summary_view, SummaryView::Closed)
+    }
+
+    /// Leader `i`: snapshot the current `visible` into a background summary
+    /// job. Bumps `summary_gen` so a stale in-flight result (from a prior
+    /// open) is dropped when it arrives. Does not change `following`.
+    pub fn open_summary_panel(&mut self) {
+        self.summary_gen = self.summary_gen.wrapping_add(1);
+        let gen = self.summary_gen;
+        self.summary_view = SummaryView::Loading;
+        self.summary_scroll = 0;
+        match &self.store {
+            RowStore::File(f) => {
+                let (mmap, lines) = f.scan_snapshot();
+                let target = match &self.visible {
+                    Visible::All { len } => SummaryTarget::All(*len),
+                    Visible::Subset(v) => SummaryTarget::Subset(v.clone()),
+                };
+                spawn_file_summary_job(mmap, lines, target, gen, self.summary_tx.clone());
+            }
+            RowStore::Stream(s) => {
+                let rows: Vec<EntryRow> = s
+                    .view_source(self.filter_active())
+                    .iter()
+                    .cloned()
+                    .collect();
+                spawn_stream_summary_job(rows, gen, self.summary_tx.clone());
+            }
+        }
+    }
+
+    /// Close the summary panel (Esc / toggle re-press). Bumps `summary_gen`
+    /// so any in-flight background result is discarded on arrival. Does not
+    /// resume following (same convention as Detail/Help).
+    pub fn close_summary_panel(&mut self) {
+        self.summary_gen = self.summary_gen.wrapping_add(1);
+        self.summary_view = SummaryView::Closed;
+        self.summary_scroll = 0;
+    }
+
+    /// Drain finished summary jobs (call each frame). Results whose `gen`
+    /// no longer matches the current request are silently dropped.
+    pub fn poll_summary_job(&mut self) {
+        while let Ok(msg) = self.summary_rx.try_recv() {
+            if msg.gen != self.summary_gen {
+                continue;
+            }
+            self.summary_view = SummaryView::Ready(msg.report);
+        }
+    }
+
+    /// Block until the in-flight summary job completes (tests).
+    pub fn flush_summary_job(&mut self, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        while matches!(self.summary_view, SummaryView::Loading) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match self.summary_rx.recv_timeout(remaining) {
+                Ok(msg) => {
+                    if msg.gen == self.summary_gen {
+                        self.summary_view = SummaryView::Ready(msg.report);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Scroll the summary panel body; only active while `Ready`. Upper bound
+    /// is clamped at render time against the built content length.
+    pub fn scroll_summary(&mut self, delta: isize) {
+        if !matches!(self.summary_view, SummaryView::Ready(_)) {
+            return;
+        }
+        if delta < 0 {
+            self.summary_scroll = self.summary_scroll.saturating_sub((-delta) as usize);
+        } else {
+            self.summary_scroll = self.summary_scroll.saturating_add(delta as usize);
+        }
+    }
+
     pub fn scroll_help(&mut self, delta: isize) {
         if !self.help_open {
             return;
@@ -610,6 +850,12 @@ impl App {
     /// Close detail overlay without touching `following`.
     pub fn close_detail(&mut self) {
         self.detail = DetailView::Closed;
+    }
+
+    /// Toggle LogList display density (`w`): multi-line wrap ↔ single-line
+    /// collapsed. Session-only; does not touch `following`/`cursor`/`list_offset`.
+    pub fn toggle_collapsed_view(&mut self) {
+        self.collapsed_view = !self.collapsed_view;
     }
 
     /// Chip filter → session lock (H8) → global time → view focus. Used by drain/rebuild.
@@ -1166,15 +1412,28 @@ impl App {
         }
     }
 
-    /// Any manual cursor movement pauses following. Resume only via Esc on
-    /// LogList (also Visual Esc / successful filter-group submit).
+    /// Manual cursor movement pauses following, then auto-resumes if the
+    /// cursor lands on the last visible row (`j`/`J`/wheel/page/`G` path).
+    /// Esc on LogList (also Visual Esc / successful filter-group submit)
+    /// still calls [`Self::resume_following`] directly.
     pub fn move_cursor_manual(&mut self, delta: isize) {
         self.following = false;
         self.move_cursor(delta);
+        self.maybe_follow_at_bottom();
+    }
+
+    /// If the cursor is on the last visible row, pin and resume following.
+    pub fn maybe_follow_at_bottom(&mut self) {
+        if self.visible.is_empty() {
+            return;
+        }
+        if self.cursor == self.visible.len() - 1 {
+            self.resume_following();
+        }
     }
 
     /// Pin to bottom and resume live follow (Esc on LogList / Visual Esc /
-    /// filter-group submit).
+    /// filter-group submit / land on bottom via manual move or `G`).
     pub fn resume_following(&mut self) {
         self.following = true;
         self.jump_bottom();
@@ -2283,6 +2542,151 @@ impl App {
         self.rebuild_visible();
     }
 
+    /// Begin `Space w` save: open name dialog, or flash if nothing to capture.
+    pub fn begin_preset_save(&mut self) {
+        if !crate::preset::has_savable_rules(&self.groups, &self.highlight_groups) {
+            self.set_flash("NO RULES TO SAVE");
+            return;
+        }
+        self.close_picker();
+        self.preset_name = Some(crate::preset::PresetNameDialog::save());
+    }
+
+    /// Begin `Space o` open: load catalog; empty → flash; else Manage picker.
+    pub fn begin_preset_open(&mut self) {
+        let (list, skipped) = crate::preset::list(&self.config_dir);
+        if list.is_empty() {
+            if skipped > 0 {
+                self.set_flash(&format!("NO PRESETS ({skipped} INVALID)"));
+            } else {
+                self.set_flash("NO PRESETS");
+            }
+            return;
+        }
+        self.preset_catalog = list;
+        if skipped > 0 {
+            self.set_flash(&format!("SKIPPED {skipped} INVALID"));
+        }
+        self.open_picker(crate::picker::PickerKind::Preset);
+    }
+
+    /// Replace Filter/Exclude/Highlight from preset; keep time/lock/bookmarks/search.
+    /// `following=false`; retain current row when still visible.
+    pub fn apply_preset(&mut self, preset: &crate::preset::Preset) -> Result<(), String> {
+        let (filters, excludes, highlights) = crate::preset::apply_lists(preset)?;
+        let keep_id = self.current_row().map(|r| r.row_id);
+        self.following = false;
+        self.groups.groups = filters;
+        self.groups.excludes = excludes;
+        self.highlight_groups.groups = highlights;
+        self.group_cursor = 0;
+        self.exclude_cursor = 0;
+        self.highlight_cursor = 0;
+        self.active_highlight = self.highlight_groups.groups.iter().position(|g| g.enabled);
+        self.rebuild_visible();
+        if let Some(id) = keep_id {
+            if let Some(vis) = self.visible_idx_for_row_id(id) {
+                self.cursor = vis;
+            }
+        }
+        self.match_stats_stale = true;
+        if self.store.is_file() {
+            self.restart_highlight_scan();
+        }
+        Ok(())
+    }
+
+    pub fn refresh_preset_catalog(&mut self) {
+        let (list, _) = crate::preset::list(&self.config_dir);
+        self.preset_catalog = list;
+    }
+
+    /// Commit the open name dialog (save or rename). Returns true when dialog closed.
+    pub fn submit_preset_name(&mut self, force_overwrite: bool) -> bool {
+        let Some(dialog) = self.preset_name.as_ref() else {
+            return false;
+        };
+        let name = dialog.field.as_str().to_string();
+        if let Err(e) = crate::preset::validate_name(&name) {
+            self.set_flash(&e);
+            return false;
+        }
+        let purpose = dialog.purpose.clone();
+        let exists = crate::preset::exists(&self.config_dir, &name);
+        match &purpose {
+            crate::preset::PresetNamePurpose::Rename { from } if from == &name => {
+                self.preset_name = None;
+                return true;
+            }
+            _ => {}
+        }
+        if exists && !force_overwrite {
+            if let Some(d) = self.preset_name.as_mut() {
+                d.confirm_overwrite = true;
+            }
+            return false;
+        }
+        let is_save = matches!(purpose, crate::preset::PresetNamePurpose::Save);
+        let result = match &purpose {
+            crate::preset::PresetNamePurpose::Save => {
+                match crate::preset::capture(&self.groups, &self.highlight_groups, &name) {
+                    Ok(None) => {
+                        self.set_flash("NO RULES TO SAVE");
+                        Err(())
+                    }
+                    Ok(Some(preset)) => {
+                        crate::preset::save(&self.config_dir, &preset).map_err(|e| {
+                            self.set_flash(&e);
+                        })
+                    }
+                    Err(e) => {
+                        self.set_flash(&e);
+                        Err(())
+                    }
+                }
+            }
+            crate::preset::PresetNamePurpose::Rename { from } => {
+                crate::preset::rename(&self.config_dir, from, &name).map_err(|e| {
+                    self.set_flash(&e);
+                })
+            }
+        };
+        if result.is_ok() {
+            self.preset_name = None;
+            self.refresh_preset_catalog();
+            if is_save {
+                self.set_flash("PRESET SAVED");
+            } else {
+                self.set_flash("PRESET RENAMED");
+                if let Some(session) = self.picker.as_mut() {
+                    if matches!(session.kind, crate::picker::PickerKind::Preset) {
+                        session.selected = self
+                            .preset_catalog
+                            .iter()
+                            .position(|p| p.name == name)
+                            .unwrap_or(0);
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn delete_preset_named(&mut self, name: &str) -> bool {
+        match crate::preset::delete(&self.config_dir, name) {
+            Ok(()) => {
+                self.refresh_preset_catalog();
+                true
+            }
+            Err(e) => {
+                self.set_flash(&e);
+                false
+            }
+        }
+    }
+
     pub fn delete_filter_group_at(&mut self, index: usize) -> bool {
         if index >= self.groups.groups.len() {
             return false;
@@ -2951,6 +3355,10 @@ mod tests {
         assert!(!app.following, "negative delta should pause following");
         app.move_cursor_manual(10); // simulates Ctrl-d paging past the bottom
         assert_eq!(app.cursor, 1);
+        assert!(
+            app.following,
+            "landing on bottom via large positive delta resumes following"
+        );
     }
 
     #[test]
@@ -3090,6 +3498,94 @@ mod tests {
         assert_eq!(app.matched().len(), 1);
         assert_eq!(app.matched()[0].tag, "A");
         assert_eq!(app.visible, Visible::All { len: 1 });
+    }
+
+    #[test]
+    fn summary_panel_stream_ready_reflects_visible() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I TagA   : ok").unwrap())
+            .unwrap();
+        tx.send(EntryRow::from_line("04-02 10:00:01.000  1  1 E TagA   : boom").unwrap())
+            .unwrap();
+        tx.send(
+            EntryRow::from_line("04-02 10:00:02.000  1  1 E AndroidRuntime: FATAL EXCEPTION: main")
+                .unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.visible.len(), 3);
+
+        assert!(!app.summary_open());
+        app.open_summary_panel();
+        assert!(app.summary_open());
+        assert!(matches!(app.summary_view, SummaryView::Loading));
+        app.flush_summary_job(Duration::from_secs(5));
+        let SummaryView::Ready(report) = &app.summary_view else {
+            panic!("expected Ready after flush");
+        };
+        assert_eq!(report.total, 3);
+        assert_eq!(report.matched, 3);
+        assert_eq!(report.crashes, 1);
+        assert_eq!(*report.levels.get(&'E').unwrap_or(&0), 2);
+        assert_eq!(*report.levels.get(&'I').unwrap_or(&0), 1);
+        assert!(report
+            .top_tags
+            .iter()
+            .any(|t| t.tag == "TagA" && t.count == 2));
+
+        app.close_summary_panel();
+        assert!(!app.summary_open());
+    }
+
+    #[test]
+    fn summary_panel_rapid_reopen_drops_stale_gen_result() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+
+        app.open_summary_panel();
+        let stale_gen = app.summary_gen;
+        app.close_summary_panel();
+        app.open_summary_panel();
+        let fresh_gen = app.summary_gen;
+        assert_ne!(stale_gen, fresh_gen);
+
+        // Simulate a slow background result from the *first* (now-closed) request
+        // arriving after the second request was opened.
+        let stale_report = alnav::summary::SummaryOutput {
+            total: 999,
+            matched: 999,
+            levels: std::collections::HashMap::new(),
+            top_tags: Vec::new(),
+            time_range: alnav::summary::TimeRange {
+                first: String::new(),
+                last: String::new(),
+            },
+            top_errors: Vec::new(),
+            crashes: 0,
+        };
+        app.summary_tx
+            .send(SummaryJobMsg {
+                gen: stale_gen,
+                report: stale_report,
+            })
+            .unwrap();
+        app.poll_summary_job();
+        assert!(
+            matches!(app.summary_view, SummaryView::Loading),
+            "stale gen result must not overwrite Loading"
+        );
+
+        app.flush_summary_job(Duration::from_secs(5));
+        let SummaryView::Ready(report) = &app.summary_view else {
+            panic!("expected Ready from the fresh request");
+        };
+        assert_eq!(report.total, 1);
+        assert_ne!(report.total, 999);
     }
 }
 
@@ -3251,7 +3747,42 @@ mod follow_tests {
     }
 
     #[test]
-    fn test_manual_down_also_pauses_follow() {
+    fn test_manual_move_away_from_bottom_pauses_follow() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        tx.send(row("C")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert!(app.following);
+        app.move_cursor_manual(-1);
+        assert!(!app.following);
+        assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn test_manual_down_to_bottom_resumes_follow() {
+        let mut app = App::new(100);
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        tx.send(row("B")).unwrap();
+        tx.send(row("C")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.move_cursor_manual(-2);
+        assert!(!app.following);
+        assert_eq!(app.cursor, 0);
+        app.move_cursor_manual(1);
+        assert!(!app.following, "mid-list down must not resume");
+        assert_eq!(app.cursor, 1);
+        app.move_cursor_manual(1);
+        assert!(app.following, "landing on bottom resumes following");
+        assert_eq!(app.cursor, 2);
+    }
+
+    #[test]
+    fn test_manual_down_while_already_at_bottom_keeps_follow() {
         let mut app = App::new(100);
         let (tx, rx) = mpsc::channel();
         tx.send(row("A")).unwrap();
@@ -3259,11 +3790,10 @@ mod follow_tests {
         drop(tx);
         app.drain(&rx);
         assert!(app.following);
-        app.move_cursor_manual(0); // still counts as manual
-                                   // delta 0 doesn't move but we always clear following in move_cursor_manual
-        app.following = true;
-        app.move_cursor_manual(1);
-        assert!(!app.following);
+        assert_eq!(app.cursor, 1);
+        app.move_cursor_manual(1); // clamp at bottom
+        assert!(app.following);
+        assert_eq!(app.cursor, 1);
     }
 
     #[test]
@@ -4229,5 +4759,43 @@ mod file_store_tests {
             saw_loading || app.ingest_done,
             "expected loading or quick finish"
         );
+    }
+
+    #[test]
+    fn summary_panel_file_async_loading_then_ready() {
+        let mut body = String::new();
+        for i in 0..20_000 {
+            let level = if i % 500 == 0 { 'E' } else { 'I' };
+            body.push_str(&format!(
+                "04-02 10:00:00.000  1  1 {level} Tag{}   : line{i}\n",
+                i % 5
+            ));
+        }
+        let f = write_temp(&body);
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        // Async open: index still growing when the panel opens (async path).
+        app.set_file_store(FileStore::open(f.path()).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("index timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        app.open_summary_panel();
+        assert!(matches!(app.summary_view, SummaryView::Loading));
+        app.flush_summary_job(Duration::from_secs(10));
+        let SummaryView::Ready(report) = &app.summary_view else {
+            panic!("expected Ready after flush");
+        };
+        assert_eq!(report.total, 20_000);
+        assert_eq!(report.matched, 20_000);
+        assert_eq!(report.crashes, 0);
+        assert_eq!(report.top_tags.len(), 5);
+        assert!(report.levels.get(&'I').copied().unwrap_or(0) > 0);
+        assert!(report.levels.get(&'E').copied().unwrap_or(0) > 0);
     }
 }

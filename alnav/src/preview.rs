@@ -217,10 +217,7 @@ pub fn preview_filter_lines(app: &App, input: &InputBox, limit: usize) -> Vec<Pr
         .into_iter()
         .filter_map(|i| {
             let row = preview_row_at(app, i)?;
-            Some(PreviewHit {
-                row,
-                pattern: None,
-            })
+            Some(PreviewHit { row, pattern: None })
         })
         .collect()
 }

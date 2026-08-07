@@ -42,9 +42,7 @@ fn is_binary_heavy(s: &str) -> bool {
     }
     let bad_ratio = bad as f64 / n as f64;
     let printable_ratio = printable_ascii as f64 / n as f64;
-    (n <= 24 && bad >= 2)
-        || (bad >= 3 && printable_ratio < 0.55)
-        || bad_ratio >= 0.40
+    (n <= 24 && bad >= 2) || (bad >= 3 && printable_ratio < 0.55) || bad_ratio >= 0.40
 }
 
 /// Strip terminal-hostile controls and UTF-8 replacement glyphs from display text.
