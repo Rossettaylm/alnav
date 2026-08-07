@@ -21,6 +21,7 @@ alnav/src/
 ├── store.rs        # RowStore/FileStore/StreamStore/RowRef (mmap file + stream)
 ├── scan.rs         # File Vis+Inc highlight worker + severe prefetch (async-scans)
 ├── model.rs        # EntryRow: owned line model, from_line()/from_line_or_raw()/as_log_entry()
+├── keymap.rs       # ActionId registry (KeymapStore); keymap.toml load/merge; Help/status share this as key-string source of truth
 ├── filter_model.rs # Group/GroupList + TimeBound (global window matching)
 ├── fuzzy.rs        # TUI nucleo-matcher facade (Search/Filter/Picker; see fuzzy-matching.md)
 ├── candidate_match.rs # Async vocab fuzzy for Picker New (gen+cancel)

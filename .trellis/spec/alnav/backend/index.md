@@ -22,6 +22,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 | [FileStore mmap](./file-store.md) | `-f` mmap + lazy parse + bg filter | Active |
 | [Async Vis Scans](./async-scans.md) | Highlight Inc / severe prefetch / LogList loading | Active |
 | [Status Bar + Help](./status-help.md) | English status bar, `?` Help, `FAST_SCROLL_STEP` | Active |
+| [TUI UX Boosters](./tui-ux-boosters.md) | Crash detail (`P`), Summary panel (`Leader i`), disconnect icon, wrap toggle (`w`) | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Forbidden patterns, testing requirements | Active |
 | [Database Guidelines](./database-guidelines.md) | N/A for this crate | Stub |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Stub |
@@ -38,6 +39,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Read [async-scans.md](./async-scans.md) before changing File highlight/`nN`/severe/minimap cache paths or LogList loading.
 - [ ] Read [quality-guidelines.md](./quality-guidelines.md) Forbidden Patterns (theme colors, Group.time, modal Ctrl+C) and "Popup chrome vs strip chrome".
 - [ ] Read [status-help.md](./status-help.md) before changing status-bar hints, flash language, or Help (`?`) keys/scroll.
+- [ ] Read [tui-ux-boosters.md](./tui-ux-boosters.md) before changing `DetailView::Pretty`'s crash branch, `SummaryView`/`summary_gen`, the disconnect icon, or `App.collapsed_view`.
 - [ ] Touching picker Manage: read Directory Structure "Picker session dispatch".
 
 ## Quality Check
