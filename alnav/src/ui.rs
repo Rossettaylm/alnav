@@ -5,6 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use alnav::crash::{CrashDetector, CrashInfo, CrashType};
@@ -3182,81 +3183,364 @@ pub fn help_modal_height(frame: Rect, content_rows: usize) -> u16 {
     want.min(max).max(8)
 }
 
-/// Full-frame startup Dashboard (unbound source).
+const DASHBOARD_MAX_WIDTH: u16 = 72;
+
+/// Full-frame startup Dashboard (unbound source), composed like a borderless
+/// dashboard-nvim Hyper page rather than a popup.
 pub fn render_dashboard(app: &App, frame: &mut Frame, area: Rect) {
     let Some(dash) = app.dashboard.as_ref() else {
         return;
     };
-    let title = format!("{} alnav", theme::GLYPH_TITLE_DASHBOARD);
-    let inner = render_modal_shell(&title, frame, area);
-    if inner.width == 0 || inner.height == 0 {
+    if area.width == 0 || area.height == 0 {
         return;
     }
+
+    frame.render_widget(Clear, area);
+    let available_width = area.width.saturating_sub(4).max(1);
+    let content_width = available_width.min(DASHBOARD_MAX_WIDTH).min(area.width);
+    let density = crate::dashboard::DashboardDensity::for_size(content_width, area.height);
+    let selected_recent =
+        dash.cursor >= crate::dashboard::QUICK_ACTION_COUNT && dash.cursor < dash.len();
+    let show_minimal_header = density == crate::dashboard::DashboardDensity::Minimal
+        && area.height >= 5
+        && (!selected_recent || area.height >= 6);
+    let fixed_rows = density.fixed_rows(show_minimal_header).min(area.height);
+    let recent_capacity = usize::from(area.height.saturating_sub(fixed_rows))
+        .min(crate::dashboard::MAX_VISIBLE_RECENTS);
+    let frame_height = fixed_rows
+        .saturating_add(recent_capacity as u16)
+        .min(area.height);
+    let x = area.x + area.width.saturating_sub(content_width) / 2;
+    let y = if density == crate::dashboard::DashboardDensity::Full {
+        area.y + area.height.saturating_sub(frame_height) / 2
+    } else {
+        area.y + u16::from(area.height > frame_height)
+    };
+    let content = Rect::new(x, y, content_width, frame_height);
+
     let items = dash.items();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "Select a source  ·  h/a/o/1-9 activate  ·  j/k move  ·  q quit",
-        theme::muted(),
-    )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("{} Stream", theme::GLYPH_SOURCE_HDC),
-        theme::muted(),
-    )));
-    for (i, item) in items.iter().enumerate() {
-        if i == 2 {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(frame_height as usize);
+
+    match density {
+        crate::dashboard::DashboardDensity::Full => {
+            lines.extend(theme::DASHBOARD_LOGO.into_iter().map(|row| {
+                Line::from(Span::styled(row, theme::dashboard_header_style()))
+                    .alignment(Alignment::Center)
+            }));
+            lines.push(
+                Line::from(Span::styled(
+                    "App / Android Log Navigator",
+                    theme::dashboard_muted_style(),
+                ))
+                .alignment(Alignment::Center),
+            );
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!("{} Files", theme::GLYPH_SOURCE_RECENT),
-                theme::muted(),
-            )));
         }
-        let selected = i == dash.cursor;
-        let marker = if selected {
-            theme::candidate_prefix()
-        } else {
-            " ".repeat(theme::candidate_prefix().chars().count().max(1))
-        };
-        let hot = match item {
-            crate::dashboard::DashboardItem::Hdc => "h",
-            crate::dashboard::DashboardItem::Adb => "a",
-            crate::dashboard::DashboardItem::OpenFile => "o",
-            crate::dashboard::DashboardItem::Recent { index, .. } if *index < 9 => {
-                recent_hot(*index)
-            }
-            crate::dashboard::DashboardItem::Recent { .. } => " ",
-        };
-        let style = if selected {
-            theme::candidate_selected_style()
-        } else {
-            theme::candidate_unselected_style()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(marker, style),
-            Span::styled(format!("[{hot}] "), theme::muted()),
-            Span::styled(format!("{} ", item.glyph()), style),
-            Span::styled(item.label(), style),
-        ]));
+        crate::dashboard::DashboardDensity::Compact => {
+            lines.push(
+                Line::from(Span::styled("alnav", theme::dashboard_header_style()))
+                    .alignment(Alignment::Center),
+            );
+        }
+        crate::dashboard::DashboardDensity::Minimal if show_minimal_header => {
+            lines.push(
+                Line::from(Span::styled("alnav", theme::dashboard_header_style()))
+                    .alignment(Alignment::Center),
+            );
+        }
+        crate::dashboard::DashboardDensity::Minimal => {}
     }
-    frame.render_widget(
-        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
-        inner,
+
+    if density != crate::dashboard::DashboardDensity::Minimal {
+        lines.push(dashboard_section_line(
+            theme::GLYPH_TITLE_DASHBOARD,
+            "Quick Actions",
+        ));
+    }
+    for (idx, item) in items
+        .iter()
+        .take(crate::dashboard::QUICK_ACTION_COUNT)
+        .enumerate()
+    {
+        lines.push(dashboard_item_line(
+            item,
+            idx == dash.cursor,
+            content_width,
+            density.show_descriptions(),
+        ));
+    }
+
+    if density == crate::dashboard::DashboardDensity::Full {
+        lines.push(Line::from(""));
+    }
+
+    let range = dash.visible_recent_range(recent_capacity);
+    if density != crate::dashboard::DashboardDensity::Minimal {
+        let recent_title = if dash.recent.paths.len() > recent_capacity && !range.is_empty() {
+            format!(
+                "Recent Files  {}-{} / {}",
+                range.start + 1,
+                range.end,
+                dash.recent.paths.len()
+            )
+        } else {
+            "Recent Files".to_string()
+        };
+        lines.push(dashboard_section_line(
+            theme::GLYPH_SOURCE_RECENT,
+            &recent_title,
+        ));
+    }
+
+    if dash.recent.paths.is_empty() {
+        if recent_capacity > 0 {
+            lines.push(Line::from(Span::styled(
+                "No recent files yet",
+                theme::dashboard_muted_style(),
+            )));
+            lines.extend(
+                std::iter::repeat_with(|| Line::from("")).take(recent_capacity.saturating_sub(1)),
+            );
+        }
+    } else {
+        for recent_idx in range.clone() {
+            let item_idx = crate::dashboard::QUICK_ACTION_COUNT + recent_idx;
+            if let Some(item) = items.get(item_idx) {
+                lines.push(dashboard_item_line(
+                    item,
+                    item_idx == dash.cursor,
+                    content_width,
+                    false,
+                ));
+            }
+        }
+        lines.extend(
+            std::iter::repeat_with(|| Line::from(""))
+                .take(recent_capacity.saturating_sub(range.len())),
+        );
+    }
+
+    lines.push(
+        Line::from(
+            app.status_msg
+                .as_deref()
+                .map(|msg| Span::styled(msg.to_string(), theme::dashboard_flash_style()))
+                .unwrap_or_else(|| Span::raw("")),
+        )
+        .alignment(Alignment::Center),
     );
+    if density != crate::dashboard::DashboardDensity::Minimal {
+        lines.push(
+            Line::from(Span::styled(
+                format!(
+                    "j/k move  ·  Enter open  ·  q quit  ·  alnav v{}",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                theme::dashboard_muted_style(),
+            ))
+            .alignment(Alignment::Center),
+        );
+    }
+
+    lines.truncate(content.height as usize);
+    frame.render_widget(Paragraph::new(lines), content);
 }
 
-fn recent_hot(index: usize) -> &'static str {
-    match index {
-        0 => "1",
-        1 => "2",
-        2 => "3",
-        3 => "4",
-        4 => "5",
-        5 => "6",
-        6 => "7",
-        7 => "8",
-        8 => "9",
-        _ => " ",
+fn dashboard_section_line(glyph: &'static str, title: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("{glyph}  {title}"),
+        theme::dashboard_section_style(),
+    ))
+}
+
+fn dashboard_item_line(
+    item: &crate::dashboard::DashboardItem,
+    selected: bool,
+    width: u16,
+    show_description: bool,
+) -> Line<'static> {
+    let row_style = theme::dashboard_item_style(selected);
+    let marker = if selected {
+        theme::candidate_prefix()
+    } else {
+        " ".repeat(UnicodeWidthStr::width(theme::candidate_prefix().as_str()).max(1))
+    };
+    let prefix = format!("{marker}{}  ", item.glyph());
+    let hotkey = item
+        .hotkey()
+        .map(|key| format!("[{key}]"))
+        .unwrap_or_default();
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let hotkey_width = UnicodeWidthStr::width(hotkey.as_str());
+    let hotkey_gap = usize::from(!hotkey.is_empty());
+    let label_budget = usize::from(width)
+        .saturating_sub(prefix_width)
+        .saturating_sub(hotkey_width)
+        .saturating_sub(hotkey_gap);
+
+    let mut spans = vec![Span::styled(prefix, row_style)];
+    let label_width = match item {
+        crate::dashboard::DashboardItem::Recent { path, .. } => {
+            let (basename, parent) = dashboard_recent_parts(path, label_budget);
+            let basename_width = UnicodeWidthStr::width(basename.as_str());
+            spans.push(Span::styled(basename, row_style));
+            if parent.is_empty() {
+                basename_width
+            } else {
+                let parent_text = format!("  {parent}");
+                let width = basename_width + UnicodeWidthStr::width(parent_text.as_str());
+                spans.push(Span::styled(
+                    parent_text,
+                    theme::dashboard_description_style(selected),
+                ));
+                width
+            }
+        }
+        _ => {
+            let title = fit_display_end(&item.label(), label_budget);
+            let mut used = UnicodeWidthStr::width(title.as_str());
+            spans.push(Span::styled(title, row_style));
+            if show_description {
+                if let Some(description) = item.description() {
+                    let remaining = label_budget.saturating_sub(used);
+                    let separator = " — ";
+                    let separator_width = UnicodeWidthStr::width(separator);
+                    if remaining > separator_width {
+                        let description = fit_display_end(description, remaining - separator_width);
+                        let text = format!("{separator}{description}");
+                        used += UnicodeWidthStr::width(text.as_str());
+                        spans.push(Span::styled(
+                            text,
+                            theme::dashboard_description_style(selected),
+                        ));
+                    }
+                }
+            }
+            used
+        }
+    };
+
+    let used = prefix_width + label_width + hotkey_width + hotkey_gap;
+    spans.push(Span::styled(
+        " ".repeat(usize::from(width).saturating_sub(used)),
+        row_style,
+    ));
+    if !hotkey.is_empty() {
+        spans.push(Span::styled(" ", row_style));
+        spans.push(Span::styled(
+            hotkey,
+            theme::dashboard_hotkey_style(selected),
+        ));
     }
+    Line::from(spans)
+}
+
+fn dashboard_recent_parts(path: &str, max_width: usize) -> (String, String) {
+    let path_ref = std::path::Path::new(path);
+    let basename = path_ref
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    let basename = fit_display_end(basename, max_width);
+    let basename_width = UnicodeWidthStr::width(basename.as_str());
+    if basename_width >= max_width {
+        return (basename, String::new());
+    }
+
+    let parent = dashboard_parent_label(path_ref);
+    let parent_budget = max_width.saturating_sub(basename_width + 2);
+    if parent_budget < 3 {
+        return (basename, String::new());
+    }
+    (basename, fit_display_middle(&parent, parent_budget))
+}
+
+fn dashboard_parent_label(path: &std::path::Path) -> String {
+    let Some(parent) = path.parent() else {
+        return String::new();
+    };
+    let mut label = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .and_then(|home| {
+            parent.strip_prefix(&home).ok().map(|relative| {
+                if relative.as_os_str().is_empty() {
+                    "~".to_string()
+                } else {
+                    format!("~/{}", relative.display())
+                }
+            })
+        })
+        .unwrap_or_else(|| parent.display().to_string());
+    if !label.ends_with(std::path::MAIN_SEPARATOR) {
+        label.push(std::path::MAIN_SEPARATOR);
+    }
+    label
+}
+
+fn fit_display_end(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let mut out = take_display_prefix(text, max_width - 1);
+    out.push('…');
+    out
+}
+
+fn fit_display_middle(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let left_width = (max_width - 1) / 2;
+    let right_width = max_width - 1 - left_width;
+    format!(
+        "{}…{}",
+        take_display_prefix(text, left_width),
+        take_display_suffix(text, right_width)
+    )
+}
+
+fn take_display_prefix(text: &str, max_width: usize) -> String {
+    let mut used = 0;
+    text.graphemes(true)
+        .take_while(|grapheme| {
+            let width = UnicodeWidthStr::width(*grapheme);
+            let fits = used + width <= max_width;
+            if fits {
+                used += width;
+            }
+            fits
+        })
+        .collect::<String>()
+}
+
+fn take_display_suffix(text: &str, max_width: usize) -> String {
+    let mut used = 0;
+    let mut graphemes: Vec<&str> = text
+        .graphemes(true)
+        .rev()
+        .take_while(|grapheme| {
+            let width = UnicodeWidthStr::width(*grapheme);
+            let fits = used + width <= max_width;
+            if fits {
+                used += width;
+            }
+            fits
+        })
+        .collect();
+    graphemes.reverse();
+    graphemes.concat()
 }
 
 /// Open-file source panel (`of`): left candidates + draft, right plain head preview.
@@ -3378,6 +3662,151 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    fn dashboard_app(paths: Vec<String>) -> App {
+        let mut app = App::new(100);
+        let recent = crate::recent::RecentFiles { paths };
+        app.recent = recent.clone();
+        app.dashboard = Some(crate::dashboard::DashboardState::new(recent));
+        app
+    }
+
+    fn render_dashboard_text(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_dashboard(app, frame, frame.area()))
+            .unwrap();
+        cell_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn dashboard_renders_hyper_sections_and_footer() {
+        let app = dashboard_app(vec!["/tmp/app.log".into()]);
+        let text = render_dashboard_text(&app, 100, 30);
+
+        assert!(text.contains("App / Android Log Navigator"));
+        assert!(text.contains("Quick Actions"));
+        assert!(text.contains("HDC — HarmonyOS hilog"));
+        assert!(text.contains("ADB — Android logcat"));
+        assert!(text.contains("Open file — Browse recent or local logs"));
+        assert!(text.contains("Recent Files"));
+        assert!(text.contains("j/k move"));
+        assert!(text.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn dashboard_empty_recent_keeps_placeholder() {
+        let app = dashboard_app(Vec::new());
+        let text = render_dashboard_text(&app, 80, 24);
+
+        assert!(text.contains("Recent Files"));
+        assert!(text.contains("No recent files yet"));
+    }
+
+    #[test]
+    fn dashboard_short_frame_keeps_selected_recent_visible() {
+        let paths = (1..=20).map(|i| format!("/tmp/file-{i:02}.log")).collect();
+        let mut app = dashboard_app(paths);
+        app.dashboard.as_mut().unwrap().cursor = 22;
+
+        let text = render_dashboard_text(&app, 48, 12);
+        assert!(text.contains("file-20.log"));
+    }
+
+    #[test]
+    fn dashboard_formats_home_path_and_ellipsizes_parent() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/test".into());
+        let path =
+            format!("{home}/Work/a-very-long-project-name/another-long-directory/device/app.log");
+        let app = dashboard_app(vec![path]);
+
+        let text = render_dashboard_text(&app, 48, 24);
+        assert!(text.contains("app.log"));
+        assert!(text.contains("~/"));
+        assert!(text.contains('…'));
+    }
+
+    #[test]
+    fn dashboard_renders_flash_in_reserved_row() {
+        let mut app = dashboard_app(Vec::new());
+        app.set_flash("HDC CONNECT FAILED");
+
+        let text = render_dashboard_text(&app, 80, 24);
+        assert!(text.contains("HDC CONNECT FAILED"));
+    }
+
+    #[test]
+    fn dashboard_recent_window_reports_range_and_caps_at_nine() {
+        let paths = (1..=20).map(|i| format!("/tmp/file-{i:02}.log")).collect();
+        let app = dashboard_app(paths);
+        let text = render_dashboard_text(&app, 100, 30);
+
+        assert!(text.contains("Recent Files  1-9 / 20"));
+        assert!(text.contains("file-09.log"));
+        assert!(!text.contains("file-10.log"));
+    }
+
+    #[test]
+    fn dashboard_hotkeys_are_right_aligned_in_content_column() {
+        let app = dashboard_app(Vec::new());
+        let text = render_dashboard_text(&app, 100, 30);
+        let hdc_line = text.lines().find(|line| line.contains("HDC —")).unwrap();
+        let hotkey_byte = hdc_line.find("[h]").unwrap();
+        let hotkey_column = UnicodeWidthStr::width(&hdc_line[..hotkey_byte]);
+
+        assert_eq!(hotkey_column, 83); // centered x=14 + (72 - "[h]".width)
+    }
+
+    #[test]
+    fn dashboard_minimal_keeps_wordmark_actions_and_selected_recent() {
+        let mut app = dashboard_app(vec!["/tmp/selected.log".into()]);
+        let text = render_dashboard_text(&app, 30, 8);
+        assert!(text.contains("alnav"));
+        assert!(text.contains("HDC"));
+        assert!(text.contains("ADB"));
+        assert!(text.contains("Open file"));
+
+        app.dashboard.as_mut().unwrap().cursor = 3;
+        let text = render_dashboard_text(&app, 30, 5);
+        assert!(text.contains("HDC"));
+        assert!(text.contains("ADB"));
+        assert!(text.contains("Open file"));
+        assert!(text.contains("selected.log"));
+        assert!(!text.contains("alnav"));
+    }
+
+    #[test]
+    fn dashboard_flash_row_does_not_shift_footer() {
+        let app = dashboard_app(Vec::new());
+        let without_flash = render_dashboard_text(&app, 80, 24);
+        let footer_before = without_flash
+            .lines()
+            .position(|line| line.contains("j/k move"))
+            .unwrap();
+
+        let mut app = app;
+        app.set_flash("ADB CONNECT FAILED");
+        let with_flash = render_dashboard_text(&app, 80, 24);
+        let footer_after = with_flash
+            .lines()
+            .position(|line| line.contains("j/k move"))
+            .unwrap();
+
+        assert_eq!(footer_before, footer_after);
+        assert!(with_flash.contains("ADB CONNECT FAILED"));
+    }
+
+    #[test]
+    fn dashboard_unicode_truncation_preserves_emoji_graphemes() {
+        let end = fit_display_end("👩‍💻.log", 3);
+        assert_eq!(end, "👩‍💻…");
+        assert_eq!(UnicodeWidthStr::width(end.as_str()), 3);
+
+        let middle = fit_display_middle("~/项目/👩‍💻/nearest/", 12);
+        assert!(UnicodeWidthStr::width(middle.as_str()) <= 12);
+        assert!(!middle.contains("👩‍") || middle.contains("👩‍💻"));
     }
 
     #[test]

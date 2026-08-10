@@ -49,6 +49,7 @@ unicode-width = "0.2"
 memmap2 = "0.9.11"
 memchr = "2.8.3"
 nucleo-matcher = "0.3"
+unicode-segmentation = "1.13.3"
 
 [dev-dependencies]
 assert_cmd = "2"

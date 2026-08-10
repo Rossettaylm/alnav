@@ -2316,6 +2316,7 @@ fn handle_dashboard_key(app: &mut App, live: &mut Option<LiveIngestCtl>, key: ev
                 let _ = app.recent.save(&app.config_dir);
                 if let Some(d) = app.dashboard.as_mut() {
                     d.recent = app.recent.clone();
+                    d.clamp_cursor();
                 }
             }
         }
@@ -3393,6 +3394,56 @@ mod dispatch_tests {
             ingest::IngestHandle::Ring(ring),
             child,
         )
+    }
+
+    #[test]
+    fn dashboard_invalid_last_recent_is_removed_and_cursor_is_clamped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let valid = dir.path().join("valid.log");
+        std::fs::write(&valid, "line\n").unwrap();
+        let missing = dir.path().join("missing.log");
+        let recent = recent::RecentFiles {
+            paths: vec![valid.display().to_string(), missing.display().to_string()],
+        };
+        let mut app = App::new(100);
+        app.config_dir = dir.path().to_path_buf();
+        app.recent = recent.clone();
+        app.dashboard = Some(dashboard::DashboardState::new(recent));
+        app.dashboard.as_mut().unwrap().cursor = 4;
+        let mut live = None;
+
+        handle_dashboard_key(
+            &mut app,
+            &mut live,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        let dash = app.dashboard.as_ref().unwrap();
+        assert_eq!(dash.cursor, 3);
+        assert_eq!(dash.recent.paths, vec![valid.display().to_string()]);
+        assert!(matches!(
+            dash.selected(),
+            Some(dashboard::DashboardItem::Recent { path, .. })
+                if path == valid.display().to_string()
+        ));
+        assert!(app.status_msg.is_some());
+    }
+
+    #[test]
+    fn dashboard_ctrl_c_still_quits() {
+        let mut app = App::new(100);
+        app.dashboard = Some(dashboard::DashboardState::new(
+            recent::RecentFiles::default(),
+        ));
+        let mut live = None;
+
+        handle_dashboard_key(
+            &mut app,
+            &mut live,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.should_quit);
     }
 
     #[test]

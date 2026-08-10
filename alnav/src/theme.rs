@@ -66,6 +66,16 @@ pub const GLYPH_SOURCE_FILE: &str = "\u{f15b}"; // nf-fa-file
 pub const GLYPH_SOURCE_DIR: &str = "\u{f07b}"; // nf-fa-folder
 pub const GLYPH_TITLE_DASHBOARD: &str = "\u{f0e4}"; // nf-fa-tachometer
 
+/// Five-line, ASCII-only Dashboard wordmark. Keeping this in the theme module
+/// makes the startup branding a single visual asset alongside semantic glyphs.
+pub const DASHBOARD_LOGO: [&str; 5] = [
+    "  #     #       #   #     #     #   #",
+    " # #    #       ##  #    # #    #   #",
+    "#####   #       # # #   #####   #   #",
+    "#   #   #       #  ##   #   #    # # ",
+    "#   #   #####   #   #   #   #     #  ",
+];
+
 /// Map a chip field to its nerdfont icon glyph.
 pub fn field_icon(field: ChipField) -> &'static str {
     match field {
@@ -278,6 +288,52 @@ pub fn candidate_prefix() -> String {
 /// Backward-compatible alias for selected candidate style.
 pub fn candidate_selection_style() -> Style {
     candidate_selected_style()
+}
+
+/// Dashboard ASCII wordmark.
+pub fn dashboard_header_style() -> Style {
+    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+}
+
+/// Dashboard product subtitle, empty-state copy, and footer.
+pub fn dashboard_muted_style() -> Style {
+    muted().add_modifier(Modifier::DIM)
+}
+
+/// Borderless Dashboard section heading.
+pub fn dashboard_section_style() -> Style {
+    Style::default()
+        .fg(accent())
+        .add_modifier(Modifier::BOLD | Modifier::DIM)
+}
+
+/// Base style for a Dashboard action/recent row.
+pub fn dashboard_item_style(selected: bool) -> Style {
+    if selected {
+        candidate_selected_style()
+    } else {
+        candidate_unselected_style()
+    }
+}
+
+/// Dim secondary copy while preserving the selected row's soft background.
+pub fn dashboard_description_style(selected: bool) -> Style {
+    let bg = dashboard_item_style(selected).bg;
+    dashboard_muted_style().bg(bg.unwrap_or(Color::Reset))
+}
+
+/// Right-aligned Dashboard shortcut badge.
+pub fn dashboard_hotkey_style(selected: bool) -> Style {
+    let bg = dashboard_item_style(selected).bg;
+    Style::default()
+        .fg(accent())
+        .bg(bg.unwrap_or(Color::Reset))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Dashboard-local transient failure text.
+pub fn dashboard_flash_style() -> Style {
+    Style::default().fg(warning()).add_modifier(Modifier::DIM)
 }
 
 /// Soft accent+DIM style for picker mode prefixes (no fill — distinct from chip pills).
@@ -855,6 +911,17 @@ mod tests {
         assert_eq!(soft.fg, Some(Color::Cyan));
         assert!(soft.add_modifier.contains(Modifier::DIM));
         assert_eq!(soft.bg, None);
+    }
+
+    #[test]
+    fn dashboard_logo_is_five_line_ascii_with_expected_width() {
+        use unicode_width::UnicodeWidthStr;
+
+        assert_eq!(DASHBOARD_LOGO.len(), 5);
+        for line in DASHBOARD_LOGO {
+            assert!(line.is_ascii());
+            assert!((36..=40).contains(&UnicodeWidthStr::width(line)));
+        }
     }
 
     #[test]
