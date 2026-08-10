@@ -142,3 +142,27 @@ pub fn drain(&mut self, ingest: &impl TryRecvRow);
 | unbounded `mpsc` for live sources | `DropOldestRing` + `IngestHandle::Ring` |
 | block on full | drop oldest undrained |
 | parse on UI thread for a live backend (P-late) | P-after on producer (until a future task) |
+
+---
+
+## Scenario: Live auto-reconnect (`LiveIngestCtl`)
+
+### 1. Scope / Trigger
+
+- Trigger: Stream TUI (`--hdc` / `--adb`) after producer EOF (`ingest_done`).
+- Cross-module: `main::{LiveIngestCtl, LiveChildGuard, RECONNECT_BACKOFF}`, `App::mark_live_reconnected`, `hdc::spawn_hilog` / `adb::spawn_logcat`.
+
+### 2. Contracts
+
+- While `ingest_done`, attempt respawn at most every `RECONNECT_BACKOFF` (2s); first attempt after disconnect may be immediate (`last_reconnect_at == None`).
+- Before treating spawn as success: device probe (`now_marker`) must succeed, and the capture child must still be alive after `RECONNECT_HEALTH_WAIT` (~150ms). Immediate-exit spawns stay disconnected (no `RECONNECTED` flash).
+- Stamp `last_reconnect_at` on every attempt (including success) so a dying false session cannot immediately re-flash.
+- Live capture stderr is `Stdio::null()` (unread piped stderr can deadlock the child).
+- Success: replace ring + child, `ingest_done = false`, flash `RECONNECTED`, **keep** `rows`/`matched`/filters.
+- Failure: stay disconnected; icon remains via existing status-bar path.
+- File mode: no `LiveIngestCtl` / no reconnect.
+
+### 3. Tests Required
+
+- `LiveChildGuard::replace` kills previous child
+- backoff skips spawn; success preserves buffer; failure keeps `ingest_done`

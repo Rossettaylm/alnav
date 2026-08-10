@@ -239,7 +239,10 @@ Update when changing `App.ingest_done` semantics or the status bar's
 - Does not distinguish disconnect *cause* (exit code, device unplug vs.
   `adb`/`hdc` binary missing) — `ingest.rs` doesn't capture that
   information; out of scope for v1.
-- No auto-reconnect — indicator only.
+- Auto-reconnect is owned by task `08-10-tui-live-reconnect` (`LiveIngestCtl`
+  in `main.rs`): while `ingest_done`, retry spawn every 2s; success clears
+  `ingest_done` (icon hides) and keeps the buffer. This indicator contract
+  is unchanged.
 
 ### 4. Validation & Error Matrix
 

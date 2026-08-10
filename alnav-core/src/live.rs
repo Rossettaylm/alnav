@@ -61,7 +61,9 @@ pub(crate) fn spawn_session(
 ) -> Result<LiveSession, String> {
     let used_history_fallback = start_marker.is_none();
     command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
+    // Discard stderr: a piped-but-unread stderr fills (~64KiB) and can
+    // deadlock the capture child so stdout never EOFs / never yields lines.
+    command.stderr(Stdio::null());
 
     let mut child = command.spawn().map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {

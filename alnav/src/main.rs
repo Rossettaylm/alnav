@@ -23,7 +23,7 @@ mod ui;
 mod vocab;
 
 use std::io::{self, IsTerminal};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::path::PathBuf;
 
@@ -349,6 +349,13 @@ mod tests {
     }
 }
 
+/// Fixed backoff between live reconnect spawn attempts.
+const RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
+
+/// After spawn, wait briefly and reject sessions whose child already exited
+/// (common when `hdc`/`adb` starts then immediately fails without a device).
+const RECONNECT_HEALTH_WAIT: Duration = Duration::from_millis(150);
+
 /// Ensures the live child process is killed no matter which exit path
 /// `main()` takes, including an early `?` bail-out between binding this
 /// guard and the end of `main()`. Manual kill/wait calls threaded into every
@@ -356,11 +363,140 @@ mod tests {
 /// `Drop` closes that gap structurally instead.
 struct LiveChildGuard(Option<std::process::Child>);
 
+impl LiveChildGuard {
+    fn new(child: Option<std::process::Child>) -> Self {
+        Self(child)
+    }
+
+    /// Kill/wait the previous child (if any), then take ownership of `child`.
+    fn replace(&mut self, child: Option<std::process::Child>) {
+        if let Some(mut old) = self.0.take() {
+            let _ = old.kill();
+            let _ = old.wait();
+        }
+        self.0 = child;
+    }
+}
+
 impl Drop for LiveChildGuard {
     fn drop(&mut self) {
-        if let Some(child) = &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
+        self.replace(None);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveBackend {
+    Hdc,
+    Adb,
+}
+
+/// Replaceable live ingest session for `--hdc` / `--adb` TUI mode.
+struct LiveIngestCtl {
+    backend: LiveBackend,
+    device: Option<String>,
+    ingest: Option<ingest::IngestHandle>,
+    child: LiveChildGuard,
+    last_reconnect_at: Option<Instant>,
+}
+
+impl LiveIngestCtl {
+    fn new(
+        backend: LiveBackend,
+        device: Option<String>,
+        ingest: ingest::IngestHandle,
+        child: std::process::Child,
+    ) -> Self {
+        Self {
+            backend,
+            device,
+            ingest: Some(ingest),
+            child: LiveChildGuard::new(Some(child)),
+            last_reconnect_at: None,
+        }
+    }
+
+    /// When `app.ingest_done`, attempt respawn subject to [`RECONNECT_BACKOFF`].
+    /// On success: swap ring/child, [`App::mark_live_reconnected`], keep buffers.
+    /// `spawn` is injectable for tests; production uses [`Self::spawn_for_reconnect`].
+    ///
+    /// `last_reconnect_at` is always stamped on an attempt (success or fail) so a
+    /// short-lived false session cannot immediately re-flash `RECONNECTED`.
+    fn try_reconnect<F>(&mut self, app: &mut App, now: Instant, spawn: F) -> bool
+    where
+        F: FnOnce() -> Result<alnav::live::LiveSession, String>,
+    {
+        if !app.ingest_done {
+            return false;
+        }
+        if let Some(at) = self.last_reconnect_at {
+            if now.duration_since(at) < RECONNECT_BACKOFF {
+                return false;
+            }
+        }
+        self.last_reconnect_at = Some(now);
+        match spawn() {
+            Ok(session) => match ensure_capture_alive(session, RECONNECT_HEALTH_WAIT) {
+                Ok(session) => {
+                    let (ring, child) = ingest::spawn_live_ingest(session);
+                    self.ingest = Some(ingest::IngestHandle::Ring(ring));
+                    self.child.replace(Some(child));
+                    app.mark_live_reconnected();
+                    true
+                }
+                Err(_) => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Probe device reachability, then spawn. Spawn alone is not enough: `hdc`
+    /// / `adb` often start successfully with no device and exit immediately.
+    fn spawn_for_reconnect(
+        backend: LiveBackend,
+        device: Option<&str>,
+    ) -> Result<alnav::live::LiveSession, String> {
+        match backend {
+            LiveBackend::Hdc => {
+                if alnav::hdc::now_marker(device).is_none() {
+                    return Err("hdc device unreachable".into());
+                }
+                alnav::hdc::spawn_hilog(device)
+            }
+            LiveBackend::Adb => {
+                if alnav::adb::now_marker(device).is_none() {
+                    return Err("adb device unreachable".into());
+                }
+                alnav::adb::spawn_logcat(device)
+            }
+        }
+    }
+
+    fn try_reconnect_now(&mut self, app: &mut App, now: Instant) -> bool {
+        let backend = self.backend;
+        let device = self.device.clone();
+        self.try_reconnect(app, now, || {
+            Self::spawn_for_reconnect(backend, device.as_deref())
+        })
+    }
+}
+
+/// Reject capture children that die during the post-spawn grace window.
+fn ensure_capture_alive(
+    mut session: alnav::live::LiveSession,
+    wait: Duration,
+) -> Result<alnav::live::LiveSession, String> {
+    std::thread::sleep(wait);
+    match session.child.try_wait() {
+        Ok(None) => Ok(session),
+        Ok(Some(status)) => {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+            Err(format!("capture exited immediately ({status})"))
+        }
+        Err(e) => {
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+            Err(format!("capture health check failed: {e}"))
         }
     }
 }
@@ -467,11 +603,15 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         app.set_flash(hint);
     }
 
-    let (ingest, live_child) = if cli.hdc || cli.adb {
-        let session = if cli.hdc {
-            alnav::hdc::spawn_hilog(cli.device.as_deref())
+    let mut live = if cli.hdc || cli.adb {
+        let backend = if cli.hdc {
+            LiveBackend::Hdc
         } else {
-            alnav::adb::spawn_logcat(cli.device.as_deref())
+            LiveBackend::Adb
+        };
+        let session = match backend {
+            LiveBackend::Hdc => alnav::hdc::spawn_hilog(cli.device.as_deref()),
+            LiveBackend::Adb => alnav::adb::spawn_logcat(cli.device.as_deref()),
         };
         let session = match session {
             Ok(session) => session,
@@ -481,14 +621,18 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
             }
         };
         let (ring, child) = ingest::spawn_live_ingest(session);
-        (Some(ingest::IngestHandle::Ring(ring)), Some(child))
+        Some(LiveIngestCtl::new(
+            backend,
+            cli.device.clone(),
+            ingest::IngestHandle::Ring(ring),
+            child,
+        ))
     } else {
         let path = cli.file.clone().unwrap();
         let file_store = store::FileStore::open(&path).map_err(|e| e.to_string())?;
         app.set_file_store(file_store);
-        (None, None)
+        None
     };
-    let _live_child_guard = LiveChildGuard(live_child);
 
     enable_raw_mode().map_err(|e| e.to_string())?;
     let setup: Result<Terminal<CrosstermBackend<io::Stdout>>, String> = (|| {
@@ -514,13 +658,14 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
                 LeaveAlternateScreen,
                 event::DisableMouseCapture
             );
-            return Err(e); // _live_child_guard drops here, killing the child if any
+            // `live` drops here, killing the child if any
+            return Err(e);
         }
     };
 
     let mut input = input::InputBox::default();
     let _ = cli.ignore_case; // retained for CLI compat; TUI always ignore-case
-    let result = run(&mut terminal, &mut app, &mut input, &ingest);
+    let result = run(&mut terminal, &mut app, &mut input, &mut live);
 
     let disable_result = disable_raw_mode().map_err(|e| e.to_string());
     let leave_result = execute!(
@@ -529,10 +674,10 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         event::DisableMouseCapture
     )
     .map_err(|e| e.to_string());
+    // `live` drops here, killing the child if not already killed
     disable_result.and(leave_result)?;
 
     result
-    // _live_child_guard drops here, killing the child if not already killed
 }
 
 /// Anchors the candidate dropdown just below the centered Input/Search modal.
@@ -558,10 +703,9 @@ fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     input: &mut input::InputBox,
-    ingest: &Option<ingest::IngestHandle>,
+    live: &mut Option<LiveIngestCtl>,
 ) -> Result<(), String> {
     use app::Mode;
-    use std::time::Instant;
 
     // P4: minimum draw interval during active ingest to avoid thrashing the
     // renderer while the background thread floods the channel.
@@ -572,8 +716,15 @@ fn run<B: ratatui::backend::Backend>(
     let mut force_draw = true; // first frame always draws
 
     while !app.should_quit {
-        if let Some(ingest) = ingest {
-            app.drain(ingest);
+        if let Some(ctl) = live.as_mut() {
+            if let Some(ingest) = ctl.ingest.as_ref() {
+                app.drain(ingest);
+            }
+            if app.ingest_done && ctl.try_reconnect_now(app, Instant::now()) {
+                if let Some(ingest) = ctl.ingest.as_ref() {
+                    app.drain(ingest);
+                }
+            }
         }
         app.poll_file_store();
         app.ensure_vocab_candidates();
@@ -2924,7 +3075,172 @@ fn handle_insert_key(
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
+    use alnav::live::{LiveFilter, LiveSession};
     use crossterm::event::{KeyEvent, KeyModifiers};
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn sleep_child() -> std::process::Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep")
+    }
+
+    fn live_session_from_sh(script: &str) -> LiveSession {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh live session");
+        let stdout = child.stdout.take().expect("piped stdout");
+        LiveSession {
+            child,
+            lines: LiveFilter {
+                inner: std::io::BufReader::new(stdout).lines(),
+                start_marker: None,
+            },
+            used_history_fallback: true,
+        }
+    }
+
+    fn dummy_ctl() -> LiveIngestCtl {
+        let session = live_session_from_sh("sleep 30");
+        let (ring, child) = ingest::spawn_live_ingest(session);
+        LiveIngestCtl::new(
+            LiveBackend::Hdc,
+            None,
+            ingest::IngestHandle::Ring(ring),
+            child,
+        )
+    }
+
+    #[test]
+    fn live_child_guard_replace_kills_previous() {
+        let mut guard = LiveChildGuard::new(Some(sleep_child()));
+        let old_id = guard.0.as_ref().unwrap().id();
+        guard.replace(Some(Command::new("true").spawn().unwrap()));
+        // Old sleep should no longer be running (best-effort: waitpid already done).
+        let still = Command::new("kill")
+            .args(["-0", &old_id.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(!still, "replaced child should be killed");
+        assert!(guard.0.is_some());
+    }
+
+    #[test]
+    fn try_reconnect_skips_when_not_disconnected() {
+        let mut app = App::new(100);
+        app.ingest_done = false;
+        let mut ctl = dummy_ctl();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_c = Arc::clone(&calls);
+        let ok = ctl.try_reconnect(&mut app, Instant::now(), || {
+            calls_c.fetch_add(1, Ordering::SeqCst);
+            Err("should not spawn".into())
+        });
+        assert!(!ok);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn try_reconnect_respects_backoff() {
+        let mut app = App::new(100);
+        app.ingest_done = true;
+        let mut ctl = dummy_ctl();
+        let t0 = Instant::now();
+        ctl.last_reconnect_at = Some(t0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_c = Arc::clone(&calls);
+        let ok = ctl.try_reconnect(&mut app, t0 + Duration::from_millis(500), || {
+            calls_c.fetch_add(1, Ordering::SeqCst);
+            Err("no".into())
+        });
+        assert!(!ok);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(app.ingest_done);
+    }
+
+    #[test]
+    fn try_reconnect_success_keeps_buffer_and_clears_done() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Keep    : a").unwrap())
+            .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert_eq!(app.rows().len(), 1);
+        app.ingest_done = true;
+
+        let mut ctl = dummy_ctl();
+        let t0 = Instant::now();
+        let ok = ctl.try_reconnect(&mut app, t0, || {
+            // Stay alive past RECONNECT_HEALTH_WAIT so health check passes.
+            Ok(live_session_from_sh(
+                "printf '04-02 10:00:01.000  1  1 I New     : b\\n'; sleep 2",
+            ))
+        });
+        assert!(ok);
+        assert!(!app.ingest_done);
+        assert_eq!(app.status_msg.as_deref(), Some("RECONNECTED"));
+        assert_eq!(
+            app.rows().len(),
+            1,
+            "reconnect must not clear prior buffer before drain"
+        );
+        // Backoff stamp retained so a dying session cannot immediately re-flash.
+        assert_eq!(ctl.last_reconnect_at, Some(t0));
+
+        // Drain new session lines into the same buffer.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.rows().len() < 2 && Instant::now() < deadline {
+            if let Some(ingest) = ctl.ingest.as_ref() {
+                app.drain(ingest);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(app.rows().len(), 2);
+        assert_eq!(app.rows()[0].tag, "Keep");
+        assert_eq!(app.rows()[1].tag, "New");
+    }
+
+    #[test]
+    fn try_reconnect_rejects_immediate_exit_without_flash() {
+        let mut app = App::new(100);
+        app.ingest_done = true;
+        let mut ctl = dummy_ctl();
+        let t0 = Instant::now();
+        let ok = ctl.try_reconnect(&mut app, t0, || Ok(live_session_from_sh("true")));
+        assert!(
+            !ok,
+            "child that exits during health wait must not count as reconnect"
+        );
+        assert!(app.ingest_done);
+        assert_ne!(app.status_msg.as_deref(), Some("RECONNECTED"));
+        assert_eq!(ctl.last_reconnect_at, Some(t0));
+    }
+
+    #[test]
+    fn try_reconnect_failure_stays_disconnected() {
+        let mut app = App::new(100);
+        app.ingest_done = true;
+        let mut ctl = dummy_ctl();
+        let t0 = Instant::now();
+        let ok = ctl.try_reconnect(&mut app, t0, || Err("device gone".into()));
+        assert!(!ok);
+        assert!(app.ingest_done);
+        assert_eq!(ctl.last_reconnect_at, Some(t0));
+    }
 
     #[test]
     fn question_opens_help_and_esc_closes_without_follow() {

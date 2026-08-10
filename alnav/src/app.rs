@@ -1678,6 +1678,12 @@ impl App {
         }
     }
 
+    /// Clear live disconnect state after a successful respawn; keep buffers.
+    pub fn mark_live_reconnected(&mut self) {
+        self.ingest_done = false;
+        self.set_flash("RECONNECTED");
+    }
+
     /// Flash a short status-bar toast that auto-hides after 3 seconds.
     pub fn set_flash(&mut self, msg: impl Into<String>) {
         self.status_msg = Some(msg.into());
@@ -2961,6 +2967,15 @@ mod tests {
         let mut g = tag_group(tag);
         g.label = label.into();
         g
+    }
+
+    #[test]
+    fn test_mark_live_reconnected_clears_done_and_flashes() {
+        let mut app = App::new(100);
+        app.ingest_done = true;
+        app.mark_live_reconnected();
+        assert!(!app.ingest_done);
+        assert_eq!(app.status_msg.as_deref(), Some("RECONNECTED"));
     }
 
     #[test]
