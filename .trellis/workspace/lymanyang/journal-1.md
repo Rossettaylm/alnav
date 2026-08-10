@@ -310,3 +310,37 @@ Moved Picker New vocab fuzzy matching off the UI thread with generation-based ca
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: TUI live stream auto-reconnect
+
+**Date**: 2026-08-10
+**Task**: TUI live stream auto-reconnect
+**Package**: alnav-core
+**Branch**: `master`
+
+### Summary
+
+Implemented hdc/adb auto-reconnect with disconnect icon, device probe + health check to avoid false RECONNECTED, keep buffer on reconnect; archived 08-10-tui-live-reconnect.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4124096` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
