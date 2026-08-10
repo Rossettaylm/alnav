@@ -5,3 +5,6 @@ picker_left_ratio = 0.4
 # 设为 false 时所有 Picker 面板均全宽展示，不渲染右侧预览列。
 # 注意：聚合面板（Space Space）无论此项设置如何，始终全宽（无 Preview）。
 picker_preview_enabled = true
+
+# Dashboard / of 最近文件条数上限（1..=200）。默认 20。
+recent_files_limit = 20

@@ -52,6 +52,8 @@ pub struct AppConfig {
     pub picker_left_ratio: f32,
     /// When false, all picker panels render full-width (no right preview pane).
     pub picker_preview_enabled: bool,
+    /// Max recent files remembered for Dashboard / `of` (clamped 1..=200).
+    pub recent_files_limit: usize,
 }
 
 impl AppConfig {
@@ -59,6 +61,7 @@ impl AppConfig {
         Self {
             picker_left_ratio: 0.4,
             picker_preview_enabled: true,
+            recent_files_limit: 20,
         }
     }
 
@@ -92,6 +95,7 @@ impl ConfigLoadStatus {
 struct ConfigToml {
     picker_left_ratio: Option<f32>,
     picker_preview_enabled: Option<bool>,
+    recent_files_limit: Option<usize>,
 }
 
 /// Load `$config_dir/config.toml` and return config + load status.
@@ -109,6 +113,9 @@ pub fn load_config(config_dir: &Path) -> (AppConfig, ConfigLoadStatus) {
                 }
                 if let Some(v) = t.picker_preview_enabled {
                     cfg.picker_preview_enabled = v;
+                }
+                if let Some(n) = t.recent_files_limit {
+                    cfg.recent_files_limit = crate::recent::clamp_limit(n);
                 }
                 (cfg, ConfigLoadStatus::Loaded(path))
             }

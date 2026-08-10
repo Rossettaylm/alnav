@@ -56,6 +56,7 @@ pub enum ContextKind {
     Time,
     ChipField,
     Yank,
+    Open,
     StripD,
     Input,
     ChipStrip,
@@ -79,6 +80,7 @@ impl ContextKind {
             Self::Time => "Time",
             Self::ChipField => "Field",
             Self::Yank => "Yank",
+            Self::Open => "Open source",
             Self::StripD => "Strip delete",
             Self::Input => "Input",
             Self::ChipStrip => "Filter strip",
@@ -196,6 +198,9 @@ pub fn context_kind(app: &App) -> ContextKind {
     }
     if app.pending_yank {
         return ContextKind::Yank;
+    }
+    if app.pending_open {
+        return ContextKind::Open;
     }
     if app.pending_d {
         return ContextKind::StripD;
@@ -322,6 +327,13 @@ fn l1_loglist(app: &App, live: bool) -> Vec<HintEntry> {
         ActionId::LogListYank,
         "yank",
         "yank operator",
+    );
+    push_single(
+        &mut out,
+        app,
+        ActionId::LogListOpen,
+        "source",
+        "open or switch source",
     );
     push_agg(
         &mut out,
@@ -587,6 +599,13 @@ pub fn context_entries(app: &App) -> Vec<HintEntry> {
             }
             out
         }
+        ContextKind::Open => {
+            let mut out = Vec::new();
+            push_short(&mut out, app, ActionId::OpenFile, "file");
+            push_short(&mut out, app, ActionId::OpenStream, "stream");
+            push_short(&mut out, app, ActionId::OpenCancel, "cancel");
+            out
+        }
         ContextKind::StripD => {
             let mut out = Vec::new();
             push_short(&mut out, app, ActionId::StripDDelete, "delete");
@@ -641,9 +660,11 @@ pub fn active_section_id(kind: ContextKind) -> SectionId {
         | ContextKind::HighlightStrip
         | ContextKind::Input
         | ContextKind::HighlightModal => SectionId::Operators,
-        ContextKind::Bookmark | ContextKind::Lock | ContextKind::Time | ContextKind::Yank => {
-            SectionId::Session
-        }
+        ContextKind::Bookmark
+        | ContextKind::Lock
+        | ContextKind::Time
+        | ContextKind::Yank
+        | ContextKind::Open => SectionId::Session,
         ContextKind::Detail | ContextKind::TimePanel => SectionId::Overlays,
         ContextKind::LogList | ContextKind::LogListLive => SectionId::Navigation,
     }
@@ -817,6 +838,17 @@ fn catalog_entries(app: &App, live: bool) -> Vec<(SectionId, &'static str, Vec<H
     }
 
     let mut session = Vec::new();
+    if let (Some(o), Some(f), Some(s)) = (
+        key_of(app, ActionId::LogListOpen),
+        key_of(app, ActionId::OpenFile),
+        key_of(app, ActionId::OpenStream),
+    ) {
+        session.push(HintEntry::new(
+            format!("{o}{f}/{o}{s}"),
+            "source",
+            "open or switch file / stream source",
+        ));
+    }
     if let (Some(p), Some(fp), Some(ft), Some(fu)) = (
         key_of(app, ActionId::LogListLock),
         key_of(app, ActionId::LockPid),
@@ -976,6 +1008,7 @@ pub fn help_available(app: &App) -> bool {
         || app.pending_chip
         || app.pending_exclude
         || app.pending_yank
+        || app.pending_open
         || app.pending_d
     {
         return false;
@@ -1239,6 +1272,9 @@ mod tests {
         app.pending_yank = true;
         assert_eq!(context_kind(&app), ContextKind::Yank);
         app.pending_yank = false;
+        app.pending_open = true;
+        assert_eq!(context_kind(&app), ContextKind::Open);
+        app.pending_open = false;
         app.focus = Focus::ChipStrip;
         app.pending_d = true;
         assert_eq!(context_kind(&app), ContextKind::StripD);

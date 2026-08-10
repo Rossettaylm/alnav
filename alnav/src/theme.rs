@@ -58,6 +58,13 @@ pub const GLYPH_FIELD_LEVEL: &str = "\u{f0d0}"; //
 pub const GLYPH_HR: &str = "\u{2500}"; // ─
 pub const GLYPH_HELP: &str = "\u{f059}"; // nf-fa-question_circle
 pub const GLYPH_PROGRESS: &str = "\u{f110}"; // nf-fa-spinner
+pub const GLYPH_SOURCE_HDC: &str = "\u{f2db}"; // nf-fa-microchip
+pub const GLYPH_SOURCE_ADB: &str = "\u{f17b}"; // nf-fa-android
+pub const GLYPH_SOURCE_OPEN_FILE: &str = "\u{f07c}"; // nf-fa-folder_open
+pub const GLYPH_SOURCE_RECENT: &str = "\u{f1da}"; // nf-fa-history
+pub const GLYPH_SOURCE_FILE: &str = "\u{f15b}"; // nf-fa-file
+pub const GLYPH_SOURCE_DIR: &str = "\u{f07b}"; // nf-fa-folder
+pub const GLYPH_TITLE_DASHBOARD: &str = "\u{f0e4}"; // nf-fa-tachometer
 
 /// Map a chip field to its nerdfont icon glyph.
 pub fn field_icon(field: ChipField) -> &'static str {

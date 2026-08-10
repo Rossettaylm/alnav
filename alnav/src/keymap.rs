@@ -354,6 +354,7 @@ pub enum KeyContext {
     Leader,
     Lock,
     LogList,
+    Open,
     Picker,
     Strip,
     StripD,
@@ -377,6 +378,7 @@ impl KeyContext {
             Self::Leader => "leader",
             Self::Lock => "lock",
             Self::LogList => "log_list",
+            Self::Open => "open",
             Self::Picker => "picker",
             Self::Strip => "strip",
             Self::StripD => "strip_d",
@@ -399,6 +401,7 @@ impl KeyContext {
             "leader" => Some(Self::Leader),
             "lock" => Some(Self::Lock),
             "log_list" => Some(Self::LogList),
+            "open" => Some(Self::Open),
             "picker" => Some(Self::Picker),
             "strip" => Some(Self::Strip),
             "strip_d" => Some(Self::StripD),
@@ -450,6 +453,7 @@ pub enum ActionId {
     LogListExcludeChip,
     LogListYank,
     LogListLock,
+    LogListOpen,
     LogListTime,
     LogListWrapToggle,
     LeaderManage,
@@ -467,6 +471,9 @@ pub enum ActionId {
     LockViewSevere,
     LockClear,
     LockCancel,
+    OpenFile,
+    OpenStream,
+    OpenCancel,
     TimeSet,
     TimeClear,
     TimeCancel,
@@ -610,6 +617,7 @@ impl ActionId {
         Self::LogListExcludeChip,
         Self::LogListYank,
         Self::LogListLock,
+        Self::LogListOpen,
         Self::LogListTime,
         Self::LogListWrapToggle,
         Self::LeaderManage,
@@ -627,6 +635,9 @@ impl ActionId {
         Self::LockViewSevere,
         Self::LockClear,
         Self::LockCancel,
+        Self::OpenFile,
+        Self::OpenStream,
+        Self::OpenCancel,
         Self::TimeSet,
         Self::TimeClear,
         Self::TimeCancel,
@@ -1068,6 +1079,16 @@ impl ActionId {
                 label: "focus",
                 detail: "lock / view focus operator",
             },
+            Self::LogListOpen => ActionMeta {
+                id: Self::LogListOpen,
+                context: KeyContext::LogList,
+                toml_key: "open",
+                default: Binding::parse_str("o").expect("default binding"),
+                kind: ActionKind::Prefix,
+                capabilities: &[],
+                label: "source",
+                detail: "open or switch source",
+            },
             Self::LogListTime => ActionMeta {
                 id: Self::LogListTime,
                 context: KeyContext::LogList,
@@ -1237,6 +1258,36 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel lock operator",
+            },
+            Self::OpenFile => ActionMeta {
+                id: Self::OpenFile,
+                context: KeyContext::Open,
+                toml_key: "file",
+                default: Binding::parse_str("f").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "file",
+                detail: "open or switch to a file",
+            },
+            Self::OpenStream => ActionMeta {
+                id: Self::OpenStream,
+                context: KeyContext::Open,
+                toml_key: "stream",
+                default: Binding::parse_str("s").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "stream",
+                detail: "open or switch to hdc/adb",
+            },
+            Self::OpenCancel => ActionMeta {
+                id: Self::OpenCancel,
+                context: KeyContext::Open,
+                toml_key: "cancel",
+                default: Binding::parse_str("Esc").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "cancel",
+                detail: "cancel open-source operator",
             },
             Self::TimeSet => ActionMeta {
                 id: Self::TimeSet,
@@ -2057,6 +2108,7 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::LogList, "exclude_chip") => Some(ActionId::LogListExcludeChip),
         (KeyContext::LogList, "yank") => Some(ActionId::LogListYank),
         (KeyContext::LogList, "lock") => Some(ActionId::LogListLock),
+        (KeyContext::LogList, "open") => Some(ActionId::LogListOpen),
         (KeyContext::LogList, "time") => Some(ActionId::LogListTime),
         (KeyContext::LogList, "wrap_toggle") => Some(ActionId::LogListWrapToggle),
         (KeyContext::Leader, "manage") => Some(ActionId::LeaderManage),
@@ -2074,6 +2126,9 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::Lock, "view_severe") => Some(ActionId::LockViewSevere),
         (KeyContext::Lock, "clear") => Some(ActionId::LockClear),
         (KeyContext::Lock, "cancel") => Some(ActionId::LockCancel),
+        (KeyContext::Open, "file") => Some(ActionId::OpenFile),
+        (KeyContext::Open, "stream") => Some(ActionId::OpenStream),
+        (KeyContext::Open, "cancel") => Some(ActionId::OpenCancel),
         (KeyContext::Time, "set") => Some(ActionId::TimeSet),
         (KeyContext::Time, "clear") => Some(ActionId::TimeClear),
         (KeyContext::Time, "cancel") => Some(ActionId::TimeCancel),
@@ -2444,7 +2499,10 @@ pub fn serialize_default_config_toml() -> String {
      # picker_preview_enabled: show the right Preview column in pickers.\n\
      # When false, pickers are full-width. The unified manage panel (Space Space)\n\
      # is always full-width regardless of this setting.\n\
-     picker_preview_enabled = true\n"
+     picker_preview_enabled = true\n\
+     #\n\
+     # recent_files_limit: max paths remembered for Dashboard / of (1..=200).\n\
+     recent_files_limit = 20\n"
         .to_string()
 }
 
@@ -2508,6 +2566,10 @@ mod tests {
         assert!(store.matches_code(ActionId::LogListExcludeChip, KeyCode::Char('C')));
         assert!(store.matches_code(ActionId::LeaderManage, KeyCode::Char(' ')));
         assert!(store.matches_code(ActionId::BookmarkAdd, KeyCode::Char('a')));
+        assert!(store.matches_code(ActionId::LogListOpen, KeyCode::Char('o')));
+        assert!(store.matches_code(ActionId::OpenFile, KeyCode::Char('f')));
+        assert!(store.matches_code(ActionId::OpenStream, KeyCode::Char('s')));
+        assert!(store.matches_code(ActionId::OpenCancel, KeyCode::Esc));
         assert_eq!(
             store.display(ActionId::LogListClearLive).as_deref(),
             Some("C-l")
@@ -2562,7 +2624,11 @@ move_down = "k"
         let text = serialize_default_toml();
         assert!(text.contains("[log_list]"));
         assert!(text.contains("move_down = \"j\""));
+        assert!(text.contains("open = \"o\""));
         assert!(text.contains("[leader]"));
+        assert!(text.contains("[open]"));
+        assert!(text.contains("file = \"f\""));
+        assert!(text.contains("stream = \"s\""));
     }
 
     #[test]

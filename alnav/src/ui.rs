@@ -2338,7 +2338,12 @@ pub fn detail_content_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
             if let Some(row) = app.current_row() {
                 if let Some((info, truncated)) = crash_context_for_row(app, &row) {
                     let width = inner_width.max(1) as usize;
-                    return render_crash_detail_lines(&info, !app.store.is_file(), truncated, width);
+                    return render_crash_detail_lines(
+                        &info,
+                        !app.store.is_file(),
+                        truncated,
+                        width,
+                    );
                 }
             }
             detail_pretty_lines(app.current_row().as_deref(), inner_width)
@@ -2666,6 +2671,8 @@ pub enum PickerRightPane<'a> {
     Detail(Option<&'a crate::model::EntryRow>),
     /// Preset panel: chip-strip style Filter → Exclude → Highlight.
     ChipRules(&'a [Line<'static>]),
+    /// Open-file head preview (plain text lines).
+    PlainLines(&'a [Line<'static>]),
 }
 
 /// fzf-style picker shell: left candidates + bottom search, right Preview.
@@ -2748,9 +2755,27 @@ pub fn render_picker(
             PickerRightPane::ChipRules(lines) => {
                 render_preset_rules_preview(lines, frame, right);
             }
+            PickerRightPane::PlainLines(lines) => {
+                render_plain_preview(lines, frame, right);
+            }
         }
     }
     cursor
+}
+
+fn render_plain_preview(lines: &[Line<'static>], frame: &mut Frame, area: Rect) {
+    let inner = render_modal_shell("Preview", frame, area);
+    if lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "no preview",
+                theme::preview_placeholder_style(),
+            )),
+            inner,
+        );
+        return;
+    }
+    frame.render_widget(Paragraph::new(lines.to_vec()), inner);
 }
 
 /// Preset Preview: stacked Filter / Exclude / Highlight chip rows (strip style).
@@ -3044,7 +3069,10 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     }
     if !app.store.is_file() && app.ingest_done {
         spans.push(Span::raw(" "));
-        spans.push(theme::status_icon(theme::GLYPH_DISCONNECT, theme::warning()));
+        spans.push(theme::status_icon(
+            theme::GLYPH_DISCONNECT,
+            theme::warning(),
+        ));
     }
     if let Some(lock) = app.lock_badge_label() {
         spans.push(Span::raw(" "));
@@ -3099,6 +3127,9 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     } else if app.pending_yank {
         spans.push(Span::raw(" "));
         spans.push(theme::status_soft("y…", theme::warning()));
+    } else if app.pending_open {
+        spans.push(Span::raw(" "));
+        spans.push(theme::status_soft("o…", theme::warning()));
     } else if app.pending_d {
         spans.push(Span::raw(" "));
         spans.push(theme::status_soft("d…", theme::warning()));
@@ -3149,6 +3180,186 @@ pub fn help_modal_height(frame: Rect, content_rows: usize) -> u16 {
     let max = frame.height.saturating_sub(4).max(8);
     let want = (content_rows as u16).saturating_add(2); // border
     want.min(max).max(8)
+}
+
+/// Full-frame startup Dashboard (unbound source).
+pub fn render_dashboard(app: &App, frame: &mut Frame, area: Rect) {
+    let Some(dash) = app.dashboard.as_ref() else {
+        return;
+    };
+    let title = format!("{} alnav", theme::GLYPH_TITLE_DASHBOARD);
+    let inner = render_modal_shell(&title, frame, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let items = dash.items();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Select a source  ·  h/a/o/1-9 activate  ·  j/k move  ·  q quit",
+        theme::muted(),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("{} Stream", theme::GLYPH_SOURCE_HDC),
+        theme::muted(),
+    )));
+    for (i, item) in items.iter().enumerate() {
+        if i == 2 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("{} Files", theme::GLYPH_SOURCE_RECENT),
+                theme::muted(),
+            )));
+        }
+        let selected = i == dash.cursor;
+        let marker = if selected {
+            theme::candidate_prefix()
+        } else {
+            " ".repeat(theme::candidate_prefix().chars().count().max(1))
+        };
+        let hot = match item {
+            crate::dashboard::DashboardItem::Hdc => "h",
+            crate::dashboard::DashboardItem::Adb => "a",
+            crate::dashboard::DashboardItem::OpenFile => "o",
+            crate::dashboard::DashboardItem::Recent { index, .. } if *index < 9 => {
+                recent_hot(*index)
+            }
+            crate::dashboard::DashboardItem::Recent { .. } => " ",
+        };
+        let style = if selected {
+            theme::candidate_selected_style()
+        } else {
+            theme::candidate_unselected_style()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(format!("[{hot}] "), theme::muted()),
+            Span::styled(format!("{} ", item.glyph()), style),
+            Span::styled(item.label(), style),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn recent_hot(index: usize) -> &'static str {
+    match index {
+        0 => "1",
+        1 => "2",
+        2 => "3",
+        3 => "4",
+        4 => "5",
+        5 => "6",
+        6 => "7",
+        7 => "8",
+        8 => "9",
+        _ => " ",
+    }
+}
+
+/// Open-file source panel (`of`): left candidates + draft, right plain head preview.
+pub fn render_open_file_panel(
+    panel: &crate::source_panel::OpenFilePanel,
+    left_ratio: f32,
+    frame: &mut Frame,
+    frame_area: Rect,
+) -> Option<Position> {
+    let labels: Vec<String> = panel
+        .choices
+        .iter()
+        .map(|c| match c {
+            crate::source_panel::OpenFileChoice::Recent(p) => {
+                format!("{} {p}", theme::GLYPH_SOURCE_RECENT)
+            }
+            crate::source_panel::OpenFileChoice::Path(p) => {
+                let g = if p.is_dir {
+                    theme::GLYPH_SOURCE_DIR
+                } else {
+                    theme::GLYPH_SOURCE_FILE
+                };
+                format!("{g} {}", p.replacement)
+            }
+        })
+        .collect();
+    let styles = vec![Style::default(); labels.len()];
+    let checked = vec![false; labels.len()];
+    let actions = vec![ActionKind::None; labels.len()];
+    let right_lines: Vec<Line<'static>> = if let Some(status) = &panel.preview_status {
+        vec![Line::from(Span::styled(status.clone(), theme::muted()))]
+    } else {
+        panel
+            .preview_lines
+            .iter()
+            .map(|l| Line::from(Span::raw(l.clone())))
+            .collect()
+    };
+    let title = format!("{} Open file", theme::GLYPH_SOURCE_OPEN_FILE);
+    let mode = crate::picker::PickerMode::New;
+    render_picker(
+        &title,
+        &mode,
+        panel.draft.as_str(),
+        panel.draft.cursor(),
+        panel.draft.as_str(),
+        &[],
+        false,
+        None,
+        &labels,
+        &styles,
+        &checked,
+        &actions,
+        panel.selected,
+        "type a path or pick a recent file",
+        PickerRightPane::PlainLines(&right_lines),
+        left_ratio,
+        true,
+        Some(theme::GLYPH_SOURCE_OPEN_FILE),
+        frame,
+        frame_area,
+    )
+}
+
+/// Centered HDC / ADB chooser (`os`).
+pub fn render_stream_source_panel(
+    panel: &crate::source_panel::StreamSourcePanel,
+    frame: &mut Frame,
+    frame_area: Rect,
+) {
+    let width = modal_width(frame_area.width).min(40);
+    let height = 8;
+    let area = centered_modal_rect(frame_area, width, height);
+    let title = format!("{} Stream source", theme::GLYPH_SOURCE_HDC);
+    let inner = render_modal_shell(&title, frame, area);
+    let rows = [
+        (0usize, theme::GLYPH_SOURCE_HDC, "HDC  hilog", "h"),
+        (1usize, theme::GLYPH_SOURCE_ADB, "ADB  logcat", "a"),
+    ];
+    let mut lines = vec![Line::from(Span::styled(
+        "j/k move  ·  Enter / h / a select  ·  Esc cancel",
+        theme::muted(),
+    ))];
+    lines.push(Line::from(""));
+    for (idx, glyph, label, hot) in rows {
+        let selected = panel.selected == idx;
+        let style = if selected {
+            theme::candidate_selected_style()
+        } else {
+            theme::candidate_unselected_style()
+        };
+        let marker = if selected {
+            theme::candidate_prefix()
+        } else {
+            " ".repeat(theme::candidate_prefix().chars().count().max(1))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(format!("[{hot}] "), theme::muted()),
+            Span::styled(format!("{glyph} {label}"), style),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]
@@ -5116,7 +5327,10 @@ mod crash_detail_tests {
         assert!(!truncated);
         assert!(matches!(info.crash_type, CrashType::FatalException));
         assert_eq!(info.headline, "FATAL EXCEPTION: main");
-        assert_eq!(info.exception.as_deref(), Some("java.lang.RuntimeException"));
+        assert_eq!(
+            info.exception.as_deref(),
+            Some("java.lang.RuntimeException")
+        );
         assert_eq!(info.stack.len(), 2);
         assert!(info.stack[0].contains("Foo.bar"));
         assert!(info.stack[1].contains("Foo.baz"));
@@ -5168,10 +5382,7 @@ mod crash_detail_tests {
     #[test]
     fn crash_context_none_for_non_crash_signature() {
         let mut app = App::new(100);
-        push_stream_line(
-            &mut app,
-            r#"04-02 10:00:00.000  1  1 E Tag     : {"a":1}"#,
-        );
+        push_stream_line(&mut app, r#"04-02 10:00:00.000  1  1 E Tag     : {"a":1}"#);
         app.cursor = 0;
         let row = app.current_row().unwrap();
         assert!(crash_context_for_row(&app, &row).is_none());

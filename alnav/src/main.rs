@@ -2,6 +2,7 @@ mod app;
 mod bookmark;
 mod candidate_match;
 mod config;
+mod dashboard;
 mod export;
 mod filter_model;
 mod fuzzy;
@@ -11,10 +12,13 @@ mod ingest;
 mod input;
 mod keymap;
 mod model;
+mod path_complete;
 mod picker;
 mod preset;
 mod preview;
+mod recent;
 mod scan;
+mod source_panel;
 mod store;
 mod text_field;
 mod theme;
@@ -139,9 +143,7 @@ fn validate_source(cli: &TuiCli) -> Result<(), String> {
     if cli.device.is_some() && !cli.hdc && !cli.adb {
         return Err("--device requires --hdc or --adb".into());
     }
-    if !cli.hdc && !cli.adb && cli.file.is_none() {
-        return Err("one of -f FILE, --hdc, or --adb is required".into());
-    }
+    // No source → Dashboard (deferred bind). Filters may still be provided.
     Ok(())
 }
 
@@ -285,6 +287,12 @@ mod tests {
             validate_source(&cli(&["--device", "ANDROID"])).unwrap_err(),
             "--device requires --hdc or --adb"
         );
+    }
+
+    #[test]
+    fn no_source_is_allowed_for_dashboard() {
+        assert!(validate_source(&cli(&[])).is_ok());
+        assert!(validate_source(&cli(&["--tag", "Foo"])).is_ok());
     }
 
     #[test]
@@ -480,6 +488,68 @@ impl LiveIngestCtl {
     }
 }
 
+fn spawn_live_ctl(backend: LiveBackend, device: Option<String>) -> Result<LiveIngestCtl, String> {
+    let session = LiveIngestCtl::spawn_for_reconnect(backend, device.as_deref())?;
+    let (ring, child) = ingest::spawn_live_ingest(session);
+    Ok(LiveIngestCtl::new(
+        backend,
+        device,
+        ingest::IngestHandle::Ring(ring),
+        child,
+    ))
+}
+
+/// Bind a file source. When `switching`, resets non-F/E/H state after open succeeds.
+fn bind_file_source(app: &mut App, path: &str, switching: bool) -> Result<(), String> {
+    let path_buf = std::path::PathBuf::from(path);
+    if !path_buf.exists() {
+        return Err(format!("file not found: {path}"));
+    }
+    if path_buf.is_dir() {
+        return Err(format!("not a file: {path}"));
+    }
+    let file_store = store::FileStore::open(&path_buf).map_err(|e| e.to_string())?;
+    if switching {
+        app.reset_for_source_switch();
+    }
+    app.set_file_store(file_store);
+    app.export_source = export::ExportSource::File(path_buf.display().to_string());
+    app.dashboard = None;
+    app.close_source_panels();
+    app.record_recent_file(&path_buf);
+    if app.filter_active() {
+        app.rebuild_visible();
+    }
+    Ok(())
+}
+
+/// Bind HDC/ADB. Clears `time_bound` (live has no interactive time window).
+fn bind_live_source(
+    app: &mut App,
+    live: &mut Option<LiveIngestCtl>,
+    backend: LiveBackend,
+    switching: bool,
+) -> Result<(), String> {
+    let ctl = spawn_live_ctl(backend, None)?;
+    if switching {
+        *live = None;
+        app.reset_for_source_switch();
+    }
+    app.time_bound = None;
+    app.export_source = match backend {
+        LiveBackend::Hdc => export::ExportSource::Hdc { device: None },
+        LiveBackend::Adb => export::ExportSource::Adb { device: None },
+    };
+    *live = Some(ctl);
+    app.dashboard = None;
+    app.close_source_panels();
+    app.ingest_done = false;
+    if app.filter_active() {
+        app.rebuild_visible();
+    }
+    Ok(())
+}
+
 /// Reject capture children that die during the post-spawn grace window.
 fn ensure_capture_alive(
     mut session: alnav::live::LiveSession,
@@ -578,19 +648,9 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
     app.config = app_config;
     app.keymap = keymap_store;
     app.config_dir = config_dir.clone();
+    app.recent = recent::RecentFiles::load(&config_dir);
     app.groups = groups;
     app.time_bound = time_bound;
-    app.export_source = if cli.hdc {
-        export::ExportSource::Hdc {
-            device: cli.device.clone(),
-        }
-    } else if cli.adb {
-        export::ExportSource::Adb {
-            device: cli.device.clone(),
-        }
-    } else {
-        export::ExportSource::File(cli.file.clone().unwrap())
-    };
     if let Some(hint) = theme_status.status_hint() {
         app.set_flash(hint);
     }
@@ -609,28 +669,33 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         } else {
             LiveBackend::Adb
         };
-        let session = match backend {
-            LiveBackend::Hdc => alnav::hdc::spawn_hilog(cli.device.as_deref()),
-            LiveBackend::Adb => alnav::adb::spawn_logcat(cli.device.as_deref()),
+        app.export_source = if cli.hdc {
+            export::ExportSource::Hdc {
+                device: cli.device.clone(),
+            }
+        } else {
+            export::ExportSource::Adb {
+                device: cli.device.clone(),
+            }
         };
-        let session = match session {
-            Ok(session) => session,
+        match spawn_live_ctl(backend, cli.device.clone()) {
+            Ok(ctl) => Some(ctl),
             Err(error) => {
                 eprintln!("alnav: {error}");
                 std::process::exit(2);
             }
-        };
-        let (ring, child) = ingest::spawn_live_ingest(session);
-        Some(LiveIngestCtl::new(
-            backend,
-            cli.device.clone(),
-            ingest::IngestHandle::Ring(ring),
-            child,
-        ))
+        }
+    } else if let Some(path) = cli.file.clone() {
+        match bind_file_source(&mut app, &path, false) {
+            Ok(()) => None,
+            Err(error) => {
+                eprintln!("alnav: {error}");
+                std::process::exit(2);
+            }
+        }
     } else {
-        let path = cli.file.clone().unwrap();
-        let file_store = store::FileStore::open(&path).map_err(|e| e.to_string())?;
-        app.set_file_store(file_store);
+        // Preserve startup time_bound until a source is chosen; stream bind clears it.
+        app.dashboard = Some(dashboard::DashboardState::new(app.recent.clone()));
         None
     };
 
@@ -727,6 +792,9 @@ fn run<B: ratatui::backend::Backend>(
             }
         }
         app.poll_file_store();
+        if let Some(panel) = app.open_file_panel.as_mut() {
+            panel.poll_preview();
+        }
         app.ensure_vocab_candidates();
         app.poll_vocab_match();
         app.poll_summary_job();
@@ -748,6 +816,16 @@ fn run<B: ratatui::backend::Backend>(
             terminal
                 .draw(|frame| {
                     let frame_area = frame.area();
+                    let mut hw_cursor: Option<Position> = None;
+
+                    if app.dashboard.is_some() && app.open_file_panel.is_none() {
+                        ui::render_dashboard(app, frame, frame_area);
+                        if let Some(pos) = hw_cursor {
+                            frame.set_cursor_position(pos);
+                        }
+                        return;
+                    }
+
                     let outer_w = frame_area.width;
                     let filter_h = ui::filter_strip_height(app, outer_w);
                     let exclude_h = ui::exclude_strip_height(app, outer_w);
@@ -768,12 +846,22 @@ fn run<B: ratatui::backend::Backend>(
                     ui::render_status_bar(app, frame, status_area);
 
                     let modal_w = ui::modal_width(frame_area.width);
-                    let mut hw_cursor: Option<Position> = None;
                     let preview_limit =
                         ui::picker_preview_capacity(frame_area, ui::PICKER_PREVIEW_LEFT_RATIO);
                     let preview_inner_w =
                         ui::picker_preview_inner_width(frame_area, ui::PICKER_PREVIEW_LEFT_RATIO);
-                    if let Some(data) = picker_render_data(app, preview_limit, preview_inner_w) {
+                    if let Some(panel) = app.open_file_panel.as_ref() {
+                        hw_cursor = ui::render_open_file_panel(
+                            panel,
+                            app.config.picker_left_ratio,
+                            frame,
+                            frame_area,
+                        );
+                    } else if let Some(panel) = app.stream_source_panel.as_ref() {
+                        ui::render_stream_source_panel(panel, frame, frame_area);
+                    } else if let Some(data) =
+                        picker_render_data(app, preview_limit, preview_inner_w)
+                    {
                         let picker_area = ui::picker_frame_rect(frame_area, data.show_preview);
                         let right_pane = match (&data.detail_row, &data.preset_preview) {
                             (Some(row), _) => ui::PickerRightPane::Detail(row.as_ref()),
@@ -923,6 +1011,18 @@ fn run<B: ratatui::backend::Backend>(
         // so Ctrl+C cancels the draft like Esc, instead of quitting in Normal.
         if app.preset_name.is_some() {
             handle_preset_name_key(app, key);
+            continue;
+        }
+        if app.open_file_panel.is_some() {
+            handle_open_file_panel_key(app, live, key);
+            continue;
+        }
+        if app.stream_source_panel.is_some() {
+            handle_stream_source_panel_key(app, live, key);
+            continue;
+        }
+        if app.dashboard.is_some() {
+            handle_dashboard_key(app, live, key);
             continue;
         }
         if app.picker.is_some() {
@@ -2183,6 +2283,150 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
     }
 }
 
+fn handle_dashboard_key(app: &mut App, live: &mut Option<LiveIngestCtl>, key: event::KeyEvent) {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+        app.should_quit = true;
+        return;
+    }
+    let Some(dash) = app.dashboard.as_mut() else {
+        return;
+    };
+    let action = dashboard::handle_key(dash, key.code);
+    match action {
+        Some(dashboard::DashboardAction::Quit) => app.should_quit = true,
+        Some(dashboard::DashboardAction::BindHdc) => {
+            if let Err(e) = bind_live_source(app, live, LiveBackend::Hdc, false) {
+                app.set_flash(e);
+            }
+        }
+        Some(dashboard::DashboardAction::BindAdb) => {
+            if let Err(e) = bind_live_source(app, live, LiveBackend::Adb, false) {
+                app.set_flash(e);
+            }
+        }
+        Some(dashboard::DashboardAction::OpenFilePicker) => {
+            app.open_file_source_panel(true);
+        }
+        Some(dashboard::DashboardAction::OpenRecent(path)) => {
+            *live = None;
+            if let Err(e) = bind_file_source(app, &path, false) {
+                app.set_flash(e);
+                // Stay on dashboard; drop missing recent entry.
+                app.recent.remove(&path);
+                let _ = app.recent.save(&app.config_dir);
+                if let Some(d) = app.dashboard.as_mut() {
+                    d.recent = app.recent.clone();
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+fn handle_open_file_panel_key(
+    app: &mut App,
+    live: &mut Option<LiveIngestCtl>,
+    key: event::KeyEvent,
+) {
+    use crossterm::event::KeyModifiers;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if (key.code == KeyCode::Char('c') && ctrl) || key.code == KeyCode::Esc {
+        app.open_file_panel = None;
+        return;
+    }
+
+    let switching = app.dashboard.is_none();
+    let recent = app.recent.clone();
+    let mut confirm_path: Option<String> = None;
+    let mut flash: Option<&'static str> = None;
+    {
+        let Some(panel) = app.open_file_panel.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(path) = panel
+                    .choices
+                    .get(panel.selected)
+                    .and_then(|c| c.path_to_open())
+                {
+                    confirm_path = Some(path.display().to_string());
+                } else {
+                    let draft = panel.draft.as_str().trim();
+                    if draft.is_empty() {
+                        flash = Some("NO FILE");
+                    } else {
+                        confirm_path =
+                            Some(path_complete::expand_user(draft).display().to_string());
+                    }
+                }
+            }
+            // Arrows only — `j`/`k` must type into the path draft.
+            KeyCode::Up => panel.move_sel(-1),
+            KeyCode::Down => panel.move_sel(1),
+            KeyCode::Tab => panel.apply_tab_complete(&recent),
+            code => {
+                if apply_text_field_key(&mut panel.draft, code, ctrl) {
+                    panel.refresh_choices(&recent);
+                }
+            }
+        }
+    }
+    if let Some(msg) = flash {
+        app.set_flash(msg);
+    }
+    if let Some(path) = confirm_path {
+        *live = None;
+        if let Err(e) = bind_file_source(app, &path, switching) {
+            app.set_flash(e);
+        }
+    }
+}
+
+fn handle_stream_source_panel_key(
+    app: &mut App,
+    live: &mut Option<LiveIngestCtl>,
+    key: event::KeyEvent,
+) {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL)
+        || key.code == KeyCode::Esc
+    {
+        app.stream_source_panel = None;
+        return;
+    }
+    let switching = app.dashboard.is_none();
+    let bind = {
+        let Some(panel) = app.stream_source_panel.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                panel.move_by(1);
+                None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                panel.move_by(-1);
+                None
+            }
+            KeyCode::Char('h') => Some(LiveBackend::Hdc),
+            KeyCode::Char('a') => Some(LiveBackend::Adb),
+            KeyCode::Enter => {
+                if panel.is_hdc() {
+                    Some(LiveBackend::Hdc)
+                } else {
+                    Some(LiveBackend::Adb)
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(backend) = bind {
+        if let Err(e) = bind_live_source(app, live, backend, switching) {
+            app.set_flash(e);
+        }
+    }
+}
+
 fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     use app::Mode;
 
@@ -2200,6 +2444,10 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     }
     if app.pending_time {
         app.cancel_time_pending();
+        return;
+    }
+    if app.pending_open {
+        app.cancel_open_pending();
         return;
     }
 
@@ -2427,6 +2675,7 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
         app.pending_lock = false;
         app.pending_time = false;
         app.pending_m = false;
+        app.pending_open = false;
         app.pending_leader = true;
         return true;
     }
@@ -2573,6 +2822,26 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
     }
 
     if handle_leader_key(app, code) {
+        return;
+    }
+
+    // Open/switch source operator pending (`o` + `f`/`s`).
+    if app.pending_open {
+        app.pending_open = false;
+        if app.focus == Focus::LogList {
+            if km_code(app, ActionId::OpenCancel, code) {
+                return;
+            }
+            if km_code(app, ActionId::OpenFile, code) {
+                app.open_file_source_panel(false);
+                return;
+            }
+            if km_code(app, ActionId::OpenStream, code) {
+                app.open_stream_source_panel(false);
+                return;
+            }
+            app.set_flash("of=file  os=stream");
+        }
         return;
     }
 
@@ -2864,7 +3133,12 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             app.pending_time = false;
             app.pending_m = false;
             app.pending_leader = false;
+            app.pending_open = false;
             app.pending_yank = true;
+            return;
+        }
+        if km_code(app, ActionId::LogListOpen, code) {
+            app.begin_open_op();
             return;
         }
         if km_code(app, ActionId::LogListYankMsgLine, code) {

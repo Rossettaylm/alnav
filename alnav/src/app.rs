@@ -315,6 +315,16 @@ pub struct App {
     pub pending_m: bool,
     /// Armed by leader key (`Space`); second key opens fzf-style picker (Task 5).
     pub pending_leader: bool,
+    /// Armed by `o` on LogList; second key opens file (`f`) or stream (`s`) source panel.
+    pub pending_open: bool,
+    /// One-shot startup Dashboard (unbound source). `None` after first bind.
+    pub dashboard: Option<crate::dashboard::DashboardState>,
+    /// Persisted recent files (config dir).
+    pub recent: crate::recent::RecentFiles,
+    /// Open-file source panel (`of` / Dashboard Open file…).
+    pub open_file_panel: Option<crate::source_panel::OpenFilePanel>,
+    /// Centered HDC/ADB panel (`os`).
+    pub stream_source_panel: Option<crate::source_panel::StreamSourcePanel>,
     /// Open fzf-style picker session (Unified Manage / Filter / Highlight / Bookmark / Exclude).
     pub picker: Option<crate::picker::PickerSession>,
     /// Session bookmarks (M2).
@@ -435,6 +445,11 @@ impl App {
             pending_time: false,
             pending_m: false,
             pending_leader: false,
+            pending_open: false,
+            dashboard: None,
+            recent: crate::recent::RecentFiles::default(),
+            open_file_panel: None,
+            stream_source_panel: None,
             picker: None,
             bookmarks: BookmarkList::default(),
             bookmark_row_ids: HashSet::new(),
@@ -600,11 +615,118 @@ impl App {
         self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
+        self.pending_open = false;
         let mut session = PickerSession::open(kind);
         if prefer_new {
             session.enter_new();
         }
         self.picker = Some(session);
+    }
+
+    /// Whether the session still has no bound source (Dashboard active).
+    pub fn is_unbound(&self) -> bool {
+        self.dashboard.is_some()
+    }
+
+    /// Arm `o` operator-pending (open/switch source).
+    pub fn begin_open_op(&mut self) {
+        self.clear_visual();
+        self.pending_yank = false;
+        self.pending_d = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.pending_time = false;
+        self.pending_m = false;
+        self.pending_leader = false;
+        self.pending_open = true;
+    }
+
+    pub fn cancel_open_pending(&mut self) {
+        self.pending_open = false;
+    }
+
+    pub fn open_file_source_panel(&mut self, from_dashboard: bool) {
+        self.pending_open = false;
+        self.stream_source_panel = None;
+        self.picker = None;
+        self.open_file_panel = Some(crate::source_panel::OpenFilePanel::open(
+            &self.recent,
+            from_dashboard,
+        ));
+    }
+
+    pub fn open_stream_source_panel(&mut self, from_dashboard: bool) {
+        self.pending_open = false;
+        self.open_file_panel = None;
+        self.picker = None;
+        self.stream_source_panel =
+            Some(crate::source_panel::StreamSourcePanel::new(from_dashboard));
+    }
+
+    pub fn close_source_panels(&mut self) {
+        self.open_file_panel = None;
+        self.stream_source_panel = None;
+        self.pending_open = false;
+    }
+
+    /// Reset session for a confirmed source switch. Keeps Filter / Exclude / Highlight only.
+    pub fn reset_for_source_switch(&mut self) {
+        self.store = RowStore::stream(self.max_lines, self.matched_cap);
+        self.visible = Visible::default();
+        self.file_filter_gen = 0;
+        self.ingest_done = false;
+        self.clear_bookmarks();
+        self.clear_visual();
+        self.lock_pid = None;
+        self.lock_tid = None;
+        self.time_bound = None;
+        self.view_focus = ViewFocus::default();
+        self.time_panel = None;
+        self.detail = DetailView::Closed;
+        self.help_open = false;
+        self.help_scroll = 0;
+        self.summary_view = SummaryView::Closed;
+        self.summary_scroll = 0;
+        self.highlight_box = HighlightBox::default();
+        self.active_highlight = None;
+        self.pending_jump_first = None;
+        self.highlight_scan = HighlightScanState::default();
+        self.highlight_domain = None;
+        self.vocab = Vocab::default();
+        self.vocab_match.clear();
+        self.pending_d = false;
+        self.pending_yank = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.pending_time = false;
+        self.pending_m = false;
+        self.pending_leader = false;
+        self.pending_open = false;
+        self.close_source_panels();
+        self.picker = None;
+        self.preset_name = None;
+        self.cursor = 0;
+        self.list_offset = 0;
+        self.next_row_id = 1;
+        self.match_stats_stale = true;
+        self.cached_match_stats = None;
+        self.focus = Focus::LogList;
+        self.mode = Mode::Normal;
+        self.following = true;
+        self.status_msg = None;
+        self.status_flash_until = None;
+        // Keep: groups / excludes / highlight_groups
+    }
+
+    /// Record a successfully opened file into recent + persist.
+    pub fn record_recent_file(&mut self, path: &std::path::Path) {
+        let limit = self.config.recent_files_limit;
+        self.recent.record(path, limit);
+        if let Err(e) = self.recent.save(&self.config_dir) {
+            self.set_flash(format!("RECENT SAVE: {e}"));
+        }
     }
 
     /// Close the fzf-style picker and return focus to LogList.
@@ -1457,6 +1579,7 @@ impl App {
         self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
+        self.pending_open = false;
         self.cursor = 0;
         self.list_offset = 0;
         self.match_stats_stale = true;
@@ -1834,6 +1957,7 @@ impl App {
         self.pending_time = false;
         self.pending_exclude = false;
         self.pending_leader = false;
+        self.pending_open = false;
         self.pending_chip = true;
     }
 
@@ -1846,6 +1970,7 @@ impl App {
         self.pending_time = false;
         self.pending_chip = false;
         self.pending_leader = false;
+        self.pending_open = false;
         self.pending_exclude = true;
     }
 
@@ -1872,6 +1997,7 @@ impl App {
         self.pending_exclude = false;
         self.pending_time = false;
         self.pending_leader = false;
+        self.pending_open = false;
         self.pending_lock = true;
     }
 
@@ -1891,6 +2017,7 @@ impl App {
         self.pending_lock = false;
         self.pending_m = false;
         self.pending_leader = false;
+        self.pending_open = false;
         self.pending_time = true;
     }
 
@@ -3431,6 +3558,46 @@ mod tests {
         assert!(!app.pending_chip);
         assert!(app.visual_anchor.is_none());
         assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
+    }
+
+    #[test]
+    fn reset_for_source_switch_keeps_only_filter_exclude_highlight() {
+        use crate::highlight_model::HighlightGroup;
+        use crate::input::{Chip, ChipField};
+
+        let mut app = App::new(100);
+        app.groups = GroupList {
+            groups: vec![filter_group("keep", "A")],
+            excludes: vec![crate::filter_model::ExcludeEntry {
+                chip: Chip {
+                    field: ChipField::Tag,
+                    value: "noise".into(),
+                },
+                enabled: true,
+            }],
+        };
+        app.push_or_find_highlight_group(HighlightGroup::from_pattern("err").unwrap());
+        app.lock_pid = Some("9".into());
+        app.time_bound = Some(TimeBound {
+            since: Some("01-01 00:00:00.000".into()),
+            until: None,
+        });
+        let (tx, rx) = mpsc::channel();
+        tx.send(row("A")).unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.pending_open = true;
+
+        app.reset_for_source_switch();
+
+        assert!(app.rows().is_empty());
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.groups.excludes.len(), 1);
+        assert_eq!(app.highlight_groups.groups.len(), 1);
+        assert!(app.lock_pid.is_none());
+        assert!(app.time_bound.is_none());
+        assert!(!app.pending_open);
+        assert!(app.following);
     }
 
     #[test]
