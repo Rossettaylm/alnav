@@ -6,12 +6,25 @@ pub use crate::live::{
     LiveFilter as HdcLiveFilter, LiveLines as HdcLines, LiveSession as HdcSession,
 };
 
+/// Single `hdc shell` script so a format string with a space stays one token
+/// on the device shell (same pitfall as ADB + toybox `date`).
+const CLOCK_SHELL: &str = "date '+%m-%d %H:%M:%S'";
+
 fn clock_command(device: Option<&str>) -> Command {
     let mut command = Command::new("hdc");
     if let Some(serial) = device {
         command.arg("-t").arg(serial);
     }
-    command.arg("shell").arg("date").arg("+%m-%d %H:%M:%S");
+    command.arg("shell").arg(CLOCK_SHELL);
+    command
+}
+
+fn ping_command(device: Option<&str>) -> Command {
+    let mut command = Command::new("hdc");
+    if let Some(serial) = device {
+        command.arg("-t").arg(serial);
+    }
+    command.arg("shell").arg("echo").arg("ok");
     command
 }
 
@@ -22,6 +35,16 @@ fn capture_command(device: Option<&str>) -> Command {
     }
     command.arg("hilog").arg("--no-block");
     command
+}
+
+/// True when a trivial `hdc shell echo ok` succeeds.
+/// Independent of [`now_marker`]: clock-query failure must not be treated as
+/// unreachable.
+pub fn device_reachable(device: Option<&str>) -> bool {
+    let Ok(output) = ping_command(device).output() else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "ok"
 }
 
 /// Query the device's current time as `MM-DD HH:MM:SS`, matching the prefix
@@ -102,13 +125,18 @@ mod tests {
     fn hdc_commands_use_t_device_selector() {
         let clock = clock_command(Some("SERIAL"));
         let capture = capture_command(Some("SERIAL"));
+        let ping = ping_command(Some("SERIAL"));
         assert_eq!(
             clock.get_args().collect::<Vec<_>>(),
-            ["-t", "SERIAL", "shell", "date", "+%m-%d %H:%M:%S"]
+            ["-t", "SERIAL", "shell", CLOCK_SHELL]
         );
         assert_eq!(
             capture.get_args().collect::<Vec<_>>(),
             ["-t", "SERIAL", "hilog", "--no-block"]
+        );
+        assert_eq!(
+            ping.get_args().collect::<Vec<_>>(),
+            ["-t", "SERIAL", "shell", "echo", "ok"]
         );
     }
 }

@@ -459,19 +459,24 @@ impl LiveIngestCtl {
 
     /// Probe device reachability, then spawn. Spawn alone is not enough: `hdc`
     /// / `adb` often start successfully with no device and exit immediately.
+    ///
+    /// Reachability uses [`alnav::adb::device_reachable`] /
+    /// [`alnav::hdc::device_reachable`], **not** [`now_marker`]: a failed clock
+    /// query only disables history filtering (CLI/TUI history fallback) and must
+    /// not be reported as "device unreachable".
     fn spawn_for_reconnect(
         backend: LiveBackend,
         device: Option<&str>,
     ) -> Result<alnav::live::LiveSession, String> {
         match backend {
             LiveBackend::Hdc => {
-                if alnav::hdc::now_marker(device).is_none() {
+                if !alnav::hdc::device_reachable(device) {
                     return Err("hdc device unreachable".into());
                 }
                 alnav::hdc::spawn_hilog(device)
             }
             LiveBackend::Adb => {
-                if alnav::adb::now_marker(device).is_none() {
+                if !alnav::adb::device_reachable(device) {
                     return Err("adb device unreachable".into());
                 }
                 alnav::adb::spawn_logcat(device)
