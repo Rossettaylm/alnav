@@ -66,14 +66,17 @@ pub const GLYPH_SOURCE_FILE: &str = "\u{f15b}"; // nf-fa-file
 pub const GLYPH_SOURCE_DIR: &str = "\u{f07b}"; // nf-fa-folder
 pub const GLYPH_TITLE_DASHBOARD: &str = "\u{f0e4}"; // nf-fa-tachometer
 
-/// Five-line, ASCII-only Dashboard wordmark. Keeping this in the theme module
-/// makes the startup branding a single visual asset alongside semantic glyphs.
-pub const DASHBOARD_LOGO: [&str; 5] = [
-    "  #     #       #   #     #     #   #",
-    " # #    #       ##  #    # #    #   #",
-    "#####   #       # # #   #####   #   #",
-    "#   #   #       #  ##   #   #    # # ",
-    "#   #   #####   #   #   #   #     #  ",
+/// Six-line dashboard-nvim-style Unicode wordmark. Keeping this in the theme
+/// module makes the startup branding a single visual asset alongside semantic
+/// glyphs.
+pub const DASHBOARD_LOGO_WIDTH: u16 = 43;
+pub const DASHBOARD_LOGO: [&str; 6] = [
+    " █████╗ ██╗     ███╗   ██╗ █████╗ ██╗   ██╗",
+    "██╔══██╗██║     ████╗  ██║██╔══██╗██║   ██║",
+    "███████║██║     ██╔██╗ ██║███████║██║   ██║",
+    "██╔══██║██║     ██║╚██╗██║██╔══██║╚██╗ ██╔╝",
+    "██║  ██║███████╗██║ ╚████║██║  ██║ ╚████╔╝ ",
+    "╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝  ╚═══╝  ",
 ];
 
 /// Map a chip field to its nerdfont icon glyph.
@@ -914,13 +917,15 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_logo_is_five_line_ascii_with_expected_width() {
+    fn dashboard_logo_is_six_line_unicode_block_wordmark() {
         use unicode_width::UnicodeWidthStr;
 
-        assert_eq!(DASHBOARD_LOGO.len(), 5);
+        assert_eq!(DASHBOARD_LOGO.len(), 6);
+        assert!(DASHBOARD_LOGO[0].contains("█████"));
         for line in DASHBOARD_LOGO {
-            assert!(line.is_ascii());
-            assert!((36..=40).contains(&UnicodeWidthStr::width(line)));
+            assert!(!line.is_ascii());
+            assert!(line.chars().all(|ch| " █╗╔═║╝╚".contains(ch)));
+            assert_eq!(UnicodeWidthStr::width(line), 43);
         }
     }
 

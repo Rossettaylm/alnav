@@ -18,7 +18,7 @@ pub enum DashboardDensity {
 
 impl DashboardDensity {
     pub fn for_size(content_width: u16, height: u16) -> Self {
-        if height >= FULL_PRESENTATION_ROWS && content_width >= 40 {
+        if height >= FULL_PRESENTATION_ROWS && content_width >= theme::DASHBOARD_LOGO_WIDTH {
             Self::Full
         } else if height >= 9 {
             Self::Compact
@@ -289,8 +289,12 @@ mod tests {
             DashboardDensity::Compact
         );
         assert_eq!(
-            DashboardDensity::for_size(39, FULL_PRESENTATION_ROWS),
+            DashboardDensity::for_size(theme::DASHBOARD_LOGO_WIDTH - 1, FULL_PRESENTATION_ROWS),
             DashboardDensity::Compact
+        );
+        assert_eq!(
+            DashboardDensity::for_size(theme::DASHBOARD_LOGO_WIDTH, FULL_PRESENTATION_ROWS),
+            DashboardDensity::Full
         );
         assert_eq!(DashboardDensity::for_size(72, 8), DashboardDensity::Minimal);
     }

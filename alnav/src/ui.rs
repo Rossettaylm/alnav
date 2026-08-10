@@ -3270,10 +3270,6 @@ pub fn render_dashboard(app: &App, frame: &mut Frame, area: Rect) {
         ));
     }
 
-    if density == crate::dashboard::DashboardDensity::Full {
-        lines.push(Line::from(""));
-    }
-
     let range = dash.visible_recent_range(recent_capacity);
     if density != crate::dashboard::DashboardDensity::Minimal {
         let recent_title = if dash.recent.paths.len() > recent_capacity && !range.is_empty() {
@@ -3686,6 +3682,8 @@ mod tests {
         let app = dashboard_app(vec!["/tmp/app.log".into()]);
         let text = render_dashboard_text(&app, 100, 30);
 
+        assert!(text.contains("█████╗"));
+        assert!(text.contains("╚══════╝"));
         assert!(text.contains("App / Android Log Navigator"));
         assert!(text.contains("Quick Actions"));
         assert!(text.contains("HDC — HarmonyOS hilog"));
@@ -3694,6 +3692,19 @@ mod tests {
         assert!(text.contains("Recent Files"));
         assert!(text.contains("j/k move"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn dashboard_standard_terminal_keeps_full_header_and_footer() {
+        let app = dashboard_app(Vec::new());
+        let text = render_dashboard_text(&app, 80, 24);
+
+        assert!(text.contains("█████╗"));
+        assert!(text.contains("╚══════╝"));
+        assert!(text.contains("App / Android Log Navigator"));
+        assert!(text.contains("Quick Actions"));
+        assert!(text.contains("Recent Files"));
+        assert!(text.contains("j/k move"));
     }
 
     #[test]
