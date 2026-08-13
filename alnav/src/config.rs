@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::theme::{self, UiTokens};
+use crate::theme;
 
 /// Resolve config directory: `--config-path` > `$ALNAV_HOME` > `~/.config/alnav`.
 pub fn resolve_config_dir(cli_override: Option<&Path>) -> PathBuf {
@@ -63,6 +63,8 @@ pub struct AppConfig {
     pub log_dirs: Vec<String>,
     /// Case-insensitive suffix filter for corpus files (include the dot).
     pub log_extensions: Vec<String>,
+    /// Named palette from `config.toml` (folding happens in `palette_by_name`).
+    pub theme: String,
 }
 
 impl AppConfig {
@@ -73,6 +75,7 @@ impl AppConfig {
             recent_files_limit: 20,
             log_dirs: Vec::new(),
             log_extensions: default_log_extensions(),
+            theme: "default".into(),
         }
     }
 
@@ -109,6 +112,7 @@ struct ConfigToml {
     recent_files_limit: Option<usize>,
     log_dirs: Option<Vec<String>>,
     log_extensions: Option<Vec<String>>,
+    theme: Option<String>,
 }
 
 /// Normalize configured extensions: trim, ensure leading `.`, lowercase.
@@ -168,6 +172,12 @@ pub fn load_config(config_dir: &Path) -> (AppConfig, ConfigLoadStatus) {
                 }
                 cfg.log_dirs = normalize_log_dirs(t.log_dirs);
                 cfg.log_extensions = normalize_log_extensions(t.log_extensions);
+                if let Some(name) = t.theme {
+                    let name = name.trim().to_string();
+                    if !name.is_empty() {
+                        cfg.theme = name;
+                    }
+                }
                 (cfg, ConfigLoadStatus::Loaded(path))
             }
             Err(e) => (
@@ -188,29 +198,53 @@ pub fn load_config(config_dir: &Path) -> (AppConfig, ConfigLoadStatus) {
     }
 }
 
-/// Load `$config_dir/theme.toml` into [`theme`] and return load status.
-pub fn load_theme(config_dir: &Path) -> ThemeLoadStatus {
+/// Load named palette plus optional `$config_dir/theme.toml` overlay.
+pub fn load_theme(config_dir: &Path, theme_name: &str) -> ThemeLoadStatus {
+    let mut unknown: Option<String> = None;
+    let canonical = crate::palette::resolve_theme_name(theme_name).unwrap_or("default");
+    let base = match crate::theme_builtins::palette_by_name(theme_name) {
+        Some(p) => p,
+        None => {
+            unknown = Some(format!("unknown theme '{theme_name}'"));
+            crate::palette::Palette::default_ansi()
+        }
+    };
     let path = config_dir.join("theme.toml");
     if !path.is_file() {
-        theme::install(UiTokens::builtin());
-        return ThemeLoadStatus::Builtin;
-    }
-    match fs::read_to_string(&path) {
-        Ok(text) => match theme::parse_theme_toml(&text) {
-            Ok(tokens) => {
-                theme::install(tokens);
-                ThemeLoadStatus::Loaded(path)
-            }
+        theme::install(theme::map_to_tokens_for(&base, canonical));
+        if let Some(error) = unknown {
+            return ThemeLoadStatus::Fallback {
+                path: config_dir.to_path_buf(),
+                error,
+            };
+        }
+        if crate::palette::resolve_theme_name(theme_name) == Some("default") {
+            ThemeLoadStatus::Builtin
+        } else {
+            ThemeLoadStatus::Loaded(config_dir.to_path_buf())
+        }
+    } else {
+        match fs::read_to_string(&path) {
+            Ok(text) => match theme::apply_overlay_for(base, canonical, &text) {
+                Ok(tokens) => {
+                    theme::install(tokens);
+                    if let Some(error) = unknown {
+                        ThemeLoadStatus::Fallback { path, error }
+                    } else {
+                        ThemeLoadStatus::Loaded(path)
+                    }
+                }
+                Err(e) => {
+                    theme::install(theme::map_to_tokens_for(&base, canonical));
+                    ThemeLoadStatus::Fallback { path, error: e }
+                }
+            },
             Err(e) => {
-                theme::install(UiTokens::builtin());
-                ThemeLoadStatus::Fallback { path, error: e }
-            }
-        },
-        Err(e) => {
-            theme::install(UiTokens::builtin());
-            ThemeLoadStatus::Fallback {
-                path,
-                error: e.to_string(),
+                theme::install(theme::map_to_tokens_for(&base, canonical));
+                ThemeLoadStatus::Fallback {
+                    path,
+                    error: e.to_string(),
+                }
             }
         }
     }
@@ -219,6 +253,7 @@ pub fn load_theme(config_dir: &Path) -> ThemeLoadStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
     use std::sync::Mutex;
 
     /// Serialize theme install across tests (global OnceLock-like install).
@@ -260,7 +295,7 @@ mod tests {
         use ratatui::style::Color;
         let _g = THEME_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let st = load_theme(dir.path());
+        let st = load_theme(dir.path(), "default");
         assert_eq!(st, ThemeLoadStatus::Builtin);
         assert_eq!(theme::accent(), Color::Cyan);
     }
@@ -271,7 +306,7 @@ mod tests {
         let _g = THEME_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("theme.toml"), "accent = !!!\n").unwrap();
-        let st = load_theme(dir.path());
+        let st = load_theme(dir.path(), "default");
         match &st {
             ThemeLoadStatus::Fallback { error, .. } => {
                 assert!(!error.is_empty());
@@ -292,12 +327,77 @@ mod tests {
             "accent = \"#ff00aa\"\nsuccess = \"blue\"\n",
         )
         .unwrap();
-        let st = load_theme(dir.path());
+        let st = load_theme(dir.path(), "default");
         assert!(matches!(st, ThemeLoadStatus::Loaded(_)));
         assert_eq!(theme::accent(), Color::Rgb(255, 0, 170));
         assert_eq!(theme::success(), Color::Blue);
         // reset builtin for other tests
-        theme::install(UiTokens::builtin());
+        theme::install(theme::UiTokens::builtin());
+    }
+
+    #[test]
+    fn unknown_theme_name_falls_back_default() {
+        let _g = THEME_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let st = load_theme(dir.path(), "not-a-theme");
+        match &st {
+            ThemeLoadStatus::Fallback { error, .. } => {
+                assert!(error.contains("unknown theme"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(theme::accent(), Color::Cyan);
+    }
+
+    #[test]
+    fn palette_overlay_changes_error_keeps_accent() {
+        let _g = THEME_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("theme.toml"),
+            "[palette]\nred = \"#ff0000\"\n",
+        )
+        .unwrap();
+        let st = load_theme(dir.path(), "kanagawa");
+        assert!(matches!(st, ThemeLoadStatus::Loaded(_)));
+        assert_eq!(
+            theme::minimap_severe_style().fg,
+            Some(Color::Rgb(255, 0, 0))
+        );
+        let p = crate::theme_builtins::palette_by_name("kanagawa").unwrap();
+        assert_eq!(theme::accent(), p.blue);
+        theme::install(theme::UiTokens::builtin());
+    }
+
+    #[test]
+    fn highlight_len_7_discards_entire_overlay() {
+        let _g = THEME_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("theme.toml"),
+            "accent = \"#ffffff\"\nhighlight = [\"#000000\",\"#000000\",\"#000000\",\"#000000\",\"#000000\",\"#000000\",\"#000000\"]\n",
+        )
+        .unwrap();
+        let st = load_theme(dir.path(), "default");
+        assert!(matches!(st, ThemeLoadStatus::Fallback { .. }));
+        assert_eq!(theme::accent(), Color::Cyan);
+        theme::install(theme::UiTokens::builtin());
+    }
+
+    #[test]
+    fn load_config_reads_theme_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "theme = \"Nord\"\n").unwrap();
+        let (cfg, st) = load_config(dir.path());
+        assert!(matches!(st, ConfigLoadStatus::Loaded(_)));
+        assert_eq!(cfg.theme, "Nord");
+    }
+
+    #[test]
+    fn load_config_defaults_theme_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, _) = load_config(dir.path());
+        assert_eq!(cfg.theme, "default");
     }
 
     #[test]

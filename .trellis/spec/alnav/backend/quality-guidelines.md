@@ -21,8 +21,9 @@ aspirations.
 item.style(Style::default().bg(Color::Rgb(54, 46, 0)))
 ```
 
-**Why**: breaks theme.toml override + CLI/TUI color sync. Log colors derive
-from `alnav::logcolor`; UI chrome from `theme::UiTokens`.
+**Why**: breaks theme.toml / config.toml `theme` overrides. TUI colors
+come from installed `UiTokens` (palette-mapped). CLI colored output
+still uses `alnav::logcolor` and must not be restyled from TUI tokens.
 
 **Instead**:
 ```rust

@@ -1,10 +1,10 @@
 //! Single source of truth for alnav's color mapping (see CLAUDE.md
-//! "UI 设计指导" for the design rules this module implements). Log-severity
-//! and highlight colors are derived from `alnav::logcolor` so the TUI's
-//! ratatui rendering stays visually in sync with the CLI's ANSI text output.
+//! "UI 设计指导" for the design rules this module implements). Chrome and
+//! log-severity tokens are mapped from a [`crate::palette::Palette`] via
+//! [`map_to_tokens`]; style helpers read those tokens, not a separate log palette.
 //!
-//! UI chrome tokens (accent, selection, preview, …) may be overridden at
-//! startup via `theme.toml` (M4). Log colors are **never** loaded from that file.
+//! UI chrome tokens (accent, selection, preview, …) and `[palette]` / `highlight`
+//! overlays may be applied at startup via `theme.toml` (M4).
 
 use std::sync::Mutex;
 
@@ -12,10 +12,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::Deserialize;
 
-use alnav::logcolor::{self, Badge};
 use alnav::parser::Level;
 
 use crate::input::ChipField;
+use crate::palette::{contrast_fg, mix, Palette};
 
 // ---------------------------------------------------------------------------
 // Nerdfont semantic glyphs (hard dependency — no runtime fallback).
@@ -91,7 +91,7 @@ pub fn field_icon(field: ChipField) -> &'static str {
     }
 }
 
-/// Overridable UI chrome tokens (not log severity / USER_HIGHLIGHT).
+/// UI chrome + palette-mapped log tokens.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiTokens {
     pub accent: Color,
@@ -118,29 +118,27 @@ pub struct UiTokens {
     pub bookmark_strip_bg: Color,
     /// Bookmark row background in LogList (faint yellow, distinct from selection).
     pub bookmark_row_bg: Color,
+    pub canvas_bg: Color,
+    pub canvas_fg: Color,
+    pub muted: Color,
+    pub error: Color,
+    pub pkg: Color,
+    pub pid: Color,
+    pub tid: Color,
+    pub highlight: [Color; 8],
+    pub level_v: Color,
+    pub level_d: Color,
+    pub level_i: Color,
+    pub level_w: Color,
+    pub level_e: Color,
+    pub level_f: Color,
+    /// Per-line colors for the six-row Dashboard Unicode wordmark.
+    pub logo: [Color; 6],
 }
 
 impl UiTokens {
     pub fn builtin() -> Self {
-        Self {
-            accent: Color::Cyan,
-            success: Color::Green,
-            warning: Color::Yellow,
-            lock: Color::Magenta,
-            selection_frame: Color::Magenta,
-            log_selection_bg: Color::DarkGray,
-            log_visual_bg: Color::Rgb(30, 60, 70),
-            preview_highlight_bg: Color::DarkGray,
-            border_inactive: Color::DarkGray,
-            candidate_selected_bg: Color::DarkGray,
-            candidate_selected_fg: Color::White,
-            candidate_unselected_bg: Color::Reset,
-            candidate_unselected_fg: Color::Gray,
-            candidate_match_fg: Color::Cyan,
-            candidate_prefix: "▌ ".to_string(),
-            bookmark_strip_bg: Color::DarkGray,
-            bookmark_row_bg: Color::Rgb(54, 46, 0),
-        }
+        map_to_tokens(&Palette::default_ansi())
     }
 }
 
@@ -175,31 +173,148 @@ pub fn selection_frame() -> Color {
     t().selection_frame
 }
 
-fn rgb((r, g, b): logcolor::Rgb) -> Color {
-    Color::Rgb(r, g, b)
+pub fn map_to_tokens(p: &Palette) -> UiTokens {
+    map_to_tokens_for(p, "default")
 }
 
-/// Timestamp/pid/tid/separator tint, shared with the CLI's muted gray.
-pub fn muted() -> Style {
-    Style::default().fg(rgb(logcolor::MUTED))
-}
-
-/// Colored level badge (e.g. `" E "` on a red background), mirroring the
-/// CLI's `formatter::level_badge`.
-pub fn level_badge_style(level: Level) -> Style {
-    match logcolor::level_badge(level) {
-        Badge::Gray => Style::default()
-            .fg(Color::White)
-            .bg(rgb(logcolor::VERBOSE_BG)),
-        Badge::Blue => Style::default().fg(Color::Black).bg(Color::Blue),
-        Badge::Green => Style::default().fg(Color::Black).bg(Color::Green),
-        Badge::Yellow => Style::default().fg(Color::Black).bg(Color::Yellow),
-        Badge::Red => Style::default().fg(Color::White).bg(Color::Red),
-        Badge::RedBold => Style::default()
-            .fg(Color::White)
-            .bg(Color::Red)
-            .add_modifier(Modifier::BOLD),
+/// Map `p` through the fixed slot table, then apply the builtin signature
+/// (accent + wordmark ramp) for `canonical`. Unknown names behave like `default`.
+pub fn map_to_tokens_for(p: &Palette, canonical: &str) -> UiTokens {
+    let canonical = crate::palette::resolve_theme_name(canonical).unwrap_or("default");
+    let accent = signature_accent(p, canonical);
+    let washes_from_mix = !matches!(p.background, Color::Reset);
+    let mix_or = |tint: Color, t: u8, fallback: Color| -> Color {
+        if washes_from_mix {
+            mix(p.background, tint, t).unwrap_or(fallback)
+        } else {
+            fallback
+        }
+    };
+    UiTokens {
+        accent,
+        success: p.green,
+        warning: p.yellow,
+        lock: p.magenta,
+        selection_frame: p.magenta,
+        log_selection_bg: mix_or(accent, 22, Color::DarkGray),
+        log_visual_bg: mix_or(p.blue, 26, Color::Rgb(30, 60, 70)),
+        preview_highlight_bg: mix_or(accent, 28, Color::DarkGray),
+        border_inactive: p.bright_black,
+        candidate_selected_bg: mix_or(p.foreground, 16, Color::DarkGray),
+        candidate_selected_fg: if washes_from_mix {
+            p.bright_white
+        } else {
+            Color::White
+        },
+        candidate_unselected_bg: if washes_from_mix {
+            p.background
+        } else {
+            Color::Reset
+        },
+        candidate_unselected_fg: if washes_from_mix {
+            p.white
+        } else {
+            Color::Gray
+        },
+        candidate_match_fg: accent,
+        candidate_prefix: "▌ ".to_string(),
+        bookmark_strip_bg: mix_or(p.yellow, 8, Color::DarkGray),
+        bookmark_row_bg: mix_or(p.yellow, 12, Color::Rgb(54, 46, 0)),
+        canvas_bg: p.background,
+        canvas_fg: p.foreground,
+        muted: p.bright_black,
+        error: p.red,
+        pkg: p.bright_yellow,
+        pid: p.magenta,
+        tid: p.bright_magenta,
+        highlight: [
+            p.yellow,
+            p.bright_yellow,
+            p.red,
+            p.magenta,
+            p.blue,
+            p.cyan,
+            p.green,
+            p.bright_green,
+        ],
+        level_v: p.bright_black,
+        level_d: p.blue,
+        level_i: p.green,
+        level_w: p.yellow,
+        level_e: p.red,
+        level_f: p.bright_red,
+        logo: logo_ramp(p, canonical, accent),
     }
+}
+
+fn signature_accent(p: &Palette, canonical: &str) -> Color {
+    match canonical {
+        "onedark" | "tokyo-night" | "kanagawa" => p.blue,
+        "dracula" | "catppuccin-mocha" => p.magenta,
+        "everforest" => p.green,
+        "gruvbox-dark" => p.yellow,
+        _ => p.cyan,
+    }
+}
+
+fn logo_ramp(p: &Palette, canonical: &str, accent: Color) -> [Color; 6] {
+    let (a, b, c) = match canonical {
+        "onedark" => (p.blue, p.cyan, p.magenta),
+        "dracula" => (p.cyan, p.magenta, p.blue),
+        "everforest" => (p.green, p.yellow, p.cyan),
+        "tokyo-night" => (p.blue, p.magenta, p.cyan),
+        "catppuccin-mocha" => (p.blue, p.magenta, p.red),
+        "gruvbox-dark" => (p.yellow, p.red, p.green),
+        "nord" => (p.blue, p.cyan, p.bright_cyan),
+        "kanagawa" => (p.blue, p.magenta, p.cyan),
+        _ => return [accent; 6],
+    };
+    [
+        a,
+        mix(a, b, 40).unwrap_or(a),
+        mix(a, b, 80).unwrap_or(b),
+        b,
+        mix(b, c, 50).unwrap_or(c),
+        c,
+    ]
+}
+
+pub fn canvas_bg() -> Color {
+    t().canvas_bg
+}
+
+pub fn canvas_style() -> Style {
+    let tk = t();
+    let mut style = Style::default();
+    if !matches!(tk.canvas_bg, Color::Reset) {
+        style = style.bg(tk.canvas_bg);
+    }
+    if !matches!(tk.canvas_fg, Color::Reset) {
+        style = style.fg(tk.canvas_fg);
+    }
+    style
+}
+
+/// Timestamp/pid/tid/separator tint from the active palette's muted slot.
+pub fn muted() -> Style {
+    Style::default().fg(t().muted)
+}
+
+/// Colored level badge (e.g. `" E "` on a red background).
+pub fn level_badge_style(level: Level) -> Style {
+    let bg = match level {
+        Level::V => t().level_v,
+        Level::D => t().level_d,
+        Level::I => t().level_i,
+        Level::W => t().level_w,
+        Level::E => t().level_e,
+        Level::F => t().level_f,
+    };
+    let mut style = Style::default().fg(contrast_fg(bg)).bg(bg);
+    if matches!(level, Level::F) {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
 }
 
 /// Foreground-only variant of [`level_badge_style`]'s color, for the summary
@@ -214,15 +329,14 @@ pub fn accent_bar_style() -> Style {
     Style::default().fg(accent())
 }
 
-/// One of the 8 reading-friendly highlight-palette colors, cycled by index.
-/// TUI search chips assign a progressive index per pattern; CLI `--highlight`
-/// does the same. **Not** overridable via theme.toml.
+/// One of the 8 palette highlight colors, cycled by index.
+/// TUI search chips assign a progressive index per pattern.
 pub fn highlight_style(idx: usize) -> Style {
-    let ((r, g, b), fg_black) = logcolor::USER_HIGHLIGHT[idx % logcolor::USER_HIGHLIGHT.len()];
-    let fg = if fg_black { Color::Black } else { Color::White };
+    let tk = t();
+    let bg = tk.highlight[idx % tk.highlight.len()];
     Style::default()
-        .fg(fg)
-        .bg(Color::Rgb(r, g, b))
+        .fg(contrast_fg(bg))
+        .bg(bg)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -252,9 +366,9 @@ pub fn field_color(field: ChipField) -> Color {
     match field {
         ChipField::Tag => accent(),
         ChipField::Msg => success(),
-        ChipField::Pkg => Color::LightYellow,
-        ChipField::Pid => Color::Magenta,
-        ChipField::Tid => Color::LightMagenta,
+        ChipField::Pkg => t().pkg,
+        ChipField::Pid => t().pid,
+        ChipField::Tid => t().tid,
         ChipField::Level => warning(),
     }
 }
@@ -267,10 +381,16 @@ pub fn candidate_selected_style() -> Style {
 }
 
 /// Unselected candidate row base style.
+/// Named themes (painted canvas) use white + DIM; default stays Gray without DIM.
 pub fn candidate_unselected_style() -> Style {
-    Style::default()
-        .fg(t().candidate_unselected_fg)
-        .bg(t().candidate_unselected_bg)
+    let tk = t();
+    let mut style = Style::default()
+        .fg(tk.candidate_unselected_fg)
+        .bg(tk.candidate_unselected_bg);
+    if !matches!(tk.canvas_bg, Color::Reset) {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    style
 }
 
 /// Match-character foreground for candidate substring hits.
@@ -293,14 +413,29 @@ pub fn candidate_selection_style() -> Style {
     candidate_selected_style()
 }
 
-/// Dashboard ASCII wordmark.
+/// Compact / Minimal Dashboard wordmark (`"alnav"`): signature accent.
 pub fn dashboard_header_style() -> Style {
     Style::default().fg(accent()).add_modifier(Modifier::BOLD)
 }
 
+/// One row of the six-line Unicode wordmark.
+pub fn dashboard_logo_line_style(row: usize) -> Style {
+    Style::default()
+        .fg(t().logo[row % 6])
+        .add_modifier(Modifier::BOLD)
+}
+
 /// Dashboard product subtitle, empty-state copy, and footer.
+/// Named (painted) themes use canvas foreground so copy tracks the scheme;
+/// `default` keeps muted DarkGray.
 pub fn dashboard_muted_style() -> Style {
-    muted().add_modifier(Modifier::DIM)
+    let tk = t();
+    let fg = if matches!(tk.canvas_fg, Color::Reset) {
+        tk.muted
+    } else {
+        tk.canvas_fg
+    };
+    Style::default().fg(fg).add_modifier(Modifier::DIM)
 }
 
 /// Borderless Dashboard section heading.
@@ -396,7 +531,7 @@ pub fn chip_pill_spans(field: ChipField, value: &str, disabled: bool) -> Vec<Spa
             level_badge_style(level)
         }
         other => Style::default()
-            .fg(Color::Black)
+            .fg(contrast_fg(field_color(other)))
             .bg(field_color(other))
             .add_modifier(Modifier::BOLD),
     };
@@ -425,7 +560,7 @@ pub fn chip_pill_style(field: ChipField, value: &str, disabled: bool) -> (String
             level_badge_style(level)
         }
         other => Style::default()
-            .fg(Color::Black)
+            .fg(contrast_fg(field_color(other)))
             .bg(field_color(other))
             .add_modifier(Modifier::BOLD),
     };
@@ -454,7 +589,7 @@ pub fn exclude_pill_spans(field: ChipField, value: &str, disabled: bool) -> Vec<
             level_badge_style(level)
         }
         other => Style::default()
-            .fg(Color::Black)
+            .fg(contrast_fg(field_color(other)))
             .bg(field_color(other))
             .add_modifier(Modifier::BOLD),
     };
@@ -642,10 +777,10 @@ pub fn help_section_style(active: bool) -> Style {
 }
 
 /// Faint search-hit highlight inside the H1 Preview window (distinct from
-/// formal [`highlight_style`] / `USER_HIGHLIGHT` chips).
+/// formal [`highlight_style`] chips).
 pub fn preview_highlight_style() -> Style {
     Style::default()
-        .fg(Color::White)
+        .fg(contrast_fg(t().preview_highlight_bg))
         .bg(t().preview_highlight_bg)
         .add_modifier(Modifier::DIM)
 }
@@ -689,7 +824,7 @@ pub fn minimap_highlight_style() -> Style {
 
 /// H3 minimap: severe (E/F/crash) mark — wins over search on overlap.
 pub fn minimap_severe_style() -> Style {
-    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    Style::default().fg(t().error).add_modifier(Modifier::BOLD)
 }
 
 /// M2 bookmark strip background (subtle wash vs log body).
@@ -725,10 +860,7 @@ pub fn unified_kind_style(kind: crate::picker::UnifiedKind) -> Style {
     use crate::picker::UnifiedKind;
     match kind {
         UnifiedKind::Filter => Style::default().fg(accent()),
-        UnifiedKind::Highlight => {
-            let ((r, g, b), _) = logcolor::USER_HIGHLIGHT[0];
-            Style::default().fg(Color::Rgb(r, g, b))
-        }
+        UnifiedKind::Highlight => Style::default().fg(t().highlight[0]),
         UnifiedKind::Exclude => Style::default().fg(warning()),
     }
 }
@@ -761,12 +893,79 @@ struct ThemeFile {
     candidate_selection_bg: Option<String>,
     bookmark_strip_bg: Option<String>,
     bookmark_row_bg: Option<String>,
+    highlight: Option<Vec<String>>,
+    palette: Option<PaletteFile>,
 }
 
-/// Parse a theme.toml body into tokens (merged onto builtin defaults).
-pub fn parse_theme_toml(text: &str) -> Result<UiTokens, String> {
+#[derive(Debug, Deserialize, Default)]
+struct PaletteFile {
+    background: Option<String>,
+    foreground: Option<String>,
+    black: Option<String>,
+    red: Option<String>,
+    green: Option<String>,
+    yellow: Option<String>,
+    blue: Option<String>,
+    magenta: Option<String>,
+    cyan: Option<String>,
+    white: Option<String>,
+    bright_black: Option<String>,
+    bright_red: Option<String>,
+    bright_green: Option<String>,
+    bright_yellow: Option<String>,
+    bright_blue: Option<String>,
+    bright_magenta: Option<String>,
+    bright_cyan: Option<String>,
+    bright_white: Option<String>,
+}
+
+fn apply_palette_file(mut p: Palette, f: PaletteFile) -> Result<Palette, String> {
+    let set = |slot: &mut Color, v: Option<String>| -> Result<(), String> {
+        if let Some(s) = v {
+            *slot = parse_color(&s)?;
+        }
+        Ok(())
+    };
+    set(&mut p.background, f.background)?;
+    set(&mut p.foreground, f.foreground)?;
+    set(&mut p.black, f.black)?;
+    set(&mut p.red, f.red)?;
+    set(&mut p.green, f.green)?;
+    set(&mut p.yellow, f.yellow)?;
+    set(&mut p.blue, f.blue)?;
+    set(&mut p.magenta, f.magenta)?;
+    set(&mut p.cyan, f.cyan)?;
+    set(&mut p.white, f.white)?;
+    set(&mut p.bright_black, f.bright_black)?;
+    set(&mut p.bright_red, f.bright_red)?;
+    set(&mut p.bright_green, f.bright_green)?;
+    set(&mut p.bright_yellow, f.bright_yellow)?;
+    set(&mut p.bright_blue, f.bright_blue)?;
+    set(&mut p.bright_magenta, f.bright_magenta)?;
+    set(&mut p.bright_cyan, f.bright_cyan)?;
+    set(&mut p.bright_white, f.bright_white)?;
+    Ok(p)
+}
+
+/// Merge `theme.toml` onto the default ANSI palette.
+pub fn apply_overlay(base: Palette, text: &str) -> Result<UiTokens, String> {
+    apply_overlay_for(base, "default", text)
+}
+
+/// Merge `theme.toml` semantic keys and `[palette]` onto a named base palette.
+pub fn apply_overlay_for(base: Palette, canonical: &str, text: &str) -> Result<UiTokens, String> {
     let file: ThemeFile = toml::from_str(text).map_err(|e| e.to_string())?;
-    let mut t = UiTokens::builtin();
+    if let Some(ref hl) = file.highlight {
+        if hl.len() != 8 {
+            return Err(format!("highlight must have 8 colors, got {}", hl.len()));
+        }
+    }
+    let pal = if let Some(pf) = file.palette {
+        apply_palette_file(base, pf)?
+    } else {
+        base
+    };
+    let mut t = map_to_tokens_for(&pal, canonical);
     if let Some(s) = file.accent {
         t.accent = parse_color(&s)?;
     }
@@ -820,7 +1019,19 @@ pub fn parse_theme_toml(text: &str) -> Result<UiTokens, String> {
     if let Some(s) = file.bookmark_row_bg {
         t.bookmark_row_bg = parse_color(&s)?;
     }
+    if let Some(hl) = file.highlight {
+        let mut colors = [Color::Reset; 8];
+        for (i, s) in hl.into_iter().enumerate() {
+            colors[i] = parse_color(&s)?;
+        }
+        t.highlight = colors;
+    }
     Ok(t)
+}
+
+/// Parse a theme.toml body into tokens (merged onto builtin ANSI defaults).
+pub fn parse_theme_toml(text: &str) -> Result<UiTokens, String> {
+    apply_overlay(Palette::default_ansi(), text)
 }
 
 /// Named ratatui color or `#RRGGBB` / `#RGB`.
@@ -873,6 +1084,7 @@ fn parse_hex(hex: &str) -> Result<Color, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::Palette;
 
     #[test]
     fn test_log_selection_style_is_soft_gray_no_reverse() {
@@ -966,5 +1178,102 @@ mod tests {
         let t = parse_theme_toml("accent = \"red\"\n").unwrap();
         assert_eq!(t.accent, Color::Red);
         assert_eq!(t.success, Color::Green);
+    }
+
+    #[test]
+    fn canvas_style_reset_on_default_rgb_on_kanagawa() {
+        install(map_to_tokens(&Palette::default_ansi()));
+        assert_eq!(canvas_bg(), Color::Reset);
+        assert_eq!(canvas_style().bg, None);
+        assert_eq!(canvas_style().fg, None);
+        let p = crate::theme_builtins::palette_by_name("kanagawa").unwrap();
+        install(map_to_tokens(&p));
+        assert_eq!(canvas_style().bg, Some(p.background));
+        assert_eq!(canvas_style().fg, Some(p.foreground));
+        install(UiTokens::builtin());
+    }
+
+    #[test]
+    fn default_map_keeps_cyan_accent_and_reset_canvas() {
+        let t = map_to_tokens(&Palette::default_ansi());
+        assert_eq!(t.accent, Color::Cyan);
+        assert_eq!(t.canvas_bg, Color::Reset);
+        assert_eq!(t.log_selection_bg, Color::DarkGray);
+        assert_eq!(t.bookmark_row_bg, Color::Rgb(54, 46, 0));
+        assert_eq!(t.pkg, Color::LightYellow);
+        assert_eq!(t.highlight[0], Color::Yellow);
+        assert!(t.logo.iter().all(|c| *c == Color::Cyan));
+    }
+
+    #[test]
+    fn kanagawa_map_paints_canvas_and_yellow_highlight0() {
+        let p = crate::theme_builtins::palette_by_name("kanagawa").unwrap();
+        let t = map_to_tokens_for(&p, "kanagawa");
+        assert_eq!(t.canvas_bg, Color::Rgb(0x1f, 0x1f, 0x28));
+        assert_eq!(t.highlight[0], p.yellow);
+        assert_eq!(t.error, p.red);
+        assert_ne!(t.log_selection_bg, Color::DarkGray);
+        assert_eq!(t.accent, p.blue);
+        assert_eq!(t.candidate_match_fg, p.blue);
+        assert_eq!(t.logo[0], p.blue);
+        assert_eq!(t.logo[5], p.cyan);
+        assert_ne!(t.logo[0], t.logo[5]);
+    }
+
+    #[test]
+    fn named_themes_use_distinct_signature_accents() {
+        let cases: &[(&str, fn(&Palette) -> Color)] = &[
+            ("onedark", |p| p.blue),
+            ("dracula", |p| p.magenta),
+            ("everforest", |p| p.green),
+            ("tokyo-night", |p| p.blue),
+            ("catppuccin-mocha", |p| p.magenta),
+            ("gruvbox-dark", |p| p.yellow),
+            ("nord", |p| p.cyan),
+            ("kanagawa", |p| p.blue),
+        ];
+        let mut seen = Vec::new();
+        for (name, accent_of) in cases {
+            let p = crate::theme_builtins::palette_by_name(name).unwrap();
+            let t = map_to_tokens_for(&p, name);
+            assert_eq!(t.accent, accent_of(&p), "{name} signature accent");
+            assert_ne!(
+                t.logo[0], t.logo[5],
+                "{name} logo is a ramp, not a flat fill"
+            );
+            seen.push((name, t.accent));
+        }
+        assert_ne!(seen[1].1, seen[2].1, "dracula magenta ≠ everforest green");
+        assert_ne!(seen[5].1, seen[0].1, "gruvbox yellow ≠ onedark blue");
+    }
+
+    #[test]
+    fn dashboard_logo_and_muted_follow_installed_named_theme() {
+        let p = crate::theme_builtins::palette_by_name("dracula").unwrap();
+        install(map_to_tokens_for(&p, "dracula"));
+        assert_eq!(dashboard_header_style().fg, Some(p.magenta));
+        assert_eq!(dashboard_logo_line_style(0).fg, Some(p.cyan));
+        assert_eq!(dashboard_logo_line_style(5).fg, Some(p.blue));
+        assert!(dashboard_logo_line_style(0)
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(dashboard_muted_style().fg, Some(p.foreground));
+        assert!(dashboard_muted_style().add_modifier.contains(Modifier::DIM));
+        install(UiTokens::builtin());
+        assert_eq!(dashboard_header_style().fg, Some(Color::Cyan));
+        assert!(dashboard_logo_line_style(0)
+            .fg
+            .iter()
+            .all(|c| *c == Color::Cyan));
+        assert_eq!(dashboard_muted_style().fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn overlay_accent_overrides_signature_keeps_logo_ramp() {
+        let p = crate::theme_builtins::palette_by_name("kanagawa").unwrap();
+        let t = apply_overlay_for(p, "kanagawa", "accent = \"#ff00aa\"\n").unwrap();
+        assert_eq!(t.accent, Color::Rgb(0xff, 0x00, 0xaa));
+        assert_eq!(t.logo[0], p.blue);
+        assert_eq!(t.logo[5], p.cyan);
     }
 }

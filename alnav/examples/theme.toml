@@ -1,25 +1,62 @@
-# Example UI theme for alnav (M4).
+# alnav theme.toml — TUI 颜色 overlay
 #
-# Copy to `$ALNAV_HOME/theme.toml` (default: ~/.config/alnav/theme.toml)
-# or pass `--config-path /path/to/dir` (directory, not this file).
+# 复制到 `$ALNAV_HOME/theme.toml`（默认 ~/.config/alnav/theme.toml）
+# 或 `--config-path DIR` 指向的目录。可整份省略：只用 config.toml 的 `theme`。
 #
-# Colors: named ratatui colors (cyan, darkgray, …) or #RRGGBB / #RGB.
-# Log severity / search USER_HIGHLIGHT colors are NOT configurable here —
-# they always come from alnav-core::logcolor (lib `alnav::logcolor`).
+# 叠在内置主题之上（改完需重启）：
+#   1. [palette] 先合并进 18 槽 ANSI，再重新映射
+#   2. 其余键覆盖语义色（强调 / 选中底 / highlight 等）
+# 颜色：named（cyan、darkgray、reset…）或 #RGB / #RRGGBB。
+# highlight 若出现则必须正好 8 项，否则整份 overlay 丢弃并回退。
+#
+# accent 只改 chrome 强调色（边框、Compact 字标、Tag）；
+# Dashboard 六行 Unicode 字标仍走该内置主题的渐变。
 
-accent = "cyan"
-success = "green"
-warning = "yellow"
-lock = "magenta"
-selection_frame = "magenta"
-log_selection_bg = "darkgray"
-log_visual_bg = "#1e3c46"
-preview_highlight_bg = "darkgray"
-border_inactive = "darkgray"
-candidate_selected_bg = "darkgray"
-candidate_selected_fg = "white"
-candidate_unselected_bg = "reset"
-candidate_unselected_fg = "gray"
-candidate_match_fg = "cyan"
-candidate_prefix = "▌ "
-bookmark_strip_bg = "darkgray"
+# accent = "#7aa2f7"
+# success = "green"
+# warning = "yellow"
+# lock = "magenta"
+# selection_frame = "magenta"
+# log_selection_bg = "darkgray"
+# log_visual_bg = "#1e3c46"
+# preview_highlight_bg = "darkgray"
+# border_inactive = "darkgray"
+# candidate_selected_bg = "darkgray"
+# candidate_selected_fg = "white"
+# candidate_unselected_bg = "reset"
+# candidate_unselected_fg = "gray"
+# candidate_match_fg = "cyan"
+# candidate_prefix = "▌ "
+# bookmark_strip_bg = "darkgray"
+# bookmark_row_bg = "#362e00"
+
+# highlight = [
+#   "#e0af68",
+#   "#faba4a",
+#   "#f7768e",
+#   "#bb9af7",
+#   "#7aa2f7",
+#   "#7dcfff",
+#   "#9ece6a",
+#   "#9fe044",
+# ]
+
+# [palette]
+# background = "reset"   # 取消 named 主题的画布底色
+# foreground = "#c0caf5"
+# black = "#15161e"
+# red = "#f7768e"
+# green = "#9ece6a"
+# yellow = "#e0af68"
+# blue = "#7aa2f7"
+# magenta = "#bb9af7"
+# cyan = "#7dcfff"
+# white = "#a9b1d6"
+# bright_black = "#414868"
+# bright_red = "#ff899d"
+# bright_green = "#9fe044"
+# bright_yellow = "#faba4a"
+# bright_blue = "#8db0ff"
+# bright_magenta = "#c7a9ff"
+# bright_cyan = "#a4daff"
+# bright_white = "#c0caf5"

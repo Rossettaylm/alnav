@@ -2492,6 +2492,19 @@ pub fn serialize_default_toml() -> String {
 pub fn serialize_default_config_toml() -> String {
     "# alnav config.toml — application settings.\n\
      #\n\
+     # TUI theme (restart to apply). Builtins and signature accent:\n\
+     #   default            cyan; no canvas paint; solid wordmark\n\
+     #   onedark            blue\n\
+     #   dracula            magenta\n\
+     #   everforest         green\n\
+     #   tokyo-night        blue      (aliases: TokyoNight, tokyo_night)\n\
+     #   catppuccin-mocha   magenta   (aliases: catppuccin, mocha)\n\
+     #   gruvbox-dark       yellow    (alias: gruvbox)\n\
+     #   nord               cyan\n\
+     #   kanagawa           blue      (alias: kanagawa-wave)\n\
+     # Optional color overlay: theme.toml in this directory.\n\
+     theme = \"default\"\n\
+     #\n\
      # picker_left_ratio: width fraction of the left (candidate) pane in pickers.\n\
      # Right pane = 1 - this value. Clamped to [0.2, 0.8]. Default 0.4.\n\
      picker_left_ratio = 0.4\n\
@@ -2637,6 +2650,26 @@ move_down = "k"
         assert!(text.contains("[open]"));
         assert!(text.contains("file = \"f\""));
         assert!(text.contains("stream = \"s\""));
+    }
+
+    #[test]
+    fn default_config_toml_documents_theme_names() {
+        let text = serialize_default_config_toml();
+        assert!(text.contains("theme = \"default\""));
+        for name in [
+            "onedark",
+            "dracula",
+            "everforest",
+            "tokyo-night",
+            "catppuccin-mocha",
+            "gruvbox-dark",
+            "nord",
+            "kanagawa",
+        ] {
+            assert!(text.contains(name), "missing {name}");
+        }
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["theme"].as_str(), Some("default"));
     }
 
     #[test]

@@ -1,3 +1,20 @@
+# alnav config.toml — 复制到 `$ALNAV_HOME/config.toml`
+#（默认 ~/.config/alnav/config.toml），或 `alnav --init` 生成。
+#
+# TUI 主题（改完需重启）。九套内置 + 签名强调色（边框 / Compact 字标）：
+#   default            青 Cyan，不涂画布；六行字标纯色
+#   onedark            蓝
+#   dracula            品红
+#   everforest         绿
+#   tokyo-night        蓝     （别名 TokyoNight / tokyo_night）
+#   catppuccin-mocha   品红   （别名 catppuccin / mocha）
+#   gruvbox-dark       黄     （别名 gruvbox）
+#   nord               青
+#   kanagawa           蓝     （别名 kanagawa-wave）
+# 细调颜色用同目录 theme.toml（overlay，可省略）。
+theme = "default"
+# theme = "kanagawa"
+
 # 搜索面板左栏宽度占比（右栏 = 1 - 该值）。默认 0.4（4:6）
 picker_left_ratio = 0.4
 

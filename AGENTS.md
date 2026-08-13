@@ -51,7 +51,7 @@ alnav-core/src/
 ├── sampler.rs     # Sampler：输出采样（--tail 尾部 / --sample 均匀抽样）
 ├── histogram.rs   # Histogram：时间窗口聚合（--histogram 10s/1m/5m），JSON 输出
 ├── formatter.rs   # 输出格式化：text（彩色）/ json / csv，支持 --fields 字段选择
-├── logcolor.rs    # 颜色语义数据（RGB 常量 + Badge 映射），不依赖 colored/ratatui，供 formatter.rs 与 alnav TUI theme 共用
+├── logcolor.rs    # 颜色语义数据（RGB 常量 + Badge 映射），不依赖 colored/ratatui，供 CLI formatter.rs 使用（TUI 不读）
 └── summary.rs     # 聚合统计：级别分布、Top tags、Top errors、崩溃计数
 
 alnav/src/
@@ -67,8 +67,10 @@ alnav/src/
 ├── help.rs         # H6 二级键位短提示：L1/L2；英文 dim-key + label（无 `:` 隔断）；`?` 只读 Help（Active + 全目录）；status_bar 右侧截断；flash 走 App::set_flash（3s）
 ├── export.rs       # H10：当前 Filter/Exclude/lock/time_bound → 一行 `alnav grep` CLI（`yc`）
 ├── bookmark.rs     # M2：会话书签（row_id 锚定；ma/md；顶区展示 + Picker 管理）
-├── config.rs       # 配置目录解析 + theme.toml/config.toml 加载（坏文件回退）
-├── theme.rs        # UI 颜色映射唯一入口：运行时 UiTokens（可 theme.toml 覆盖）+ 日志色派生自 `alnav::logcolor`
+├── config.rs       # 配置目录解析 + config.toml（含 theme=）+ theme.toml overlay（坏文件回退）
+├── palette.rs      # Palette、name fold、mix、contrast_fg
+├── theme_builtins.rs # 九套内置 Palette 常量
+├── theme.rs        # UI 颜色映射唯一入口：Palette → UiTokens + style fns（theme.toml overlay）；TUI 日志色来自 UiTokens
 ├── store.rs         # RowStore：FileStore（mmap+行索引+惰性解析）/ StreamStore（ADB/HDC VecDeque）/ RowRef
 └── ingest.rs        # spawn_live_ingest（ADB/HDC 共用 DropOldestRing）；spawn_file_ingest 仅供测试
 ```
@@ -97,14 +99,14 @@ alnav/src/
 - **`alnav` 的终端生命周期**：panic hook 在 `main()` 最开始安装；ADB/HDC 子进程经 `LiveChildGuard` RAII 清理。
 - **`alnav` 的 Ctrl+C 语义**：Normal 退出；Insert 有 popup 只关 popup，否则重置 Input 并回 LogList；Search 模态编辑中取消草稿并回 LogList（不 resume following）。
 - **`alnav` 的五个可聚焦分区**：`Focus` 为 `ChipStrip`/`ExcludeStrip`/`HighlightStrip`/`LogList`/`Input`（数字键 1–5）；Filter/Exclude/Highlight strip **为空则折叠**。持久化条件的新增/编辑统一走 Leader fzf Picker，不再用 `a`/`i`/`o` 打开旧 Input 面板。布局：Filter → Exclude → Highlight → Log（Fill）→ status。**H9 排除**：`GroupList.excludes` 全局 AND NOT；`C`+字段（字母表同 H7）；Exclude strip 与 Filter 同构 `h/l/dd/di`。
-- **跨 crate 的日志颜色统一**：`alnav-core::logcolor` 是唯一的颜色数据源（纯 RGB/枚举，不依赖 `colored`/`ratatui`），CLI 的 `formatter.rs`（`colored`）和 TUI 的 `theme.rs`（`ratatui::style::Color`）各自将其转换成自己的类型。新增/调整日志相关配色只改 `logcolor.rs`，两边自动同步，禁止在 `formatter.rs`/`theme.rs` 里各自硬编码一份 RGB 数值。`USER_HIGHLIGHT` 为 8 档阅读向递进色阶，供 CLI `--highlight` 与 TUI highlight chip 共用。
+- **跨 crate 的日志颜色统一（仅 CLI）**：`alnav-core::logcolor` 是 CLI 唯一的颜色数据源（纯 RGB/枚举，不依赖 `colored`/`ratatui`），`formatter.rs` 将其转成 `colored` 类型。TUI 日志色（时间戳/level 徽标/关键词高亮）来自已安装的 `UiTokens`（Palette 映射 + `theme.toml` overlay），不再读 `logcolor`。`USER_HIGHLIGHT` 仍为 CLI `--highlight` 的 8 档色阶；TUI highlight 走 Palette 映射的 8-slot ramp。
 - **`alnav` 日志区默认多行展示**：`ui.rs::wrap_ranges` 是唯一的换行实现（贪婪按空白断行，单词超宽则硬切），操作字节区间而非 `Cow<str>`（为了跟 `render_entry_lines` 里已经用 `Regex::find_iter` 算好的高亮命中区间对齐——顺序是"先算高亮区间，再换行"，换行只是把同一份区间数据切成多个 `Span` 分布到多个 `Line`，不会把一个高亮命中切碎到两半）。`ListItem` 内可以放多个 `Line`，`ListState` 选中/滚动天然按整个 item 处理，翻页逻辑（`PAGE_SIZE`/`move_cursor_manual`）不需要感知 item 内部行数。
 - **`alnav` 靠上模态 + Preview（H1）**：Input / Search 用 `top_modal_rect`（靠上，非垂直居中）；垂直栈为模态正文 → 字段/历史候选 → **Preview**（`preview.rs` 采样约 10 条，不改主 `visible`/`following`）。Search 淡高亮走 `theme::preview_highlight_style`。msg-chip 面板仍居中。
 - **`alnav` 字段详情 / Pretty overlay（H4/H5）**：LogList `p` 开关浮层（开→Fields，关→Closed）；`P` 开 Pretty 或在 Fields↔Pretty 间切换；靠上 `render_modal_shell`；Pretty 对 msg（失败再试 raw）做 JSON 缩进，非法则原文 +「非 JSON」；内容随 `current_row`；Esc **只关浮层**不 `resume_following`；浮层内 `j`/`k`/`c`/`C`+字段仍可用。
 - **`alnav` 导出 CLI（H10）**：LogList `y` `c` 将当前启用 Filter 组（组内 AND、组间 OR）、启用 Excludes（`not …`）、H8 lock（`--pid`/`--tid`）、全局时间窗（`--since`/`--until`）编码为一行 `alnav grep -f…|-i` / `--hdc` / `--adb` 命令（统一 `-e` + `-i`；不含 Search / `di` 禁用项）；复用 yank 剪贴板与 `YANKED` status。近似一致即可（环形缓冲截断可接受）。
 - **`alnav` 边轨 minimap（H3）**：Log 边框内侧 1 列只读轨；比例基准为 `visible`；标记严重(E/F/crash)、启用 search 命中、当前视口淡段；重叠时严重优先；`visible` 非空即画极淡轨；样式走 `theme::minimap_*`；每帧扫描预算约 4000。
 - **`alnav` 书签（M2）**：ingest 单调 `EntryRow.row_id`；`ma` 收藏当前行、`md` 删除当前行书签，`mm` 以 Manage / `MM` 以 New 打开 Bookmark Picker，`Space m` 同 Manage；Log 顶内嵌最多 3 条最近书签（空则折叠，软上限 50）；行同时在 `rows`/`matched` 任一存活即可跳，两个缓冲均淘汰才失效不可跳；进程退出丢弃。
-- **`alnav` 配置外置**：启动时从配置目录读取 `theme.toml` 与 `config.toml`（默认 `~/.config/alnav`，`$ALNAV_HOME`/`--config-path DIR` 可覆盖）；`theme.toml` 仅覆盖 UI token，`config.toml` 配置 `picker_left_ratio`；**不**覆盖 `logcolor`。示例见 `alnav/examples/`。
+- **`alnav` 配置外置**：启动时从配置目录读取 `theme.toml` 与 `config.toml`（默认 `~/.config/alnav`，`$ALNAV_HOME`/`--config-path DIR` 可覆盖）；`config.toml` 的 `theme` 选内置 Palette（`default` / `onedark` / `dracula` / `everforest` / `tokyo-night` / `catppuccin-mocha` / `gruvbox-dark` / `nord` / `kanagawa`），并配置 `picker_left_ratio` 等；`theme.toml` 是 overlay（`[palette]` 先合并，语义 token 后覆盖）；`logcolor` 仅服务 CLI。示例见 `alnav/examples/`。
 - **`alnav` 边轨 minimap（H3）**：Log 边框内侧右侧 1 列；比例相对当前 `visible`；标记视口淡段 / 启用 search 命中 / 严重(E/F/crash)，重叠时严重优先；`visible` 非空即画极淡轨；样式仅走 `theme::minimap_*`；每帧采样上限约 4000。
 
 ## alnav UI 设计指导（opencode 风格）
@@ -112,30 +114,31 @@ alnav/src/
 配色与布局遵循以下规则；改动渲染代码前先看这里。所有颜色常量与映射函数集中在 `alnav/src/theme.rs`——**禁止在 `ui.rs` 或其他渲染代码里直接写 `Color::*`/硬编码 `Style`**，新增语义就去 `theme.rs` 加常量或函数，保证同一语义在任何地方渲染出来的颜色都一致。
 
 - **Strip 弱边框 / 弹出浮层圆角描边**：Filter/Exclude/Highlight strip 用上下 `divider_block`（弱化边框）；Log 用 `rounded_block`。弹出浮层（Input/Search/Time/Detail/Help/Confirm/Picker 壳/Preview/字段候选）走 `render_modal_shell` / bordered `render_candidate_list`：`BorderType::Rounded` + `theme::border_style(true)`（dim accent）；相邻浮层留 1 格空隙。无 Preview 时 Picker 宽约一半。边框标题：strip 用 `numbered_title`，弹出用 `plain_title`。
-- **单一强调色 + 大量 dim**：`theme::ACCENT`（Cyan）是唯一的"焦点/强调"色，非关键信息统一 `Modifier::DIM`，避免多色混战。
+- **单一强调色 + 大量 dim**：`theme::accent()` 是唯一的"焦点/强调"色（`default`/`nord` 为 cyan；其余内置主题用签名色：蓝/品红/绿/黄），非关键信息统一 `Modifier::DIM`，避免多色混战。Dashboard 六行 Unicode 字标走 `theme::logo` 渐变，Compact `"alnav"` 走 accent。
 - **焦点**：popup/候选 List 用 `theme` 候选行 tokens（选中/非选中背景与文字、匹配字符色、选中前缀）；Filter/Highlight strip 组选中为 Magenta（`SELECTION_FRAME`）、未选中为 dim DarkGray；`di` 禁用用 `disabled_chip_style()`。
 - **日志行选中态只在 LogList 聚焦时显示，且是柔和灰底**：经 `ListItem::style(log_selection_style())` 施加（**不用** `List::highlight_style`，以免 `Style::patch` 盖掉关键词高亮底色）；失焦时无选中底。关键词 Span 的高亮色在选中行上保持可读叠加。
 - **状态栏左侧图标簇**：follow/visual 纯 Nerd Font 图标；lock/time/进度为图标+短值；pending/flash 为非反色软文字（`theme::status_icon` / `status_icon_value` / `status_soft`）。Picker 底部用柔和 `theme::picker_mode_prefix`（搜索镜 / `＋` / `✎`，accent+DIM、无填充）；非编辑不画居中模态。
 - **Filter/Highlight chip 用填充 pill**：`theme::chip_pill`（按 `field_color` / level badge）与 `theme::highlight_pill_style`（`highlight_style`）；Input 已提交 chip 与 Filter strip 共用 pill 样式。
 - **字段名颜色全局唯一映射**：`ChipField` 的颜色只由 `theme::field_color` 决定；popup 字段名与 pill 背景同源。
 - **不硬编码 White/Black 当默认前景色**：如 `Level::I`（默认级别）用 `Style::default()` 继承终端主题色，不写 `Color::White`，以兼容浅色/深色终端。
-- **日志相关颜色（时间戳/level 徽标/关键词高亮）一律从 `alnav::logcolor` 派生**，不在 `theme.rs` 里另起一套数值——保证 TUI 和 CLI 的彩色输出视觉一致，见 Key Design Decisions 里的"跨 crate 的日志颜色统一"。
+- **日志相关颜色（时间戳/level 徽标/关键词高亮）一律从已安装的 `UiTokens` 读取**（Palette 映射；`theme.toml` overlay 可改），不在 `ui.rs` 里硬编码。CLI 彩色输出仍走 `alnav::logcolor`，与 TUI 主题无关。
 
 语义色表（对应 `theme.rs` 常量，供扩展新 UI 元素时复用）：
 
 | 用途 | 常量/函数 | 颜色来源 |
 |------|-----------|------|
-| 强调/焦点/聚焦边框 | `theme::ACCENT` | Cyan |
-| 成功/Following | `theme::SUCCESS` | Green |
-| 会话 lock 徽标 | `theme::LOCK` | Magenta |
-| 警告（chip 字段名） | `theme::WARNING` | Yellow |
+| 强调/焦点/聚焦边框 | `theme::accent()` | 主题签名色（default/nord=`cyan`） |
+| Dashboard 字标 | `dashboard_logo_line_style` | 6 行 palette 渐变；default 纯 cyan |
+| 成功/Following | `theme::SUCCESS` | palette `green` |
+| 会话 lock 徽标 | `theme::LOCK` | palette `magenta` |
+| 警告（chip 字段名） | `theme::WARNING` | palette `yellow` |
 | Filter chip pill | `theme::chip_pill` | `field_color` / `level_badge_style` |
 | Highlight pattern pill | `theme::highlight_pill_style` | `highlight_style(idx)` |
 | Picker 候选选中/匹配 | `theme::candidate_*` / `picker_mode_prefix` | theme.toml 可覆盖 |
 | Chip 组圆角边框 | `theme::chip_group_border_style` | 选中 Magenta / 未选中 dim DarkGray |
-| 日志时间戳/pid/tid | `theme::muted()` | `logcolor::MUTED` |
-| 日志 level 徽标 | `theme::level_badge_style()` | `logcolor::level_badge()` |
-| 关键词/搜索高亮 | `theme::highlight_style(idx)` | `logcolor::USER_HIGHLIGHT[idx]`，按 search pattern 全局序号递进 |
+| 日志时间戳/pid/tid | `theme::muted()` | palette `bright_black` |
+| 日志 level 徽标 | `theme::level_badge_style()` | Palette 映射（V/D/I/W/E/F） |
+| 关键词/搜索高亮 | `theme::highlight_style(idx)` | 8-slot ramp（yellow → bright_green），按 search pattern 全局序号递进 |
 | 禁用 chip 组 | `theme::disabled_chip_style()` | DarkGray+DIM |
 | 日志行选中态（仅聚焦时） | `theme::log_selection_style()` | `Color::DarkGray`，经 ListItem.style 施加 |
 

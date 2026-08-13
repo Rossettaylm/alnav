@@ -1,7 +1,9 @@
 use std::sync::OnceLock;
 
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+#[cfg(test)]
+use ratatui::style::Color;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
@@ -88,6 +90,7 @@ fn rounded_block(title: Line<'static>, active: bool) -> Block<'static> {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border_style(active))
+        .style(theme::canvas_style())
         .title(title)
 }
 
@@ -99,6 +102,7 @@ fn divider_block(title: Line<'static>, active: bool) -> Block<'static> {
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_type(BorderType::Plain)
         .border_style(theme::border_style(active))
+        .style(theme::canvas_style())
         .title(title)
 }
 
@@ -284,13 +288,18 @@ fn popup_block(title: &str) -> Block<'static> {
     )
 }
 
+fn clear_to_canvas(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(theme::canvas_style()), area);
+}
+
 /// Clear + rounded full-border shell (dim accent). Returns the inner content rect.
 pub fn render_modal_shell(title: &str, frame: &mut Frame, area: Rect) -> Rect {
-    frame.render_widget(Clear, area);
+    clear_to_canvas(frame, area);
     let block = popup_block(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Clear, inner);
+    clear_to_canvas(frame, inner);
     inner
 }
 
@@ -314,7 +323,7 @@ fn candidate_label_spans_with_scorer(
         " ".repeat(theme::candidate_prefix().chars().count().max(1))
     };
     let prefix_style = if checked {
-        theme::candidate_checked_prefix_style().bg(base.bg.unwrap_or(Color::Reset))
+        theme::candidate_checked_prefix_style().bg(base.bg.unwrap_or(theme::canvas_bg()))
     } else {
         base
     };
@@ -383,7 +392,7 @@ pub fn render_candidate_list(
     bordered: bool,
 ) {
     let inner = if bordered {
-        frame.render_widget(Clear, area);
+        clear_to_canvas(frame, area);
         let block = popup_block(title);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1814,7 +1823,7 @@ pub fn render_input_box(
     let block = divider_block(theme::numbered_title(5, "Input", focused), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Clear, inner);
+    clear_to_canvas(frame, inner);
     let (spans, caret_col) = input_content_spans(input, mode == Mode::Insert, Some(inner.width));
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     caret_col.map(|col| Position {
@@ -2701,7 +2710,7 @@ pub fn render_picker(
     frame_area: Rect,
 ) -> Option<Position> {
     let picker_area = picker_frame_rect(frame_area, show_preview);
-    frame.render_widget(Clear, picker_area);
+    clear_to_canvas(frame, picker_area);
 
     // Honor caller `left_ratio` (config `picker_left_ratio`) for both preview and
     // compact pickers. Preview used to hard-code 0.3, which crushed Open-file labels.
@@ -2872,7 +2881,7 @@ pub fn render_preset_name_dialog(
     };
     let modal_w = modal_width(frame_area.width).min(48);
     let area = centered_modal_rect(frame_area, modal_w, 5);
-    frame.render_widget(Clear, area);
+    clear_to_canvas(frame, area);
     let inner = render_modal_shell(title, frame, area);
     if dialog.confirm_overwrite {
         let text = vec![
@@ -3202,7 +3211,7 @@ pub fn render_dashboard(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    frame.render_widget(Clear, area);
+    clear_to_canvas(frame, area);
     let available_width = area.width.saturating_sub(4).max(1);
     let content_width = available_width.min(DASHBOARD_MAX_WIDTH).min(area.width);
     let density = crate::dashboard::DashboardDensity::for_size(content_width, area.height);
@@ -3230,10 +3239,15 @@ pub fn render_dashboard(app: &App, frame: &mut Frame, area: Rect) {
 
     match density {
         crate::dashboard::DashboardDensity::Full => {
-            lines.extend(theme::DASHBOARD_LOGO.into_iter().map(|row| {
-                Line::from(Span::styled(row, theme::dashboard_header_style()))
-                    .alignment(Alignment::Center)
-            }));
+            lines.extend(
+                theme::DASHBOARD_LOGO
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        Line::from(Span::styled(row, theme::dashboard_logo_line_style(i)))
+                            .alignment(Alignment::Center)
+                    }),
+            );
             lines.push(
                 Line::from(Span::styled(
                     "App / Android Log Navigator",
@@ -3699,6 +3713,42 @@ mod tests {
             .draw(|frame| render_dashboard(app, frame, frame.area()))
             .unwrap();
         cell_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn dashboard_full_logo_uses_per_line_theme_colors() {
+        let p = crate::theme_builtins::palette_by_name("dracula").unwrap();
+        crate::theme::install(crate::theme::map_to_tokens_for(&p, "dracula"));
+        let app = dashboard_app(Vec::new());
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_dashboard(&app, frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let fg_on_row_containing = |needle: &str| -> Option<ratatui::style::Color> {
+            for y in buf.area.y..buf.area.y + buf.area.height {
+                let mut line = String::new();
+                let mut sample = None;
+                for x in buf.area.x..buf.area.x + buf.area.width {
+                    let cell = &buf[(x, y)];
+                    line.push_str(cell.symbol());
+                    if sample.is_none() && cell.symbol() != " " {
+                        sample = Some(cell.fg);
+                    }
+                }
+                if line.contains(needle) {
+                    return sample;
+                }
+            }
+            None
+        };
+        let top = fg_on_row_containing("█████╗");
+        let bottom = fg_on_row_containing("╚══════╝");
+        crate::theme::install(crate::theme::UiTokens::builtin());
+        assert_eq!(top, Some(p.cyan));
+        assert_eq!(bottom, Some(p.blue));
+        assert_ne!(top, bottom);
     }
 
     #[test]

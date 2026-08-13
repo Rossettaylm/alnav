@@ -23,6 +23,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 | [Async Vis Scans](./async-scans.md) | Highlight Inc / severe prefetch / LogList loading | Active |
 | [Status Bar + Help](./status-help.md) | English status bar, `?` Help, `FAST_SCROLL_STEP` | Active |
 | [TUI UX Boosters](./tui-ux-boosters.md) | Crash detail (`P`), Summary panel (`Leader i`), disconnect icon, wrap toggle (`w`) | Active |
+| [TUI Theme System](./theme-system.md) | Palette-driven themes, `config.toml` `theme`, TUI-only (CLI keeps `logcolor`) | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Forbidden patterns, testing requirements | Active |
 | [Database Guidelines](./database-guidelines.md) | N/A for this crate | Stub |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Stub |
@@ -40,6 +41,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Read [quality-guidelines.md](./quality-guidelines.md) Forbidden Patterns (theme colors, Group.time, modal Ctrl+C) and "Popup chrome vs strip chrome".
 - [ ] Read [status-help.md](./status-help.md) before changing status-bar hints, flash language, or Help (`?`) keys/scroll.
 - [ ] Read [tui-ux-boosters.md](./tui-ux-boosters.md) before changing `DetailView::Pretty`'s crash branch, `SummaryView`/`summary_gen`, the disconnect icon, or `App.collapsed_view`.
+- [ ] Read [theme-system.md](./theme-system.md) before changing `theme.rs` / `palette.rs` / `theme.toml` / `config.toml` `theme`.
 - [ ] Touching picker Manage: read Directory Structure "Picker session dispatch".
 
 ## Quality Check
@@ -52,6 +54,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] File highlight stats / `n`/`N` use hit index (no UI O(visible) `row_at`); FilterBatch does not full-parse.
 - [ ] New modal key paths handle Ctrl+C as cancel when appropriate.
 - [ ] Popup shells stay rounded; strips stay divider; confirm uses the same `picker_area` as the picker.
+- [ ] TUI paint goes through `theme::*` tokens (palette-mapped). CLI colored output stays on `alnav::logcolor`.
 - [ ] Status hints / Help copy stay in `help.rs` (`HintEntry`); Help Esc does not resume following; LogList/Help `J`/`K` share `FAST_SCROLL_STEP`.
 - [ ] `cargo test -p alnav` green; `cargo fmt -p alnav --check` clean.
 

@@ -13,6 +13,7 @@ mod input;
 mod keymap;
 mod log_corpus;
 mod model;
+mod palette;
 mod picker;
 mod preset;
 mod preview;
@@ -22,6 +23,7 @@ mod source_panel;
 mod store;
 mod text_field;
 mod theme;
+mod theme_builtins;
 mod time_panel;
 mod ui;
 mod vocab;
@@ -643,8 +645,8 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         std::process::exit(2);
     }
 
-    let theme_status = config::load_theme(&config_dir);
     let (app_config, config_status) = config::load_config(&config_dir);
+    let theme_status = config::load_theme(&config_dir, &app_config.theme);
     let (keymap_store, keymap_status) = keymap::load_keymap(&config_dir);
 
     let groups = initial_group(&cli)?;
@@ -826,6 +828,10 @@ fn run<B: ratatui::backend::Backend>(
             terminal
                 .draw(|frame| {
                     let frame_area = frame.area();
+                    frame.render_widget(
+                        ratatui::widgets::Block::default().style(theme::canvas_style()),
+                        frame_area,
+                    );
                     let mut hw_cursor: Option<Position> = None;
 
                     if app.dashboard.is_some() && app.open_file_panel.is_none() {

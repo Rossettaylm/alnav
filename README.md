@@ -41,6 +41,29 @@ cargo install --path alnav
 
 配置硬切：`--config-path` > `$ALNAV_HOME` > `~/.config/alnav/`。旧目录请手动迁移：`~/.config/aloggrep` → `~/.config/alnav`。
 
+## TUI 主题
+
+TUI 九套内置配色，写在 `config.toml` 后**重启**生效。Dashboard 字标、边框、日志级别色都跟主题走；`alnav grep` CLI 颜色不变。
+
+```toml
+# ~/.config/alnav/config.toml
+theme = "kanagawa"
+```
+
+| `theme` | 签名色 | 别名 |
+|:--------|:-------|:-----|
+| `default` | 青，不涂画布 | `builtin` |
+| `onedark` | 蓝 | `one-dark` |
+| `dracula` | 品红 | |
+| `everforest` | 绿 | |
+| `tokyo-night` | 蓝 | `TokyoNight` |
+| `catppuccin-mocha` | 品红 | `catppuccin` / `mocha` |
+| `gruvbox-dark` | 黄 | `gruvbox` |
+| `nord` | 青 | |
+| `kanagawa` | 蓝 | `kanagawa-wave` |
+
+可选 overlay：复制 [`alnav/examples/theme.toml`](alnav/examples/theme.toml) 到 `~/.config/alnav/theme.toml`。`[palette]` 先改 ANSI 18 槽再映射；其余键覆盖语义色（`accent`、选中底、8 档 `highlight` 等）。`highlight` 必须正好 8 项，解析失败则整份丢弃并回退。完整字段见该模板。
+
 ## 快速上手
 
 ```bash
