@@ -379,3 +379,37 @@ Implemented hdc/adb auto-reconnect with disconnect icon, device probe + health c
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: TUI open-file log_dirs nucleo search
+
+**Date**: 2026-08-13
+**Task**: TUI open-file log_dirs nucleo search
+**Package**: alnav-core
+**Branch**: `master`
+
+### Summary
+
+Open file 改为 log_dirs 异步语料 + nucleo Pattern::parse；移除 path_complete；配置 log_dirs/log_extensions；任务归档。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `52fea12` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
