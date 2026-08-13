@@ -46,6 +46,11 @@ impl ThemeLoadStatus {
     }
 }
 
+/// Default Open-file corpus suffix filter (include the leading dot).
+pub fn default_log_extensions() -> Vec<String> {
+    vec![".log".into(), ".txt".into()]
+}
+
 /// Application settings from `config.toml` (with builtin defaults).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
@@ -54,6 +59,10 @@ pub struct AppConfig {
     pub picker_preview_enabled: bool,
     /// Max recent files remembered for Dashboard / `of` (clamped 1..=200).
     pub recent_files_limit: usize,
+    /// Directories recursively scanned for Open-file fuzzy corpus.
+    pub log_dirs: Vec<String>,
+    /// Case-insensitive suffix filter for corpus files (include the dot).
+    pub log_extensions: Vec<String>,
 }
 
 impl AppConfig {
@@ -62,6 +71,8 @@ impl AppConfig {
             picker_left_ratio: 0.4,
             picker_preview_enabled: true,
             recent_files_limit: 20,
+            log_dirs: Vec::new(),
+            log_extensions: default_log_extensions(),
         }
     }
 
@@ -96,6 +107,44 @@ struct ConfigToml {
     picker_left_ratio: Option<f32>,
     picker_preview_enabled: Option<bool>,
     recent_files_limit: Option<usize>,
+    log_dirs: Option<Vec<String>>,
+    log_extensions: Option<Vec<String>>,
+}
+
+/// Normalize configured extensions: trim, ensure leading `.`, lowercase.
+/// Empty list falls back to [`default_log_extensions`].
+pub fn normalize_log_extensions(raw: Option<Vec<String>>) -> Vec<String> {
+    let Some(list) = raw else {
+        return default_log_extensions();
+    };
+    let mut out: Vec<String> = list
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let lower = s.to_ascii_lowercase();
+            if lower.starts_with('.') {
+                lower
+            } else {
+                format!(".{lower}")
+            }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        default_log_extensions()
+    } else {
+        out
+    }
+}
+
+fn normalize_log_dirs(raw: Option<Vec<String>>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Load `$config_dir/config.toml` and return config + load status.
@@ -117,6 +166,8 @@ pub fn load_config(config_dir: &Path) -> (AppConfig, ConfigLoadStatus) {
                 if let Some(n) = t.recent_files_limit {
                     cfg.recent_files_limit = crate::recent::clamp_limit(n);
                 }
+                cfg.log_dirs = normalize_log_dirs(t.log_dirs);
+                cfg.log_extensions = normalize_log_extensions(t.log_extensions);
                 (cfg, ConfigLoadStatus::Loaded(path))
             }
             Err(e) => (
@@ -293,5 +344,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, _) = load_config(dir.path());
         assert!(cfg.picker_preview_enabled);
+    }
+
+    #[test]
+    fn load_config_defaults_log_dirs_empty_and_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, _) = load_config(dir.path());
+        assert!(cfg.log_dirs.is_empty());
+        assert_eq!(cfg.log_extensions, default_log_extensions());
+    }
+
+    #[test]
+    fn load_config_picks_up_log_dirs_and_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "log_dirs = [\"~/logs\", \" /data/bugly \"]\n\
+             log_extensions = [\"LOG\", \"xlog\"]\n",
+        )
+        .unwrap();
+        let (cfg, st) = load_config(dir.path());
+        assert!(matches!(st, ConfigLoadStatus::Loaded(_)));
+        assert_eq!(cfg.log_dirs, vec!["~/logs", "/data/bugly"]);
+        assert_eq!(
+            cfg.log_extensions,
+            vec![".log".to_string(), ".xlog".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_log_extensions_fall_back_to_default() {
+        assert_eq!(
+            normalize_log_extensions(Some(vec![])),
+            default_log_extensions()
+        );
     }
 }

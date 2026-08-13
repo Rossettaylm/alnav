@@ -11,8 +11,8 @@ mod highlight_model;
 mod ingest;
 mod input;
 mod keymap;
+mod log_corpus;
 mod model;
-mod path_complete;
 mod picker;
 mod preset;
 mod preview;
@@ -654,6 +654,10 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
     app.keymap = keymap_store;
     app.config_dir = config_dir.clone();
     app.recent = recent::RecentFiles::load(&config_dir);
+    app.log_corpus.configure(
+        app.config.log_dirs.clone(),
+        app.config.log_extensions.clone(),
+    );
     app.groups = groups;
     app.time_bound = time_bound;
     if let Some(hint) = theme_status.status_hint() {
@@ -797,8 +801,9 @@ fn run<B: ratatui::backend::Backend>(
             }
         }
         app.poll_file_store();
-        if let Some(panel) = app.open_file_panel.as_mut() {
-            panel.poll_preview();
+        app.log_corpus.poll();
+        if app.log_corpus.take_dirty() {
+            app.refresh_open_file_choices();
         }
         app.ensure_vocab_candidates();
         app.poll_vocab_match();
@@ -2337,14 +2342,20 @@ fn handle_open_file_panel_key(
     use crossterm::event::KeyModifiers;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if (key.code == KeyCode::Char('c') && ctrl) || key.code == KeyCode::Esc {
-        app.open_file_panel = None;
+        app.close_open_file_panel();
+        return;
+    }
+    if key.code == KeyCode::Char('r') && ctrl {
+        app.log_corpus.refresh();
+        app.refresh_open_file_choices();
+        app.set_flash("corpus refresh");
         return;
     }
 
     let switching = app.dashboard.is_none();
-    let recent = app.recent.clone();
     let mut confirm_path: Option<String> = None;
     let mut flash: Option<&'static str> = None;
+    let mut need_refresh = false;
     {
         let Some(panel) = app.open_file_panel.as_mut() else {
             return;
@@ -2358,25 +2369,21 @@ fn handle_open_file_panel_key(
                 {
                     confirm_path = Some(path.display().to_string());
                 } else {
-                    let draft = panel.draft.as_str().trim();
-                    if draft.is_empty() {
-                        flash = Some("NO FILE");
-                    } else {
-                        confirm_path =
-                            Some(path_complete::expand_user(draft).display().to_string());
-                    }
+                    flash = Some("NO FILE");
                 }
             }
-            // Arrows only — `j`/`k` must type into the path draft.
+            // Arrows only — `j`/`k` must type into the draft.
             KeyCode::Up => panel.move_sel(-1),
             KeyCode::Down => panel.move_sel(1),
-            KeyCode::Tab => panel.apply_tab_complete(&recent),
             code => {
                 if apply_text_field_key(&mut panel.draft, code, ctrl) {
-                    panel.refresh_choices(&recent);
+                    need_refresh = true;
                 }
             }
         }
+    }
+    if need_refresh {
+        app.refresh_open_file_choices();
     }
     if let Some(msg) = flash {
         app.set_flash(msg);

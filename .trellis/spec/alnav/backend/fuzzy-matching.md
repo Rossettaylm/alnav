@@ -52,7 +52,7 @@ CandidateMatchService::request / poll / clear  // gen-cancel async
 
 | Topic | Rule |
 |-------|------|
-| Engine | TUI text = **`nucleo-matcher` `Pattern` only** (ignore-case, `AtomKind::Fuzzy`). Whitespace splits atoms **AND** (fzf-style). Never match user queries via a single `Atom` (that treats spaces as literal). No fzf process. No TUI regex escape hatch. |
+| Engine | TUI **candidate** text = **`nucleo-matcher` `Pattern::parse`** (ignore-case, Smart normalization). Whitespace splits atoms **AND**; per-atom fzf syntax `'…` / `^…` / `…$` / `^…$` / `!…` (bare atoms stay Fuzzy). Never match user queries via a single `Atom` (literal spaces). No fzf process. No TUI regex escape hatch. Log-row Filter/Search/Highlight stay **substring** (`substr_match`), not `Pattern::parse`. |
 | Case | Always ignore-case. No `config.toml` matcher keys. |
 | Search/Highlight haystack | `tag + '\t' + msg`; if both empty → `raw`. |
 | Search/Highlight match (LogList) | **Contiguous ignore-case substring** (`substr_match`), whitespace atoms AND. **Not** fuzzy — avoids `guild` matching scattered `gu`…`i`…`ld`. |
@@ -86,7 +86,7 @@ Applies to: Picker New/Edit/Manage/Unified/MsgChip/Bookmark/Preset, field/level/
 | Startup CLI → TUI | Initial group chips use same substring match + `SameFieldOp::Or` for multi-values. |
 | `yc` | Still emits literal `alnav grep` approx (encoding / ring truncation); flash notes `approx`. |
 | Group model | No `Group.expr` / `ExcludeEntry.expr` for TUI; chips are source of truth. |
-| Fuzzy vs substring split | **Fuzzy** = UI candidate narrowing (Picker, vocab, field/level/date/history lists). **Substring** = matching against log row content (Filter/Exclude/Search/Highlight). |
+| Fuzzy vs substring split | **Candidate Pattern::parse** = UI candidate narrowing (Picker, vocab, field/level/date/history, Open-file lists) — Fuzzy by default + `'^$!` syntax. **Substring** (`substr_match`) = matching against log row content (Filter/Exclude/Search/Highlight). |
 
 ### 4. Validation & Error Matrix
 

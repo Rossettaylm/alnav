@@ -72,7 +72,7 @@ impl DashboardItem {
         match self {
             Self::Hdc => Some("HarmonyOS hilog"),
             Self::Adb => Some("Android logcat"),
-            Self::OpenFile => Some("Browse recent or local logs"),
+            Self::OpenFile => Some("Recent + configured log_dirs (fuzzy)"),
             Self::Recent { .. } => None,
         }
     }

@@ -1,0 +1,33 @@
+{
+  "id": "tui-open-file-log-dirs",
+  "name": "tui-open-file-log-dirs",
+  "title": "TUI open-file log_dirs nucleo search",
+  "description": "",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "alnav",
+  "package": "alnav",
+  "priority": "P2",
+  "creator": "lymanyang",
+  "assignee": "lymanyang",
+  "createdAt": "2026-08-11",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "alnav/src/source_panel.rs",
+    "alnav/src/config.rs",
+    "alnav/src/path_complete.rs",
+    "alnav/src/fuzzy.rs",
+    "alnav/src/app.rs",
+    "alnav/src/main.rs"
+  ],
+  "notes": "grilling 2026-08-11: corpus=log_dirs only; nucleo; no external browser/fzf; no soft cap; async cache+Ctrl-r",
+  "meta": {}
+}

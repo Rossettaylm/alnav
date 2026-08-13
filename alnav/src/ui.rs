@@ -2703,11 +2703,9 @@ pub fn render_picker(
     let picker_area = picker_frame_rect(frame_area, show_preview);
     frame.render_widget(Clear, picker_area);
 
-    let split_ratio = if show_preview {
-        PICKER_PREVIEW_LEFT_RATIO
-    } else {
-        left_ratio
-    };
+    // Honor caller `left_ratio` (config `picker_left_ratio`) for both preview and
+    // compact pickers. Preview used to hard-code 0.3, which crushed Open-file labels.
+    let split_ratio = left_ratio;
     let (left, right) = if show_preview {
         let (l, r) = split_picker_lr_gapped(picker_area, split_ratio);
         (l, Some(r))
@@ -2765,18 +2763,21 @@ pub fn render_picker(
 }
 
 fn render_plain_preview(lines: &[Line<'static>], frame: &mut Frame, area: Rect) {
-    let inner = render_modal_shell("Preview", frame, area);
+    let inner = render_modal_shell("Path", frame, area);
     if lines.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                "no preview",
+                "no selection",
                 theme::preview_placeholder_style(),
             )),
             inner,
         );
         return;
     }
-    frame.render_widget(Paragraph::new(lines.to_vec()), inner);
+    frame.render_widget(
+        Paragraph::new(lines.to_vec()).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
 }
 
 /// Preset Preview: stacked Filter / Exclude / Highlight chip rows (strip style).
@@ -3068,11 +3069,17 @@ pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw(" "));
         spans.push(theme::status_icon(theme::GLYPH_FOLLOWING, theme::success()));
     }
-    if !app.store.is_file() && app.ingest_done {
-        spans.push(Span::raw(" "));
+    // Source vs disconnect share one slot (live disconnect replaces source glyph).
+    spans.push(Span::raw(" "));
+    if app.export_source.is_live() && app.ingest_done {
         spans.push(theme::status_icon(
             theme::GLYPH_DISCONNECT,
             theme::warning(),
+        ));
+    } else {
+        spans.push(theme::status_icon(
+            app.export_source.status_glyph(),
+            theme::accent(),
         ));
     }
     if let Some(lock) = app.lock_badge_label() {
@@ -3539,7 +3546,10 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
     graphemes.concat()
 }
 
-/// Open-file source panel (`of`): left candidates + draft, right plain head preview.
+/// Open-file left pane: at least half width so basename-first labels stay readable.
+const OPEN_FILE_LEFT_RATIO_FLOOR: f32 = 0.55;
+
+/// Open-file source panel (`of`): left candidates + draft, right full path.
 pub fn render_open_file_panel(
     panel: &crate::source_panel::OpenFilePanel,
     left_ratio: f32,
@@ -3549,34 +3559,48 @@ pub fn render_open_file_panel(
     let labels: Vec<String> = panel
         .choices
         .iter()
-        .map(|c| match c {
-            crate::source_panel::OpenFileChoice::Recent(p) => {
-                format!("{} {p}", theme::GLYPH_SOURCE_RECENT)
-            }
-            crate::source_panel::OpenFileChoice::Path(p) => {
-                let g = if p.is_dir {
-                    theme::GLYPH_SOURCE_DIR
-                } else {
-                    theme::GLYPH_SOURCE_FILE
-                };
-                format!("{g} {}", p.replacement)
-            }
+        .map(|c| {
+            let glyph = match c {
+                crate::source_panel::OpenFileChoice::Recent(_) => theme::GLYPH_SOURCE_RECENT,
+                crate::source_panel::OpenFileChoice::Corpus { .. } => theme::GLYPH_SOURCE_FILE,
+            };
+            format!("{glyph} {}", c.display_label())
         })
         .collect();
     let styles = vec![Style::default(); labels.len()];
     let checked = vec![false; labels.len()];
     let actions = vec![ActionKind::None; labels.len()];
-    let right_lines: Vec<Line<'static>> = if let Some(status) = &panel.preview_status {
-        vec![Line::from(Span::styled(status.clone(), theme::muted()))]
-    } else {
-        panel
-            .preview_lines
-            .iter()
-            .map(|l| Line::from(Span::raw(l.clone())))
-            .collect()
-    };
+    let mut right_lines: Vec<Line<'static>> = Vec::new();
+    if let Some(status) = &panel.corpus_status {
+        right_lines.push(Line::from(Span::styled(status.clone(), theme::muted())));
+        right_lines.push(Line::from(""));
+    }
+    match panel.selected_full_path() {
+        Some(path) => {
+            right_lines.push(Line::from(Span::styled(
+                "full path".to_string(),
+                theme::muted().add_modifier(Modifier::DIM),
+            )));
+            right_lines.push(Line::from(Span::raw(path)));
+            if let Some(label) = panel.selected_corpus_label() {
+                right_lines.push(Line::from(""));
+                right_lines.push(Line::from(Span::styled(
+                    "corpus".to_string(),
+                    theme::muted().add_modifier(Modifier::DIM),
+                )));
+                right_lines.push(Line::from(Span::styled(label, theme::muted())));
+            }
+        }
+        None => {
+            right_lines.push(Line::from(Span::styled(
+                "no selection".to_string(),
+                theme::preview_placeholder_style(),
+            )));
+        }
+    }
     let title = format!("{} Open file", theme::GLYPH_SOURCE_OPEN_FILE);
     let mode = crate::picker::PickerMode::New;
+    let open_left = left_ratio.max(OPEN_FILE_LEFT_RATIO_FLOOR);
     render_picker(
         &title,
         &mode,
@@ -3591,9 +3615,9 @@ pub fn render_open_file_panel(
         &checked,
         &actions,
         panel.selected,
-        "type a path or pick a recent file",
+        "scanning log_dirs… or configure log_dirs · Ctrl-r refresh",
         PickerRightPane::PlainLines(&right_lines),
-        left_ratio,
+        open_left,
         true,
         Some(theme::GLYPH_SOURCE_OPEN_FILE),
         frame,
@@ -3688,7 +3712,7 @@ mod tests {
         assert!(text.contains("Quick Actions"));
         assert!(text.contains("HDC — HarmonyOS hilog"));
         assert!(text.contains("ADB — Android logcat"));
-        assert!(text.contains("Open file — Browse recent or local logs"));
+        assert!(text.contains("Open file — Recent + configured log_dirs (fuzzy)"));
         assert!(text.contains("Recent Files"));
         assert!(text.contains("j/k move"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
@@ -4685,6 +4709,7 @@ mod tests {
         let mut app = App::new(100);
         app.following = false;
         app.ingest_done = true;
+        app.export_source = crate::export::ExportSource::Hdc { device: None };
 
         let backend = TestBackend::new(40, 1);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -4695,6 +4720,33 @@ mod tests {
         assert!(
             content.contains(theme::GLYPH_DISCONNECT),
             "stream mode + ingest_done should show disconnect icon: got {content:?}"
+        );
+        assert!(
+            !content.contains(theme::GLYPH_SOURCE_HDC),
+            "disconnect must hide source glyph: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_shows_source_icon_when_live_connected() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.ingest_done = false;
+        app.export_source = crate::export::ExportSource::Adb { device: None };
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            content.contains(theme::GLYPH_SOURCE_ADB),
+            "connected live should show source glyph: got {content:?}"
+        );
+        assert!(
+            !content.contains(theme::GLYPH_DISCONNECT),
+            "connected live must not show disconnect: got {content:?}"
         );
     }
 
@@ -4709,6 +4761,7 @@ mod tests {
         f.flush().unwrap();
         let mut app = App::new(100);
         app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
         app.following = false;
         app.ingest_done = true;
 
@@ -4721,6 +4774,10 @@ mod tests {
         assert!(
             !content.contains(theme::GLYPH_DISCONNECT),
             "file mode must never show disconnect icon: got {content:?}"
+        );
+        assert!(
+            content.contains(theme::GLYPH_SOURCE_FILE),
+            "file mode should show source file glyph: got {content:?}"
         );
     }
 

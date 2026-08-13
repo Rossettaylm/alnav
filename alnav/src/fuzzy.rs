@@ -3,10 +3,12 @@
 //! CLI `alnav grep` keeps its own FilterChain/Expr path. Interactive TUI
 //! matching goes through this module:
 //! - **Substring** (`substr_match`): Filter/Exclude/Search/Highlight vs log rows
-//! - **Fuzzy** (`fuzzy_match` / `fuzzy_label_indices`): Picker/vocab/candidate lists
+//! - **Fuzzy / parse** (`fuzzy_match` / `fuzzy_label_indices`): Picker/vocab/
+//!   candidate lists via [`Pattern::parse`] — whitespace atoms AND, plus fzf-style
+//!   `'…` / `^…` / `…$` / `^…$` / `!…` per atom (default atom kind remains Fuzzy).
 
 use alnav::parser::Level;
-use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::input::{Chip, ChipField};
@@ -59,15 +61,16 @@ fn matcher() -> Matcher {
     Matcher::new(Config::DEFAULT)
 }
 
-/// Word-splitting fuzzy pattern (fzf/nucleo style): whitespace separates atoms ANDed
-/// together. Use this for all TUI text queries — never a single `Atom` with spaces.
+/// Word-splitting candidate pattern (fzf/nucleo style).
+///
+/// - Whitespace splits atoms **AND** (`worda wordb`).
+/// - Per-atom syntax via [`Pattern::parse`]: `'foo` substring, `^foo` prefix,
+///   `foo$` postfix, `^foo$` exact, `!…` negate (escape with `\`).
+/// - Bare atoms stay Fuzzy.
+///
+/// Never match user queries via a single `Atom` with literal spaces.
 fn fuzzy_pattern(pattern: &str) -> Pattern {
-    Pattern::new(
-        pattern,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-    )
+    Pattern::parse(pattern, CaseMatching::Ignore, Normalization::Smart)
 }
 
 /// Reusable nucleo scorer for **one query × many haystacks**.
@@ -468,6 +471,26 @@ mod tests {
         // Picker path shares the same Pattern semantics.
         let labels = vec!["GuildFeedListViewModel".into(), "OtherThing".into()];
         assert_eq!(fuzzy_label_indices(&labels, "guild viewmodel"), vec![0]);
+    }
+
+    #[test]
+    fn parse_syntax_exact_prefix_postfix_substring() {
+        // Exact: whole haystack only.
+        assert!(fuzzy_match("mqq.log", "^mqq.log$"));
+        assert!(!fuzzy_match("dir/mqq.log", "^mqq.log$"));
+        assert!(!fuzzy_match("mqq.log.bak", "^mqq.log$"));
+        // Substring (contiguous).
+        assert!(fuzzy_match("dir/mqq.log", "'mqq.log"));
+        assert!(!fuzzy_match("dir/mqqXlog", "'mqq.log")); // gap → not substring
+                                                          // Prefix / postfix.
+        assert!(fuzzy_match("mqq.log", "^mqq"));
+        assert!(fuzzy_match("mqq.log", "log$"));
+        // Multi-word AND + mixed kinds.
+        assert!(fuzzy_match("crash_mqq.log", "'mqq.log crash"));
+        assert!(!fuzzy_match("mqq.log", "'mqq.log crash"));
+        let labels = vec!["mqq.log".into(), "dir/mqq.log".into(), "other.txt".into()];
+        assert_eq!(fuzzy_label_indices(&labels, "^mqq.log$"), vec![0]);
+        assert_eq!(fuzzy_label_indices(&labels, "'mqq.log"), vec![0, 1]);
     }
 
     #[test]

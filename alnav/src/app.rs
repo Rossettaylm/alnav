@@ -321,6 +321,8 @@ pub struct App {
     pub dashboard: Option<crate::dashboard::DashboardState>,
     /// Persisted recent files (config dir).
     pub recent: crate::recent::RecentFiles,
+    /// Configured log_dirs corpus for Open-file fuzzy search.
+    pub log_corpus: crate::log_corpus::LogCorpus,
     /// Open-file source panel (`of` / Dashboard Open file…).
     pub open_file_panel: Option<crate::source_panel::OpenFilePanel>,
     /// Centered HDC/ADB panel (`os`).
@@ -448,6 +450,7 @@ impl App {
             pending_open: false,
             dashboard: None,
             recent: crate::recent::RecentFiles::default(),
+            log_corpus: crate::log_corpus::LogCorpus::new(),
             open_file_panel: None,
             stream_source_panel: None,
             picker: None,
@@ -650,22 +653,49 @@ impl App {
         self.pending_open = false;
         self.stream_source_panel = None;
         self.picker = None;
+        self.log_corpus.configure(
+            self.config.log_dirs.clone(),
+            self.config.log_extensions.clone(),
+        );
+        self.log_corpus.ensure_started();
+        if self.recent.paths.is_empty() && self.log_corpus.roots_empty() {
+            self.set_flash("configure log_dirs in config.toml");
+        }
         self.open_file_panel = Some(crate::source_panel::OpenFilePanel::open(
             &self.recent,
+            &self.log_corpus,
             from_dashboard,
         ));
     }
 
     pub fn open_stream_source_panel(&mut self, from_dashboard: bool) {
         self.pending_open = false;
+        if self.open_file_panel.is_some() {
+            self.log_corpus.cancel_inflight();
+        }
         self.open_file_panel = None;
         self.picker = None;
         self.stream_source_panel =
             Some(crate::source_panel::StreamSourcePanel::new(from_dashboard));
     }
 
-    pub fn close_source_panels(&mut self) {
+    pub fn close_open_file_panel(&mut self) {
+        self.log_corpus.cancel_inflight();
         self.open_file_panel = None;
+    }
+
+    /// Refresh Open-file candidate list from current recent + corpus (split borrow).
+    pub fn refresh_open_file_choices(&mut self) {
+        let recent = self.recent.clone();
+        let Some(mut panel) = self.open_file_panel.take() else {
+            return;
+        };
+        panel.refresh_choices(&recent, &self.log_corpus);
+        self.open_file_panel = Some(panel);
+    }
+
+    pub fn close_source_panels(&mut self) {
+        self.close_open_file_panel();
         self.stream_source_panel = None;
         self.pending_open = false;
     }

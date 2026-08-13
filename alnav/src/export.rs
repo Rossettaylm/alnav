@@ -2,6 +2,7 @@
 
 use crate::filter_model::{ExcludeEntry, Group, GroupList, TimeBound};
 use crate::input::{Chip, ChipField};
+use crate::theme;
 
 /// How the TUI session was started (mirrored into the exported command).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,15 @@ impl ExportSource {
 
     pub fn is_live(&self) -> bool {
         matches!(self, Self::Hdc { .. } | Self::Adb { .. })
+    }
+
+    /// Status-bar / dashboard-aligned nerdfont for the bound source.
+    pub fn status_glyph(&self) -> &'static str {
+        match self {
+            Self::File(_) => theme::GLYPH_SOURCE_FILE,
+            Self::Hdc { .. } => theme::GLYPH_SOURCE_HDC,
+            Self::Adb { .. } => theme::GLYPH_SOURCE_ADB,
+        }
     }
 }
 
@@ -210,6 +220,22 @@ mod tests {
 
     fn group_from(chips: Vec<Chip>) -> Group {
         build_group_from_chips(chips, true).unwrap().unwrap()
+    }
+
+    #[test]
+    fn status_glyph_matches_dashboard_source_icons() {
+        assert_eq!(
+            ExportSource::File("app.log".into()).status_glyph(),
+            theme::GLYPH_SOURCE_FILE
+        );
+        assert_eq!(
+            ExportSource::Hdc { device: None }.status_glyph(),
+            theme::GLYPH_SOURCE_HDC
+        );
+        assert_eq!(
+            ExportSource::Adb { device: None }.status_glyph(),
+            theme::GLYPH_SOURCE_ADB
+        );
     }
 
     #[test]

@@ -2502,7 +2502,15 @@ pub fn serialize_default_config_toml() -> String {
      picker_preview_enabled = true\n\
      #\n\
      # recent_files_limit: max paths remembered for Dashboard / of (1..=200).\n\
-     recent_files_limit = 20\n"
+     recent_files_limit = 20\n\
+     #\n\
+     # log_dirs: directories recursively scanned for Open-file (of) fuzzy corpus.\n\
+     # Empty = recent-only. Supports ~ expansion. No cwd fallback.\n\
+     log_dirs = []\n\
+     #\n\
+     # log_extensions: case-insensitive suffix filter for corpus files.\n\
+     # Empty / omitted → default [\".log\", \".txt\"].\n\
+     log_extensions = [\".log\", \".txt\"]\n"
         .to_string()
 }
 
