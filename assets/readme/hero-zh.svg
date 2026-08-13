@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
   <title id="title">alnav - App / Android Log Navigator</title>
-  <desc id="desc">Terminal-native log navigator: vim-style TUI by default, alnav grep for scripted CLI filtering of Android and HarmonyOS logs.</desc>
+  <desc id="desc">Èïå×ü*Ø¤ vim Î TUIalnav grep Ð› Android / HarmonyOS å×„ CLI Çä</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#0b1218"/>
@@ -19,8 +19,8 @@
     <text x="14" y="19" fill="#7dd3fc" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">mobile logs</text>
     <text x="0" y="92" fill="#f0f6fc" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="72" font-weight="700">alnav</text>
     <text x="0" y="138" fill="#9fb3c4" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24">App / Android Log Navigator</text>
-    <text x="0" y="188" fill="#d7e2eb" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="22">vim-style TUI by default Â· <tspan fill="#67e8f9">alnav grep</tspan> for CLI</text>
-    <text x="0" y="222" fill="#8aa0b2" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="20">logcat / xlog / hilog Â· filter Â· crash Â· aggregate</text>
+    <text x="0" y="188" fill="#d7e2eb" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="22">Ø¤ vim Î TUI · <tspan fill="#67e8f9">alnav grep</tspan> Ñ¯ CLI</text>
+    <text x="0" y="222" fill="#8aa0b2" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="20">logcat / xlog / hilog · Çä · )ƒ · Z</text>
     <g transform="translate(0 258)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">
       <rect width="430" height="40" rx="10" fill="#0a141c" stroke="#2a4152"/>
       <text x="16" y="26"><tspan fill="#67e8f9">&gt;</tspan><tspan fill="#e6edf3"> cargo install alnav</tspan></text>
@@ -54,7 +54,7 @@
       <text y="152" fill="#67e8f9">| lock</text>
       <text y="152" x="70" fill="#94a3b8">pid 3542</text>
       <text y="184" fill="#34d399">*</text>
-      <text y="184" x="22" fill="#64748b">following Â· 128 matched</text>
+      <text y="184" x="22" fill="#64748b">following · 128 matched</text>
     </g>
   </g>
 </svg>
