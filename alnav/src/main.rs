@@ -943,7 +943,7 @@ fn run<B: ratatui::backend::Backend>(
                             ui::render_preview(
                                 "Preview",
                                 &preview_lines,
-                                "输入以预览",
+                                "type to preview",
                                 frame,
                                 prev,
                             );
@@ -953,7 +953,7 @@ fn run<B: ratatui::backend::Backend>(
                         hw_cursor = ui::render_input_modal(input, app.mode, frame, input_area);
                         let mut stack_bottom = input_area;
                         if input.field_popup_visible() {
-                            // `.max(1)` so empty-match state still gets a row for「无匹配字段」.
+                            // `.max(1)` so empty-match state still gets a row for "no match".
                             let count = input.field_candidates().len().max(1);
                             let rect = popup_rect(input_area, frame_area, count);
                             ui::render_popup(input, frame, rect);
@@ -963,7 +963,7 @@ fn run<B: ratatui::backend::Backend>(
                         if prev.height > 0 {
                             let limit = ui::preview_content_capacity(prev);
                             let preview_lines = app.preview_filter_throttled(input, limit);
-                            ui::render_preview("Preview", &preview_lines, "无匹配行", frame, prev);
+                            ui::render_preview("Preview", &preview_lines, "no matches", frame, prev);
                         }
                     } else if app.time_panel.is_some() {
                         let h = ui::time_panel_height(frame_area);
@@ -1199,7 +1199,7 @@ fn picker_render_data(
     let mut actions = Vec::new();
     let mut preview_lines = Vec::new();
     let mut detail_row: Option<Option<crate::model::EntryRow>> = None;
-    let mut empty_msg = "无项目".to_string();
+    let mut empty_msg = "no items".to_string();
     let mut preset_preview: Option<Vec<ratatui::text::Line<'static>>> = None;
 
     match session.mode {
@@ -1215,7 +1215,7 @@ fn picker_render_data(
                 styles = vec![theme::muted(); labels.len()];
                 checked = vec![false; labels.len()];
                 actions = vec![crate::ui::ActionKind::None; labels.len()];
-                empty_msg = "选择创建方式".to_string();
+                empty_msg = "no match".to_string();
                 show_preview = false;
             }
             PickerKind::Bookmark => {
@@ -1230,7 +1230,7 @@ fn picker_render_data(
                 styles = vis.iter().map(|_| theme::bookmark_label_style()).collect();
                 checked = vec![false; vis.len()];
                 actions = vec![crate::ui::ActionKind::Jump; vis.len()];
-                empty_msg = "无书签".to_string();
+                empty_msg = "no bookmarks".to_string();
                 if show_preview {
                     detail_row = Some(
                         vis.get(session.selected)
@@ -1248,7 +1248,7 @@ fn picker_render_data(
                 styles = vec![theme::muted(); labels.len()];
                 checked = vec![false; labels.len()];
                 actions = vec![crate::ui::ActionKind::Jump; labels.len()];
-                empty_msg = "无规则".to_string();
+                empty_msg = "no presets".to_string();
                 if show_preview {
                     if let Some(&idx) = vis.get(session.selected) {
                         preset_preview = Some(ui::preset_preview_lines(
@@ -1347,7 +1347,7 @@ fn picker_render_data(
                     preview_limit,
                 )
                 .unwrap_or_default();
-                empty_msg = "输入高亮词".to_string();
+                empty_msg = "type a pattern".to_string();
             }
             PickerKind::Filter | PickerKind::Exclude => {
                 if let Some(input) = session.input.as_ref() {
@@ -1386,7 +1386,7 @@ fn picker_render_data(
                         preview_lines = app.preview_filter_throttled(input, preview_limit);
                     }
                 }
-                empty_msg = "Enter 收 pill / 提交".to_string();
+                empty_msg = "Enter to add / submit".to_string();
             }
             PickerKind::Bookmark | PickerKind::Preset => {}
             PickerKind::MsgChip { .. } => {
@@ -1401,7 +1401,7 @@ fn picker_render_data(
                         .fg(theme::field_color(crate::input::ChipField::Msg));
                     labels.len()
                 ];
-                empty_msg = "输入消息片段".to_string();
+                empty_msg = "type a token".to_string();
             }
             PickerKind::Unified | PickerKind::ActionList { .. } => {}
         },
@@ -6170,7 +6170,7 @@ mod dispatch_tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("非 JSON"));
+        assert!(joined.contains("not JSON"));
         assert!(joined.contains("not-json-at-all"));
     }
 
@@ -6520,7 +6520,7 @@ mod dispatch_tests {
             .expect("alive bookmark yields detail row");
         assert_eq!(row.tag, "TagA");
         assert!(row.msg.contains("hello detail"));
-        assert_eq!(data.empty_msg, "无书签");
+        assert_eq!(data.empty_msg, "no bookmarks");
     }
 
     #[test]

@@ -1798,7 +1798,7 @@ pub fn render_input_modal(
     area: Rect,
 ) -> Option<Position> {
     let title = if input.exclude_mode {
-        "Input ! (排除)"
+        "Input !"
     } else {
         "Input"
     };
@@ -2056,7 +2056,7 @@ pub fn render_summary_panel(app: &App, frame: &mut Frame, area: Rect) {
         SummaryView::Loading => {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "计算中…",
+                    "computing…",
                     theme::log_loading_style(true),
                 ))),
                 inner,
@@ -2087,7 +2087,7 @@ pub fn detail_field_lines(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(row) = row else {
         lines.push(Line::from(Span::styled(
-            "无选中行".to_string(),
+            "no row".to_string(),
             theme::preview_placeholder_style(),
         )));
         return lines;
@@ -2199,7 +2199,7 @@ pub fn detail_pretty_lines(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(row) = row else {
         lines.push(Line::from(Span::styled(
-            "无选中行".to_string(),
+            "no row".to_string(),
             theme::preview_placeholder_style(),
         )));
         return lines;
@@ -2207,7 +2207,7 @@ pub fn detail_pretty_lines(
     let (text, is_json) = pretty_json_for_row(row);
     if !is_json {
         lines.push(Line::from(Span::styled(
-            "非 JSON".to_string(),
+            "not JSON".to_string(),
             theme::preview_placeholder_style(),
         )));
     }
@@ -2315,9 +2315,9 @@ pub fn render_crash_detail_lines(
     )));
     if info.stack.is_empty() {
         let placeholder = if is_stream {
-            "stream 模式无堆栈"
+            "no stack (stream)"
         } else {
-            "无堆栈"
+            "no stack"
         };
         lines.push(Line::from(Span::styled(
             placeholder.to_string(),
@@ -2332,7 +2332,7 @@ pub fn render_crash_detail_lines(
     }
     if truncated {
         lines.push(Line::from(Span::styled(
-            "…(已截断)".to_string(),
+            "…(truncated)".to_string(),
             theme::preview_placeholder_style(),
         )));
     }
@@ -2452,7 +2452,7 @@ pub fn render_time_panel(app: &App, frame: &mut Frame, area: Rect) -> Option<Pos
     push_label(&mut lines, "since", &mut row);
     push_field(
         &mut lines,
-        "日期",
+        "date",
         panel.since_date_query(),
         panel.since_date_cursor(),
         focus == TimeField::SinceDate,
@@ -2481,7 +2481,7 @@ pub fn render_time_panel(app: &App, frame: &mut Frame, area: Rect) -> Option<Pos
     }
     push_field(
         &mut lines,
-        "时间",
+        "time",
         panel.since_time(),
         panel.since_time_cursor(),
         focus == TimeField::SinceTime,
@@ -2494,7 +2494,7 @@ pub fn render_time_panel(app: &App, frame: &mut Frame, area: Rect) -> Option<Pos
     push_label(&mut lines, "until", &mut row);
     push_field(
         &mut lines,
-        "日期",
+        "date",
         panel.until_date_query(),
         panel.until_date_cursor(),
         focus == TimeField::UntilDate,
@@ -2523,7 +2523,7 @@ pub fn render_time_panel(app: &App, frame: &mut Frame, area: Rect) -> Option<Pos
     }
     push_field(
         &mut lines,
-        "时间",
+        "time",
         panel.until_time(),
         panel.until_time_cursor(),
         focus == TimeField::UntilTime,
@@ -2755,7 +2755,7 @@ pub fn render_picker(
     if let Some(right) = right {
         match right_pane {
             PickerRightPane::Hits(preview_lines) => {
-                render_preview("Preview", preview_lines, "无预览", frame, right);
+                render_preview("Preview", preview_lines, "no preview", frame, right);
             }
             PickerRightPane::Detail(row) => {
                 render_picker_detail(row, frame, right);
@@ -2797,7 +2797,7 @@ pub fn render_preset_rules_preview(lines: &[Line<'static>], frame: &mut Frame, a
     let inner = render_modal_shell("Preview", frame, area);
     if lines.is_empty() {
         frame.render_widget(
-            Paragraph::new(Span::styled("无规则", theme::preview_placeholder_style())),
+            Paragraph::new(Span::styled("no rules", theme::preview_placeholder_style())),
             inner,
         );
         return;
@@ -2886,12 +2886,12 @@ pub fn render_preset_name_dialog(
     if dialog.confirm_overwrite {
         let text = vec![
             Line::from(Span::styled(
-                format!("覆盖 '{}'？", dialog.field.as_str()),
+                format!("Overwrite '{}'?", dialog.field.as_str()),
                 Style::default().add_modifier(Modifier::BOLD),
             ))
             .alignment(Alignment::Center),
             Line::from(Span::styled(
-                "y/Enter 确认  n/Esc 取消",
+                "y/Enter confirm  n/Esc cancel",
                 theme::context_help_style(),
             ))
             .alignment(Alignment::Center),
@@ -2927,7 +2927,7 @@ pub fn render_picker_detail(row: Option<&crate::model::EntryRow>, frame: &mut Fr
         detail_field_lines(row, inner.width)
     } else {
         vec![Line::from(Span::styled(
-            "行已淘汰".to_string(),
+            "row gone".to_string(),
             theme::preview_placeholder_style(),
         ))]
     };
@@ -2941,13 +2941,13 @@ fn confirm_dialog_question(confirm: &crate::picker::ConfirmKind) -> String {
     match confirm {
         crate::picker::ConfirmKind::DeleteMany { items } => {
             if items.len() == 1 {
-                "删除选中？".to_string()
+                "Delete selected?".to_string()
             } else {
-                format!("删除选中 {} 项？", items.len())
+                format!("Delete {} items?", items.len())
             }
         }
-        crate::picker::ConfirmKind::DeleteBookmark { .. } => "删除书签？".to_string(),
-        crate::picker::ConfirmKind::DeletePreset { name } => format!("删除规则 '{name}'？"),
+        crate::picker::ConfirmKind::DeleteBookmark { .. } => "Delete bookmark?".to_string(),
+        crate::picker::ConfirmKind::DeletePreset { name } => format!("Delete preset '{name}'?"),
     }
 }
 
@@ -2960,7 +2960,7 @@ pub fn render_confirm_dialog(
     let width = 34.min(picker_area.width).max(1);
     let height = 5.min(picker_area.height).max(1);
     let area = centered_modal_rect(picker_area, width, height);
-    let inner = render_modal_shell("确认删除", frame, area);
+    let inner = render_modal_shell("Confirm", frame, area);
     let text = vec![
         Line::from(Span::styled(
             question,
@@ -2968,7 +2968,7 @@ pub fn render_confirm_dialog(
         ))
         .alignment(Alignment::Center),
         Line::from(Span::styled(
-            "y/Enter 确认  n/Esc 取消",
+            "y/Enter confirm  n/Esc cancel",
             theme::context_help_style(),
         ))
         .alignment(Alignment::Center),
@@ -3016,13 +3016,13 @@ pub fn render_highlight_popup(
         search.selected.min(n - 1)
     };
     render_candidate_list(
-        "历史",
+        "History",
         &labels,
         &styles,
         &[],
         &[],
         selected,
-        "无匹配历史",
+        "no history",
         &search.draft,
         frame,
         area,
@@ -3046,13 +3046,13 @@ pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
         input.field_selected.min(matches.len() - 1)
     };
     render_candidate_list(
-        "字段",
+        "Fields",
         &labels,
         &styles,
         &[],
         &[],
         selected,
-        "无匹配字段",
+        "no match",
         &input.draft,
         frame,
         area,
@@ -5298,7 +5298,7 @@ mod tests {
                     &[],
                     &[],
                     0,
-                    "无项目",
+                    "no items",
                     PickerRightPane::Hits(&[]),
                     0.4,
                     true,
@@ -5335,7 +5335,7 @@ mod tests {
                     &[],
                     &[],
                     0,
-                    "无项目",
+                    "no items",
                     PickerRightPane::Hits(&[]),
                     0.4,
                     true,
@@ -5381,7 +5381,7 @@ mod tests {
                     &[],
                     &[],
                     0,
-                    "无项目",
+                    "no items",
                     PickerRightPane::Hits(&[]),
                     0.4,
                     true,
@@ -5395,7 +5395,7 @@ mod tests {
             .unwrap();
 
         let content = cell_text(terminal.backend().buffer());
-        assert_eq!(confirm_dialog_question(&confirm), "删除选中？");
+        assert_eq!(confirm_dialog_question(&confirm), "Delete selected?");
         assert!(content.contains("y/Enter"));
         assert!(content.contains("n/Esc"));
     }
@@ -5497,13 +5497,9 @@ mod tests {
                 render_picker_detail(None, frame, frame.area());
             })
             .unwrap();
-        // CJK wide glyphs leave empty spacer cells; collapse whitespace for assert.
-        let content: String = cell_text(terminal.backend().buffer())
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
+        let content = cell_text(terminal.backend().buffer());
         assert!(
-            content.contains("Detail") && content.contains("行已淘汰"),
+            content.contains("Detail") && content.contains("row gone"),
             "stale detail must show placeholder, got: {content:?}"
         );
     }
@@ -5530,7 +5526,7 @@ mod tests {
             .unwrap();
 
         let content = cell_text(terminal.backend().buffer());
-        assert_eq!(confirm_dialog_question(&confirm), "删除选中 12 项？");
+        assert_eq!(confirm_dialog_question(&confirm), "Delete 12 items?");
         assert!(content.contains("12"));
     }
 
@@ -5781,9 +5777,7 @@ mod tests {
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(content.contains("Summary"));
-        // CJK glyphs occupy two buffer cells; assert on the border/title only
-        // (content reconstruction from `cell_text` isn't East-Asian-width aware).
-        assert!(content.contains("计"));
+        assert!(content.contains("computing"));
     }
 
     #[test]
@@ -5885,7 +5879,7 @@ mod crash_detail_tests {
         let rendered = joined(&render_crash_detail_lines(&info, false, truncated, 60));
         assert!(rendered.contains("FATAL EXCEPTION"));
         assert!(rendered.contains("Foo.bar"));
-        assert!(!rendered.contains("截断"));
+        assert!(!rendered.contains("truncated"));
     }
 
     #[test]
@@ -5905,7 +5899,7 @@ mod crash_detail_tests {
         assert!(truncated, "scan past 500 continuation lines must truncate");
 
         let rendered = joined(&render_crash_detail_lines(&info, false, truncated, 60));
-        assert!(rendered.contains("截断"));
+        assert!(rendered.contains("truncated"));
     }
 
     #[test]

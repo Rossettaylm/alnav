@@ -40,7 +40,7 @@ impl ThemeLoadStatus {
     /// Status-bar hint when the user should notice a fallback.
     pub fn status_hint(&self) -> Option<String> {
         match self {
-            ThemeLoadStatus::Fallback { error, .. } => Some(format!("THEME 回退: {error}")),
+            ThemeLoadStatus::Fallback { error, .. } => Some(format!("THEME fallback: {error}")),
             _ => None,
         }
     }
@@ -99,7 +99,7 @@ impl ConfigLoadStatus {
     /// Status-bar hint when the user should notice a fallback.
     pub fn status_hint(&self) -> Option<String> {
         match self {
-            ConfigLoadStatus::Fallback { error, .. } => Some(format!("CONFIG 回退: {error}")),
+            ConfigLoadStatus::Fallback { error, .. } => Some(format!("CONFIG fallback: {error}")),
             _ => None,
         }
     }
@@ -310,7 +310,7 @@ mod tests {
         match &st {
             ThemeLoadStatus::Fallback { error, .. } => {
                 assert!(!error.is_empty());
-                assert!(st.status_hint().unwrap().contains("THEME 回退"));
+                assert!(st.status_hint().unwrap().contains("THEME fallback"));
             }
             other => panic!("expected Fallback, got {other:?}"),
         }
@@ -423,7 +423,7 @@ mod tests {
         let (cfg, st) = load_config(dir.path());
         assert!((cfg.picker_left_ratio - 0.4).abs() < f32::EPSILON);
         assert!(matches!(st, ConfigLoadStatus::Fallback { .. }));
-        assert!(st.status_hint().unwrap().contains("CONFIG 回退"));
+        assert!(st.status_hint().unwrap().contains("CONFIG fallback"));
     }
 
     #[test]
