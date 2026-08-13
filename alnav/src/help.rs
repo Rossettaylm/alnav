@@ -1,9 +1,11 @@
 //! Focus-aware keybinding hints for the status bar and Help panel.
 //!
 //! Two levels: L1 shows single keys / multi-key prefixes; L2 shows the
-//! follow-up keys while an operator is pending. Status-bar rendering uses
-//! dim keys + normal labels with spacing (no `:` / `|` separators). Help
-//! reuses the same entries as a detailed Active block plus a full catalog.
+//! follow-up keys while an operator is pending. Help Active + catalog use
+//! the full [`context_entries`] set. The status bar uses
+//! [`status_hint_entries`] (idle LogList/Strip are curated 1–2 keys; pending
+//! and modal surfaces keep the full set). Rendering is dim keys + normal
+//! labels with spacing (no `:` / `|` separators).
 //!
 //! Key strings come from [`App::keymap`]; labels/details stay in this module.
 
@@ -389,7 +391,7 @@ fn l1_strip(app: &App) -> Vec<HintEntry> {
     out
 }
 
-/// Entries for the current status-bar / Help Active context.
+/// Full L1/L2 for Help Active + catalog. Status bar uses [`status_hint_entries`].
 pub fn context_entries(app: &App) -> Vec<HintEntry> {
     match context_kind(app) {
         ContextKind::Confirm => {
@@ -644,6 +646,38 @@ pub fn context_entries(app: &App) -> Vec<HintEntry> {
         }
         ContextKind::LogList => l1_loglist(app, false),
         ContextKind::LogListLive => l1_loglist(app, true),
+    }
+}
+
+/// Status-bar hint subset: idle LogList/Strip are curated 1–2 keys;
+/// pending/modal surfaces keep the full [`context_entries`] set.
+pub fn status_hint_entries(app: &App) -> Vec<HintEntry> {
+    match context_kind(app) {
+        ContextKind::LogList | ContextKind::LogListLive => {
+            let mut out = Vec::new();
+            push_single(&mut out, app, ActionId::GlobalOpenHelp, "help", "open help");
+            push_single(
+                &mut out,
+                app,
+                ActionId::GlobalFilterNew,
+                "filter",
+                "open filter new",
+            );
+            out
+        }
+        ContextKind::ChipStrip | ContextKind::ExcludeStrip | ContextKind::HighlightStrip => {
+            let mut out = Vec::new();
+            push_single(&mut out, app, ActionId::StripOpenHelp, "help", "open help");
+            push_single(
+                &mut out,
+                app,
+                ActionId::StripPendingD,
+                "del…",
+                "dd delete / di disable",
+            );
+            out
+        }
+        _ => context_entries(app),
     }
 }
 
@@ -1036,7 +1070,7 @@ pub fn context_hint_spans(app: &App, max_chars: usize) -> Option<Vec<Span<'stati
     if max_chars < MIN_HELP_WIDTH {
         return None;
     }
-    let entries = context_entries(app);
+    let entries = status_hint_entries(app);
     let mut spans = Vec::new();
     let mut used = 0usize;
     for (i, entry) in entries.iter().enumerate() {
@@ -1301,7 +1335,100 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains(':'), "no colon separators: {text:?}");
         assert!(text.contains("help"), "expected help hint: {text:?}");
-        assert!(text.contains("j/k move"), "dim-key spacing form: {text:?}");
+        assert!(
+            text.contains("filter"),
+            "idle LogList must show filter: {text:?}"
+        );
+        assert!(
+            !text.contains("j/k move"),
+            "idle LogList must not dump full L1: {text:?}"
+        );
+    }
+
+    #[test]
+    fn status_idle_loglist_is_help_and_filter() {
+        let app = app_with_focus(Focus::LogList);
+        let entries = status_hint_entries(&app);
+        let labels: Vec<&str> = entries.iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["help", "filter"], "{entries:?}");
+        let live = {
+            let mut app = app_with_focus(Focus::LogList);
+            app.export_source = crate::export::ExportSource::Hdc { device: None };
+            status_hint_entries(&app)
+        };
+        let live_labels: Vec<&str> = live.iter().map(|e| e.label).collect();
+        assert_eq!(live_labels, ["help", "filter"], "{live:?}");
+    }
+
+    #[test]
+    fn status_idle_strip_is_help_and_del() {
+        for focus in [Focus::ChipStrip, Focus::ExcludeStrip, Focus::HighlightStrip] {
+            let entries = status_hint_entries(&app_with_focus(focus));
+            let labels: Vec<&str> = entries.iter().map(|e| e.label).collect();
+            assert_eq!(labels, ["help", "del…"], "{focus:?} {entries:?}");
+        }
+    }
+
+    #[test]
+    fn status_pending_chip_lists_fields() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_chip = true;
+        let spans = context_hint_spans(&app, 200).expect("wide enough");
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("tag"), "{text:?}");
+        assert!(text.contains("msg"), "{text:?}");
+        assert!(
+            !text.contains("c…"),
+            "pending prefix must not leak: {text:?}"
+        );
+    }
+
+    #[test]
+    fn status_pending_and_modal_keep_full_context_entries() {
+        let labels = |app: &crate::app::App| -> Vec<&str> {
+            status_hint_entries(app).iter().map(|e| e.label).collect()
+        };
+        let full = |app: &crate::app::App| -> Vec<&str> {
+            context_entries(app).iter().map(|e| e.label).collect()
+        };
+
+        let mut app = app_with_focus(Focus::LogList);
+        app.pending_chip = true;
+        assert_eq!(labels(&app), full(&app), "pending must not use idle 1–2");
+
+        app.pending_chip = false;
+        app.detail = crate::app::DetailView::Fields;
+        assert_eq!(labels(&app), full(&app), "Detail must expand full set");
+        assert!(
+            labels(&app).len() > 2,
+            "Detail must not keep idle help+filter: {:?}",
+            labels(&app)
+        );
+
+        app.detail = crate::app::DetailView::Closed;
+        app.open_picker(crate::picker::PickerKind::Filter);
+        assert_eq!(labels(&app), full(&app), "Picker must expand full set");
+    }
+
+    #[test]
+    fn help_body_still_lists_move_cursor() {
+        let app = app_with_focus(Focus::LogList);
+        let lines = help_body_lines(&app);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("j/k") || text.contains("move"), "{text}");
+        assert!(
+            text.contains("move cursor") || text.contains("move"),
+            "{text}"
+        );
+        let active = context_entries(&app);
+        assert!(
+            active.iter().any(|e| e.label == "move"),
+            "Help Active must keep full LogList L1: {active:?}"
+        );
     }
 
     #[test]

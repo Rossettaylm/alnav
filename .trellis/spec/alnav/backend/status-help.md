@@ -30,34 +30,45 @@ Update this spec when changing:
 |------|----------|----------|
 | `HintEntry { key, label, detail }` | `help.rs` | `key` from `KeymapStore::display`; Status uses `key`+`label`; Help uses `detail` |
 | `context_kind(app) -> ContextKind` | `help.rs` | modal/confirm > pending > focus |
-| `context_entries(app) -> Vec<HintEntry>` | `help.rs` | Current L1 or L2 set (keys from keymap) |
+| `context_entries(app) -> Vec<HintEntry>` | `help.rs` | Full L1 or L2 set — Help Active + catalog only |
+| `status_hint_entries(app) -> Vec<HintEntry>` | `help.rs` | Status bar subset: idle LogList/Strip curated 1–2 keys; else full |
 | `keymap.toml` / `KeymapStore` | `keymap.rs` | Startup deep-merge; `--init` serializes defaults |
-| `context_hint_spans(app, max)` | `help.rs` | Dim key + normal label; gap `"  "`; no `:`/`\|` |
+| `context_hint_spans(app, max)` | `help.rs` | Consumes `status_hint_entries`; dim key + label; gap `"  "`; no `:`/`\|` |
 | `help_available(app) -> bool` | `help.rs` | Gate for opening Help |
 | `help_body_lines(app)` | `help.rs` | Active block + fixed catalog |
 | `FAST_SCROLL_STEP` | `help.rs` (`pub const`, value `7`) | Shared by LogList `J`/`K` and Help `J`/`K` |
 | `App.help_open` / `help_scroll` | `app.rs` | Panel state; `close_help` does **not** `resume_following` |
 | `handle_help_key` | `main.rs` | Esc/`?`/Ctrl+C close; `j`/`k` ±1; `J`/`K` ±`FAST_SCROLL_STEP` |
-| `status_icon` / `status_icon_value` / `status_soft` | `theme.rs` | Left cluster rendering helpers |
+| `status_pill` / `status_pill_value` / `status_icon_dim` / `status_flash_pill` | `theme.rs` | Status-bar left cluster + flash; on-pill fg via `contrast_fg` |
+| `status_icon` / `status_icon_value` / `status_soft` | `theme.rs` | Kept for non-status-bar callers |
 
 ---
 
 ## 3. Contracts
 
-### Status bar left cluster
+### Status bar three zones (single row)
+
+Left (never yields) → middle flash pill → pad + right-aligned hints.
 
 | State | Render |
 |-------|--------|
-| follow / visual | Glyph only (`status_icon`) — no FOLLOWING/VISUAL words |
-| lock / time / view focus / progress | Glyph + short value (`status_icon_value`) — no LOCK/TIME word prefix; view focus uses `GLYPH_VIEW_FOCUS` + `HL`/`ERR` |
-| highlight hits | Search glyph + `k/total` — **no** `[brackets]` |
-| pending / flash | Soft non-inverse text (`status_soft`), English |
+| follow | Always a slot: on = `status_pill` success; off = `status_icon_dim` (same glyph, DIM, no fill) |
+| device | Always a slot: live connected = source glyph accent pill; live `ingest_done` = `GLYPH_DISCONNECT` warning pill; `-f` = file glyph accent pill (never disconnect) |
+| lock / time / view focus / progress | When active: `status_pill_value` — no LOCK/TIME word prefix; view focus uses `GLYPH_VIEW_FOCUS` + `HL`/`ERR` |
+| visual | When active: accent `status_pill` — no VISUAL word |
+| highlight hits | Search glyph + `k/total` as accent pill_value — **no** `[brackets]` |
+| cursor `n/N` | Dim text, not a pill |
+| pending prefixes | **Dropped** (`c…` / `SPC…` etc. are not in the left cluster) |
+| flash | Middle filled pill (`status_flash_pill`); `FAILED` → warning fill, else success; 3s via `set_flash` |
 
 ### Status bar right hints
 
 - English only; key dim, label normal weight; entries separated by spaces only.
-- L1 when idle; L2 when operator-pending; modal L1 overrides pending.
-- LogList L1 must include `? help` early enough to survive moderate truncation.
+- Idle **LogList / LogListLive**: exactly `? help` and `; filter` (from keymap via `status_hint_entries`).
+- Idle **ChipStrip / ExcludeStrip / HighlightStrip**: exactly `? help` and `d del…`.
+- Operator-pending and modal (Picker / Time / Detail / Confirm / Highlight-edit / Input / Leader): full `context_entries`.
+- Help Active + catalog still use the full `context_entries` list — do not shrink that source.
+- Hints hide first when budget `< MIN_HELP_WIDTH` (8); flash keeps a ~12-column floor (`FLASH_MIN`) while visible.
 
 ### Help panel (`?`)
 
@@ -95,16 +106,16 @@ English. Prefer short uppercase tokens (`EXISTS`, `NO ROW`, `UNKNOWN FIELD`).
 ## 5. Good / Base / Bad Cases
 
 - **Good**: LogList Normal `?` → Help; `J` scrolls +7; Esc closes; still not following.
-- **Base**: Wide status shows `j/k move  Esc follow  ? help …` without colons.
+- **Base**: Wide idle LogList status shows `? help  ; filter` without colons, not the long L1 list.
 - **Bad**: Reintroducing `j/k:移` Chinese colon strings, or `FOLLOWING` word badges, or `?` → Highlight New.
 
 ---
 
 ## 6. Tests Required
 
-- `help::` — context kind priority, live L1 for HDC and ADB (no `t`, has `^L`), spans without `:`, `? help` present, catalog includes Active + Navigation, `FAST_SCROLL_STEP` matches catalog text.
+- `help::` — context kind priority, live L1 for HDC and ADB (no `t`, has `^L`), idle status spans are `help`+`filter` (not `j/k move`), pending chip lists `tag`/`msg`, catalog includes Active + Navigation + `j/k` move, `FAST_SCROLL_STEP` matches catalog text.
 - `dispatch_tests` — `?` open/Esc no-follow; `?` ignored when pending; `/` still Highlight New; Help `J`/`K` ±7; `j`/`k` ±1.
-- `ui::` status bar — match stats without `[]`; wide shows help; narrow keeps follow glyph and hides `j/k`.
+- `ui::` status bar — match stats without `[]`; wide idle shows help+filter not `j/k`; follow glyph when paused; pending has no `c…`; flash pill visible with pending L2; narrow keeps follow glyph and hides hints.
 
 ---
 
@@ -122,10 +133,13 @@ theme::status_badge(GLYPH_FOLLOWING, "FOLLOWING", success());
 #### Correct
 
 ```rust
-// Shared HintEntry; English flash; icon-only follow
-context_hint_spans(app, avail);
+// Shared HintEntry; status subset vs full Help; English flash pill
+status_hint_entries(app); // idle: help + filter
+context_entries(app);     // Help Active stays full (j/k move, …)
 app.set_flash("EXISTS");
-theme::status_icon(GLYPH_FOLLOWING, success());
+theme::status_pill(GLYPH_FOLLOWING, success()); // on
+theme::status_icon_dim(GLYPH_FOLLOWING);        // off
+theme::status_flash_pill("EXISTS");
 // Help J/K shares help::FAST_SCROLL_STEP with LogList
 ```
 
@@ -135,6 +149,6 @@ theme::status_icon(GLYPH_FOLLOWING, success());
 
 **Context**: Status bar and Help must stay consistent after English redesign.
 
-**Decision**: `help.rs` is the only keybinding copy source; UI only styles/spans.
+**Decision**: `help.rs` is the only keybinding copy source. `context_entries` stays full for Help; `status_hint_entries` is the status-bar subset. UI only styles/spans.
 
-**Why**: Prevents L1 drift from the Help catalog and keeps dim-key rendering data-driven.
+**Why**: Prevents Help catalog from shrinking when the status bar curates idle hints, and keeps dim-key rendering data-driven.

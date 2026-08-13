@@ -3060,118 +3060,130 @@ pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
     );
 }
 
+const FLASH_MIN: usize = 12;
+
 pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
-    let mut spans = vec![Span::styled(
+    let mut left = vec![Span::styled(
         format!("{}/{}", app.cursor + 1, app.visible.len()),
         Style::default().add_modifier(Modifier::DIM),
     )];
     if let Some((current, total)) = app.highlight_match_stats() {
         let k = current.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_icon_value(
+        left.push(Span::raw(" "));
+        left.push(theme::status_pill_value(
             theme::GLYPH_SEARCH,
             &format!("{k}/{total}"),
             theme::accent(),
         ));
     }
+    left.push(Span::raw(" "));
     if app.following {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_icon(theme::GLYPH_FOLLOWING, theme::success()));
+        left.push(theme::status_pill(theme::GLYPH_FOLLOWING, theme::success()));
+    } else {
+        left.push(theme::status_icon_dim(theme::GLYPH_FOLLOWING));
     }
     // Source vs disconnect share one slot (live disconnect replaces source glyph).
-    spans.push(Span::raw(" "));
+    left.push(Span::raw(" "));
     if app.export_source.is_live() && app.ingest_done {
-        spans.push(theme::status_icon(
+        left.push(theme::status_pill(
             theme::GLYPH_DISCONNECT,
             theme::warning(),
         ));
     } else {
-        spans.push(theme::status_icon(
+        left.push(theme::status_pill(
             app.export_source.status_glyph(),
             theme::accent(),
         ));
     }
     if let Some(lock) = app.lock_badge_label() {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_icon_value(
+        left.push(Span::raw(" "));
+        left.push(theme::status_pill_value(
             theme::GLYPH_LOCK,
             &lock,
             theme::lock(),
         ));
     }
     if let Some(time) = app.time_badge_label() {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_icon_value(
+        left.push(Span::raw(" "));
+        left.push(theme::status_pill_value(
             theme::GLYPH_TIME,
             &time,
             theme::lock(),
         ));
     }
     if let Some(focus) = app.view_focus_badge_label() {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_icon_value(
+        left.push(Span::raw(" "));
+        left.push(theme::status_pill_value(
             theme::GLYPH_VIEW_FOCUS,
             focus,
             theme::accent(),
         ));
     }
     if let Some(prog) = app.file_progress_label() {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_icon_value(
+        left.push(Span::raw(" "));
+        left.push(theme::status_pill_value(
             theme::GLYPH_PROGRESS,
             &prog,
             theme::warning(),
         ));
     }
     if app.visual_anchor.is_some() {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_icon(theme::GLYPH_VISUAL, theme::accent()));
-    } else if app.pending_chip {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("c…", theme::warning()));
-    } else if app.pending_exclude {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("C…", theme::warning()));
-    } else if app.pending_lock {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("f…", theme::warning()));
-    } else if app.pending_time {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("t…", theme::warning()));
-    } else if app.pending_m {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("m…", theme::warning()));
-    } else if app.pending_yank {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("y…", theme::warning()));
-    } else if app.pending_open {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("o…", theme::warning()));
-    } else if app.pending_d {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("d…", theme::warning()));
-    } else if app.pending_leader {
-        spans.push(Span::raw(" "));
-        spans.push(theme::status_soft("SPC…", theme::warning()));
+        left.push(Span::raw(" "));
+        left.push(theme::status_pill(theme::GLYPH_VISUAL, theme::accent()));
     }
-    // Timed flash toast; pending markers above are separate.
-    if let Some(msg) = &app.status_msg {
-        spans.push(Span::raw(" "));
-        let fg = if msg.starts_with("YANK FAILED") {
-            theme::warning()
+
+    let area_w = area.width as usize;
+    let left_w: usize = left.iter().map(span_width).sum();
+    let avail = area_w.saturating_sub(left_w);
+
+    let mut flash_span: Option<Span<'static>> = None;
+    let mut flash_block_w = 0usize;
+    if let Some(msg) = app.status_msg.as_deref() {
+        let full = theme::status_flash_pill(msg);
+        let natural = 1 + span_width(&full);
+        let slot = natural.max(FLASH_MIN);
+        let hint_budget = avail.saturating_sub(slot).saturating_sub(1);
+        if hint_budget < crate::help::MIN_HELP_WIDTH && natural > avail {
+            let pill_max = avail.saturating_sub(1);
+            if pill_max == 0 {
+                flash_span = None;
+                flash_block_w = 0;
+            } else {
+                let fitted = theme::status_flash_pill_fit(msg, pill_max);
+                flash_block_w = 1 + span_width(&fitted);
+                flash_span = Some(fitted);
+            }
         } else {
-            theme::accent()
-        };
-        spans.push(theme::status_soft(msg, fg));
+            flash_span = Some(full);
+            flash_block_w = natural;
+        }
     }
-    // Trailing context help: badges keep priority; hint truncates or hides.
-    let left_width: usize = spans.iter().map(span_width).sum();
-    let avail = (area.width as usize)
-        .saturating_sub(left_width)
-        .saturating_sub(1); // leading space before the hint
-    if let Some(hint) = crate::help::context_hint_spans(app, avail) {
+
+    let hint_budget = if flash_span.is_some() {
+        let slot = flash_block_w.max(FLASH_MIN);
+        avail.saturating_sub(slot).saturating_sub(1)
+    } else {
+        avail.saturating_sub(1)
+    };
+    let hints = crate::help::context_hint_spans(app, hint_budget);
+    let hint_w: usize = hints
+        .as_ref()
+        .map(|h| h.iter().map(span_width).sum())
+        .unwrap_or(0);
+
+    let mut spans = left;
+    if let Some(flash) = flash_span {
         spans.push(Span::raw(" "));
-        spans.extend(hint);
+        spans.push(flash);
+    }
+    if hints.is_some() {
+        let pad = area_w.saturating_sub(left_w + flash_block_w + hint_w);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+        if let Some(hint) = hints {
+            spans.extend(hint);
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -3696,6 +3708,18 @@ mod tests {
             s.push('\n');
         }
         s
+    }
+
+    fn row0_bg_at_needle(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<Color> {
+        let mut text = String::new();
+        let mut starts = Vec::new();
+        for x in 0..buf.area.width {
+            starts.push(text.len());
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        let i = text.find(needle)?;
+        let x = starts.iter().rposition(|&s| s <= i)? as u16;
+        Some(buf[(x, 0)].bg)
     }
 
     fn dashboard_app(paths: Vec<String>) -> App {
@@ -4844,18 +4868,22 @@ mod tests {
             .unwrap();
         let content = cell_text(terminal.backend().buffer());
         assert!(
-            content.contains("j/k") && content.contains("Esc") && content.contains("help"),
-            "wide bar should show LogList help: got {content:?}"
+            content.contains("help") && content.contains("filter"),
+            "wide idle bar should show curated hints: got {content:?}"
+        );
+        assert!(
+            !content.contains("j/k"),
+            "idle LogList must not dump full L1: got {content:?}"
         );
     }
 
     #[test]
     fn test_render_status_bar_hides_context_help_when_narrow() {
         let mut app = App::new(100);
-        app.following = true; // follow icon consumes space
+        app.following = false;
         app.focus = Focus::LogList;
 
-        // Wide enough for "1/0" + follow icon, too tight for help (avail < 8).
+        // Wide enough for cursor + follow + source, too tight for help (avail < 8).
         let backend = TestBackend::new(12, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -4869,6 +4897,176 @@ mod tests {
         assert!(
             !content.contains("help") && !content.contains("j/k"),
             "narrow bar should hide help entirely: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_follow_visible_when_paused() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.focus = Focus::LogList;
+
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            content.contains(theme::GLYPH_FOLLOWING),
+            "paused follow must still occupy a slot: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_pending_chip_has_fields_not_prefix() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.focus = Focus::LogList;
+        app.pending_chip = true;
+
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            !content.contains("c…"),
+            "left cluster must not show pending prefix: got {content:?}"
+        );
+        assert!(
+            content.contains("tag") && content.contains("msg"),
+            "pending L2 must list chip fields: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_flash_pill_with_pending_l2() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.focus = Focus::LogList;
+        app.pending_chip = true;
+        app.set_flash("EXISTS");
+
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let content = cell_text(buf);
+        assert!(
+            content.contains("EXISTS"),
+            "flash pill must stay visible with pending L2: got {content:?}"
+        );
+        assert!(
+            content.contains("tag"),
+            "pending L2 must not cover the flash slot: got {content:?}"
+        );
+        assert_eq!(
+            row0_bg_at_needle(buf, "EXISTS"),
+            Some(theme::success()),
+            "EXISTS flash must be a filled success pill: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_narrow_hides_hints_keeps_flash_floor() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.focus = Focus::LogList;
+        app.set_flash("EXISTS");
+
+        // Wide enough for left icons + natural flash, too tight for FLASH_MIN
+        // reservation + MIN_HELP_WIDTH — hints must hide first.
+        let backend = TestBackend::new(24, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            content.contains("EXISTS"),
+            "flash floor must survive a tight row: got {content:?}"
+        );
+        assert!(
+            !content.contains("help") && !content.contains("filter"),
+            "hints must hide before the flash floor is eaten: got {content:?}"
+        );
+        assert!(
+            content.contains(theme::GLYPH_FOLLOWING),
+            "left follow slot must never yield: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_failed_flash_uses_warning_fill() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.focus = Focus::LogList;
+        app.set_flash("YANK FAILED");
+
+        let backend = TestBackend::new(60, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let content = cell_text(buf);
+        assert!(
+            content.contains("YANK FAILED"),
+            "failed flash copy must render: got {content:?}"
+        );
+        assert_eq!(
+            row0_bg_at_needle(buf, "YANK FAILED"),
+            Some(theme::warning()),
+            "FAILED flash must use warning fill: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_strip_idle_is_help_and_del() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.focus = Focus::ChipStrip;
+
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            content.contains("help") && content.contains("del"),
+            "strip idle should show help + del: got {content:?}"
+        );
+        assert!(
+            !content.contains("group"),
+            "strip idle must not dump full L1: got {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_bar_picker_expands_full_hints() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.focus = Focus::LogList;
+        app.open_picker(crate::picker::PickerKind::Filter);
+
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(&mut app, frame, frame.area()))
+            .unwrap();
+        let content = cell_text(terminal.backend().buffer());
+        assert!(
+            content.contains("select") || content.contains("close"),
+            "picker must expand full context hints: got {content:?}"
+        );
+        assert!(
+            !content.contains("? help") && !content.contains("?help"),
+            "picker must not keep idle LogList 1–2: got {content:?}"
         );
     }
 

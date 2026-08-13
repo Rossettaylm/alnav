@@ -64,7 +64,7 @@ alnav/src/
 ├── app.rs          # App 状态机：rows/matched/visible/groups/highlight_groups/time_bound/Focus/following/pending_leader/picker
 ├── picker.rs       # fzf PickerSession：ActionList（cm 后置 Filter|Highlight）/Manage/New/Edit/删除确认
 ├── ui.rs           # 渲染：log/strip + fzf 左右面板/确认框/Preview/Time 面板 + status_bar
-├── help.rs         # H6 二级键位短提示：L1/L2；英文 dim-key + label（无 `:` 隔断）；`?` 只读 Help（Active + 全目录）；status_bar 右侧截断；flash 走 App::set_flash（3s）
+├── help.rs         # H6 键位：Help Active/目录用完整 L1/L2；status 空闲仅 1–2 键、pending/modal 展开；右侧右对齐截断；flash 为中间填充 pill（3s）
 ├── export.rs       # H10：当前 Filter/Exclude/lock/time_bound → 一行 `alnav grep` CLI（`yc`）
 ├── bookmark.rs     # M2：会话书签（row_id 锚定；ma/md；顶区展示 + Picker 管理）
 ├── config.rs       # 配置目录解析 + config.toml（含 theme=）+ theme.toml overlay（坏文件回退）
@@ -88,7 +88,7 @@ alnav/src/
 - **main.rs `dispatch_lines!` 宏**：根据 `--multiline`/`--crashes` 标志决定是否用 `MultilineMerger` 包裹迭代器，避免运行时分支开销。ADB/HDC 创建 `LiveSession` 后复用同一处理路径。
 - **输出路径分支**：`run_simple`（常规快速路径）vs `run_with_context`（-C/-A/-B 上下文行缓冲）vs `run_time_context`（--time-context 两遍扫描）vs `run_follow`（--follow-pid/tid 两遍扫描）。
 - **live Ctrl-L 清屏（CLI）**：`--hdc` / `--adb` 仅在 stdin/stdout 都是 tty 时启用；用 cbreak 模式（保留 `ISIG`）而非标准 raw mode，避免破坏现有 Ctrl+C 依赖的 `SIGINT` 语义。按键上报走 channel + `KeypressGate` 迭代器分发。仅支持 Unix，Windows 上静默不可用。已知权衡：若进程被 `SIGTERM`/`SIGKILL` 直接杀死（而非 Ctrl+C），termios 不会被恢复，终端会卡在 cbreak 模式，需手动 `stty sane`/`reset`——这与 vim/less 等直接操作终端的工具在被强杀时的行为一致，未特殊处理。
-- **`alnav` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。Input：`Space` 进草稿（可含空格）；有草稿时 `Enter` 收成 pill；无草稿且已有 pill 时 `Enter` 提交组。提交前按 chip 多重集（ignore-case）去重，重复则不 push。启动 CLI 过滤转为第 0 组（可 `dd`/`di`）。chip 编译走 `Expr::from_filters(..., SameFieldOp::And)`；启动 `initial_group` 仍用 `SameFieldOp::Or`。**TUI 过滤/搜索一律 ignore-case**。LogList 另有 **H7 光标→Chip**：operator `c`+字段字母（`t/m/g/p/T/l`，与 `YankField` 对齐）从当前行推单 chip 组；`c`+`m` 开 msg 切词候选（无条数上限）→ 选中后 ActionList 选 Filter（默认）或 Highlight；`C`+`m` 切词后直接 Exclude；`y`+`m` 同壳切词后 yank 选中片段（`Y` 仍整段 msg）；成功后 `following=false`，Esc 只清 pending/关面板不 resume。**H8 会话 lock**：`App.lock_pid`/`App.lock_tid` 互斥，在 chip 过滤后 AND；operator `f`+`p`/`t`/`u`（toggle 同值清除）；status 纯图标 follow/visual，lock/time 为图标+短值（无 FOLLOWING/LOCK/TIME 单词）；Esc resume 不清除 lock。**全局时间窗（仅 `-f`）**：`App.time_bound: Option<TimeBound>` 与 Filter 组正交，在 chip/exclude/lock 之后 AND；启动 `--since`/`--until` 写入全局窗（不再挂 Group）；operator `t`+`s` 开靠上 Time 面板（日期候选自 `rows` 去重、只能选自候选；时间 `HH:MM:SS` 键入并夹到该日缓冲 min/max，保证 since≤until；允许只设一端，端内须日+时成对），`t`+`u` 清除；无日期候选时 `ts` flash 拒绝；`--hdc` / `--adb` 硬隐藏 `t`/`ts`/`tu`；status 时间窗图标+短值；计入 `filter_active`；`yc` 导出 `--since`/`--until`；打开/提交/`tu` → `following=false`，面板 Esc 不 resume。
+- **`alnav` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。Input：`Space` 进草稿（可含空格）；有草稿时 `Enter` 收成 pill；无草稿且已有 pill 时 `Enter` 提交组。提交前按 chip 多重集（ignore-case）去重，重复则不 push。启动 CLI 过滤转为第 0 组（可 `dd`/`di`）。chip 编译走 `Expr::from_filters(..., SameFieldOp::And)`；启动 `initial_group` 仍用 `SameFieldOp::Or`。**TUI 过滤/搜索一律 ignore-case**。LogList 另有 **H7 光标→Chip**：operator `c`+字段字母（`t/m/g/p/T/l`，与 `YankField` 对齐）从当前行推单 chip 组；`c`+`m` 开 msg 切词候选（无条数上限）→ 选中后 ActionList 选 Filter（默认）或 Highlight；`C`+`m` 切词后直接 Exclude；`y`+`m` 同壳切词后 yank 选中片段（`Y` 仍整段 msg）；成功后 `following=false`，Esc 只清 pending/关面板不 resume。**H8 会话 lock**：`App.lock_pid`/`App.lock_tid` 互斥，在 chip 过滤后 AND；operator `f`+`p`/`t`/`u`（toggle 同值清除）；status：follow 常驻（on=success pill / off=DIM glyph）、device 常驻 source/disconnect pill；lock/time 为填充 pill+短值（无 FOLLOWING/LOCK/TIME 单词）；Esc resume 不清除 lock。**全局时间窗（仅 `-f`）**：`App.time_bound: Option<TimeBound>` 与 Filter 组正交，在 chip/exclude/lock 之后 AND；启动 `--since`/`--until` 写入全局窗（不再挂 Group）；operator `t`+`s` 开靠上 Time 面板（日期候选自 `rows` 去重、只能选自候选；时间 `HH:MM:SS` 键入并夹到该日缓冲 min/max，保证 since≤until；允许只设一端，端内须日+时成对），`t`+`u` 清除；无日期候选时 `ts` flash 拒绝；`--hdc` / `--adb` 硬隐藏 `t`/`ts`/`tu`；status 时间窗图标+短值；计入 `filter_active`；`yc` 导出 `--since`/`--until`；打开/提交/`tu` → `following=false`，面板 Esc 不 resume。
 - **`alnav` 的统一 fzf Picker**：Normal `Space` 进入 Leader；`Space Space` 打开 Unified Manage（Filter / Highlight / Exclude）；裸键 New：`;`→Filter、`/`→Highlight、`` ` ``→Exclude；`mm`→Bookmark Manage；`?`→只读 Help（非 Highlight New）；`Space f/s/m/x` 历史别名已收敛。Picker 为左右 4:6（可由 `config.toml` 的 `picker_left_ratio` 调整），左侧候选+底部检索（mode 前缀图标：Manage 搜索镜 / New `＋` / Edit `✎`），右侧 Preview；Manage 下键入无匹配时自动切 New（query→draft；清空草稿回退 Manage）；手动进 New 不清空也不回退；Esc / 提交成功 Enter 一律关闭面板（不回 Manage）；Manage 内 Ctrl-X 编辑、Delete/Ctrl-Backspace 删除选中（二次确认）；草稿行支持中间光标与 ←/→/Home/End/Ctrl-A/E/Ctrl-U（New/Edit 另有 Ctrl-Backspace 删词）。**Filter/Highlight/Exclude/Bookmark 统一**：候选为空时打开即 New；有候选且未强制 New 则 Manage；msg-chip 也复用 Picker 壳。
 - **`alnav` 的 RowStore**：`App.store` 为 `File`（`-f` mmap）或 `Stream`（`--hdc` / `--adb`）。Stream 的 `rows` 按 `max_lines`（默认 500_000，`--max-lines` 仅 live）淘汰；File 无淘汰、可浏览全文件。`Visible::All`（身份映射）用于 Stream 与未过滤 File；File 过滤用 `Visible::Subset(行号)`。读路径统一 `App::row_at` → `RowRef`（Stream 借出 / File 惰性 Owned）。
 - **`alnav` 的匹配行保留（Stream）**：filter active 时命中双写 `rows`+`matched`，`Visible::All` 索引 `matched`；`matched` 硬上限 `MATCHED_HARD_CAP`（1_000_000）。File 不过滤进 `matched`，只维护 `Subset`。书签：Stream 查 `rows`/`matched`；File 用稳定 `row_id = line_index+1`。preview 对 Stream 扫 `rows`、对 File 惰性 `row_at`。
@@ -117,7 +117,7 @@ alnav/src/
 - **单一强调色 + 大量 dim**：`theme::accent()` 是唯一的"焦点/强调"色（`default`/`nord` 为 cyan；其余内置主题用签名色：蓝/品红/绿/黄），非关键信息统一 `Modifier::DIM`，避免多色混战。Dashboard 六行 Unicode 字标走 `theme::logo` 渐变，Compact `"alnav"` 走 accent。
 - **焦点**：popup/候选 List 用 `theme` 候选行 tokens（选中/非选中背景与文字、匹配字符色、选中前缀）；Filter/Highlight strip 组选中为 Magenta（`SELECTION_FRAME`）、未选中为 dim DarkGray；`di` 禁用用 `disabled_chip_style()`。
 - **日志行选中态只在 LogList 聚焦时显示，且是柔和灰底**：经 `ListItem::style(log_selection_style())` 施加（**不用** `List::highlight_style`，以免 `Style::patch` 盖掉关键词高亮底色）；失焦时无选中底。关键词 Span 的高亮色在选中行上保持可读叠加。
-- **状态栏左侧图标簇**：follow/visual 纯 Nerd Font 图标；lock/time/进度为图标+短值；pending/flash 为非反色软文字（`theme::status_icon` / `status_icon_value` / `status_soft`）。Picker 底部用柔和 `theme::picker_mode_prefix`（搜索镜 / `＋` / `✎`，accent+DIM、无填充）；非编辑不画居中模态。
+- **状态栏三区**：左侧常驻 follow（on=success 填充 pill / off=同 glyph DIM）与 device（live=source accent pill，断开=disconnect warning pill，`-f`=file glyph accent）；lock/time/view-focus/progress/visual 仅在激活时用同一填充 pill 族；cursor `n/N` 与 match `k/total` 仍在左侧（无 `[]`）。中间 flash 为填充 pill（`FAILED`→warning，否则 success；3s）；右侧空闲仅 1–2 键（LogList `? help` + `; filter`，Strip `? help` + `d del…`），pending/modal 展开完整 L2；过窄先藏 hints。无左侧 `c…` 前缀。顶栏 toast overlay 为后续（YAGNI）。Picker 底部用柔和 `theme::picker_mode_prefix`（搜索镜 / `＋` / `✎`，accent+DIM、无填充）；非编辑不画居中模态。
 - **Filter/Highlight chip 用填充 pill**：`theme::chip_pill`（按 `field_color` / level badge）与 `theme::highlight_pill_style`（`highlight_style`）；Input 已提交 chip 与 Filter strip 共用 pill 样式。
 - **字段名颜色全局唯一映射**：`ChipField` 的颜色只由 `theme::field_color` 决定；popup 字段名与 pill 背景同源。
 - **不硬编码 White/Black 当默认前景色**：如 `Level::I`（默认级别）用 `Style::default()` 继承终端主题色，不写 `Color::White`，以兼容浅色/深色终端。
@@ -129,9 +129,10 @@ alnav/src/
 |------|-----------|------|
 | 强调/焦点/聚焦边框 | `theme::accent()` | 主题签名色（default/nord=`cyan`） |
 | Dashboard 字标 | `dashboard_logo_line_style` | 6 行 palette 渐变；default 纯 cyan |
-| 成功/Following | `theme::SUCCESS` | palette `green` |
-| 会话 lock 徽标 | `theme::LOCK` | palette `magenta` |
-| 警告（chip 字段名） | `theme::WARNING` | palette `yellow` |
+| 成功/Following | `theme::SUCCESS` / `status_pill` | palette `green`；follow on=填充 pill，off=`status_icon_dim` |
+| 会话 lock 徽标 | `theme::LOCK` / `status_pill_value` | palette `magenta` |
+| 警告（chip 字段名 / disconnect / FAILED flash） | `theme::WARNING` | palette `yellow` |
+| Status flash pill | `theme::status_flash_pill` | success 填充；含 `FAILED` 则 warning |
 | Filter chip pill | `theme::chip_pill` | `field_color` / `level_badge_style` |
 | Highlight pattern pill | `theme::highlight_pill_style` | `highlight_style(idx)` |
 | Picker 候选选中/匹配 | `theme::candidate_*` / `picker_mode_prefix` | theme.toml 可覆盖 |
@@ -158,7 +159,7 @@ alnav/src/
 
 - 任意 `stdin` 管道流式输入（TUI 只支持 `--hdc` / `--adb` 自 spawn 子进程，因子进程生命周期完全自控，避免 stdin 管道场景下 Ctrl+C/`ISIG` 语义复杂度）
 - 多文件 glob、`--sort-time` 归并；`--fields` 列可配置；搜索/过滤历史；光标行派生设时间；live 交互时间窗；相对时间（last 5m）；全文件日期索引；Windows 专门支持
-- 日志区 `Ctrl-d`/`Ctrl-u` 翻页；草稿 vim 模态编辑——留作后续扩展
+- 日志区 `Ctrl-d`/`Ctrl-u` 翻页；草稿 vim 模态编辑；status 顶栏 toast overlay——留作后续扩展
 
 ## Exit Codes（`alnav-core` CLI）
 

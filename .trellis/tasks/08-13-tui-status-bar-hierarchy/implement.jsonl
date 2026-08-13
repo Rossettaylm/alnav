@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Status bar left cluster, L1/L2 hints, flash language, Help availability"}
+{"file": ".trellis/spec/alnav/backend/theme-system.md", "reason": "All TUI paint through theme tokens; contrast_fg for on-pill foreground"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "No Color::* in ui.rs; HintEntry stays in help.rs"}
+{"file": ".trellis/spec/alnav/backend/tui-ux-boosters.md", "reason": "Disconnect icon vs file-mode ingest_done gate"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse chip-pill contrast_fg instead of a second contrast helper"}

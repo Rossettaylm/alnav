@@ -963,7 +963,13 @@ fn run<B: ratatui::backend::Backend>(
                         if prev.height > 0 {
                             let limit = ui::preview_content_capacity(prev);
                             let preview_lines = app.preview_filter_throttled(input, limit);
-                            ui::render_preview("Preview", &preview_lines, "no matches", frame, prev);
+                            ui::render_preview(
+                                "Preview",
+                                &preview_lines,
+                                "no matches",
+                                frame,
+                                prev,
+                            );
                         }
                     } else if app.time_panel.is_some() {
                         let h = ui::time_panel_height(frame_area);

@@ -754,12 +754,71 @@ pub fn status_icon_value(glyph: &str, value: &str, fg: Color) -> Span<'static> {
     )
 }
 
-/// Soft (non-inverse) pending / flash text on the status bar.
+/// Soft (non-inverse) pending / flash text. Kept for non-status-bar callers.
 pub fn status_soft(text: &str, fg: Color) -> Span<'static> {
     Span::styled(
         format!(" {text} "),
         Style::default().fg(fg).add_modifier(Modifier::DIM),
     )
+}
+
+fn status_pill_style(fg: Color) -> Style {
+    Style::default()
+        .fg(contrast_fg(fg))
+        .bg(fg)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Filled status pill (` {glyph} `). On-pill fg from [`contrast_fg`].
+pub fn status_pill(glyph: &str, fg: Color) -> Span<'static> {
+    Span::styled(format!(" {glyph} "), status_pill_style(fg))
+}
+
+/// Filled status pill with a short value (` {glyph} {value} `).
+pub fn status_pill_value(glyph: &str, value: &str, fg: Color) -> Span<'static> {
+    Span::styled(format!(" {glyph} {value} "), status_pill_style(fg))
+}
+
+/// Follow off-state: same slot shape as [`status_pill`], DIM, no fill.
+pub fn status_icon_dim(glyph: &str) -> Span<'static> {
+    Span::styled(
+        format!(" {glyph} "),
+        Style::default().add_modifier(Modifier::DIM),
+    )
+}
+
+fn flash_fill(text: &str) -> Color {
+    if text.contains("FAILED") {
+        warning()
+    } else {
+        success()
+    }
+}
+
+/// Filled flash toast. Warning fill when the copy contains `FAILED`.
+pub fn status_flash_pill(text: &str) -> Span<'static> {
+    status_flash_pill_fit(text, usize::MAX)
+}
+
+/// Truncate flash copy so the pill (` {text} `) fits `max_chars`.
+pub fn status_flash_pill_fit(text: &str, max_chars: usize) -> Span<'static> {
+    let fg = flash_fill(text);
+    if max_chars == 0 {
+        return Span::raw("");
+    }
+    let full = format!(" {text} ");
+    let shown = if full.chars().count() <= max_chars {
+        full
+    } else {
+        let inner = max_chars.saturating_sub(2);
+        let body: String = text.chars().take(inner).collect();
+        if body.is_empty() {
+            " ".repeat(max_chars.min(2))
+        } else {
+            format!(" {body} ")
+        }
+    };
+    Span::styled(shown, status_pill_style(fg))
 }
 
 /// Dim trailing keybinding hint on the status bar (H6 context help).
@@ -1275,5 +1334,29 @@ mod tests {
         assert_eq!(t.accent, Color::Rgb(0xff, 0x00, 0xaa));
         assert_eq!(t.logo[0], p.blue);
         assert_eq!(t.logo[5], p.cyan);
+    }
+
+    #[test]
+    fn status_pill_on_has_bg_off_is_dim_without_bg() {
+        install(UiTokens::builtin());
+        let on = status_pill(GLYPH_FOLLOWING, success());
+        assert_eq!(on.style.bg, Some(success()));
+        assert_eq!(on.style.fg, Some(contrast_fg(success())));
+        assert!(on.style.add_modifier.contains(Modifier::BOLD));
+        let off = status_icon_dim(GLYPH_FOLLOWING);
+        assert_eq!(off.style.bg, None);
+        assert!(off.style.add_modifier.contains(Modifier::DIM));
+        assert!(!off.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn status_flash_pill_uses_warning_for_failed() {
+        install(UiTokens::builtin());
+        let failed = status_flash_pill("YANK FAILED");
+        assert_eq!(failed.style.bg, Some(warning()));
+        assert!(failed.content.contains("YANK FAILED"));
+        let ok = status_flash_pill("EXISTS");
+        assert_eq!(ok.style.bg, Some(success()));
+        assert_ne!(ok.style.bg, failed.style.bg);
     }
 }

@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Verify hint source split, follow/device contracts, flash English"}
+{"file": ".trellis/spec/alnav/backend/theme-system.md", "reason": "Verify no hardcoded colors; pills use contrast_fg"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Forbidden patterns: Color in ui.rs, duplicate keybinding copy"}
+{"file": ".trellis/spec/alnav/backend/tui-ux-boosters.md", "reason": "Disconnect still live-only"}
