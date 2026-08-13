@@ -344,3 +344,38 @@ Implemented hdc/adb auto-reconnect with disconnect icon, device probe + health c
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: 候选面板检索一级指标
+
+**Date**: 2026-08-13
+**Task**: 候选面板检索一级指标
+**Package**: alnav-core
+**Branch**: `master`
+
+### Summary
+
+落地 ResultCap=256、ViewportPaint、Arc vocab snapshot、Preview 节流，并将 Candidate panel SLOs 写入 fuzzy-matching/quality-guidelines；任务归档。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `552a6f9` | (see git log) |
+| `3d7e2ed` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
