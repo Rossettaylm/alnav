@@ -217,7 +217,7 @@ Update when changing `App.ingest_done` semantics or the status bar's
 
 | Item | Location | Contract |
 |------|----------|----------|
-| `theme::GLYPH_DISCONNECT` | `theme.rs` | `\u{f127}` (nf-fa-chain-broken) |
+| `theme::GLYPH_DISCONNECT` | `theme.rs` | `\u{f1e6}` (nf-fa-plug; `f127` chain-broken overflows right in non-Mono Nerd Fonts) |
 | `render_status_bar` disconnect branch | `ui.rs` | `if !app.store.is_file() && app.ingest_done` |
 
 ### 3. Contracts

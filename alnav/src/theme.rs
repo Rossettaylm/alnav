@@ -41,7 +41,7 @@ pub const GLYPH_ACTION_JUMP: &str = "\u{f061}"; //  nf-fa-arrow_right
 pub const GLYPH_ACTION_TOGGLE_ON: &str = "\u{f205}"; //  nf-fa-toggle_on
 pub const GLYPH_ACTION_TOGGLE_OFF: &str = "\u{f204}"; //  nf-fa-toggle_off
 pub const GLYPH_LOCK: &str = "\u{f023}"; //
-pub const GLYPH_DISCONNECT: &str = "\u{f127}"; // nf-fa-chain-broken
+pub const GLYPH_DISCONNECT: &str = "\u{f1e6}"; // nf-fa-plug (f127 chain-broken overflows right in non-Mono NF)
 pub const GLYPH_TIME: &str = "\u{f017}"; // nf-fa-clock_o
 pub const GLYPH_VIEW_FOCUS: &str = "\u{f06e}"; // nf-fa-eye
 pub const GLYPH_FOLLOWING: &str = "\u{f062}"; //
@@ -1347,6 +1347,26 @@ mod tests {
         assert_eq!(off.style.bg, None);
         assert!(off.style.add_modifier.contains(Modifier::DIM));
         assert!(!off.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn disconnect_glyph_shares_source_pill_slot() {
+        use unicode_width::UnicodeWidthStr;
+
+        install(UiTokens::builtin());
+        // nf-fa-plug. nf-fa-chain-broken (f127) ink is ~2 cells and right-biased
+        // in non-Mono Nerd Fonts, so the disconnect pill looked wider/shifted.
+        assert_eq!(GLYPH_DISCONNECT, "\u{f1e6}");
+        assert_ne!(GLYPH_DISCONNECT, "\u{f127}");
+        let disconnect = status_pill(GLYPH_DISCONNECT, warning());
+        for src in [GLYPH_SOURCE_HDC, GLYPH_SOURCE_ADB, GLYPH_SOURCE_FILE] {
+            let connected = status_pill(src, accent());
+            assert_eq!(
+                UnicodeWidthStr::width(disconnect.content.as_ref()),
+                UnicodeWidthStr::width(connected.content.as_ref()),
+                "disconnect pill width must match {src:?} source pill"
+            );
+        }
     }
 
     #[test]
