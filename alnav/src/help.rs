@@ -58,7 +58,6 @@ pub enum ContextKind {
     Time,
     ChipField,
     Yank,
-    Open,
     StripD,
     Input,
     ChipStrip,
@@ -83,7 +82,6 @@ impl ContextKind {
             Self::Time => "Time",
             Self::ChipField => "Field",
             Self::Yank => "Yank",
-            Self::Open => "Open source",
             Self::StripD => "Strip delete",
             Self::Input => "Input",
             Self::ChipStrip => "Filter strip",
@@ -205,9 +203,6 @@ pub fn context_kind(app: &App) -> ContextKind {
     }
     if app.pending_yank {
         return ContextKind::Yank;
-    }
-    if app.pending_open {
-        return ContextKind::Open;
     }
     if app.pending_d {
         return ContextKind::StripD;
@@ -342,12 +337,12 @@ fn l1_loglist(app: &App, live: bool) -> Vec<HintEntry> {
         "yank",
         "yank operator",
     );
-    push_single(
+    push_agg(
         &mut out,
         app,
-        ActionId::LogListOpen,
+        &[ActionId::OpenFile, ActionId::OpenStream],
         "source",
-        "open or switch source",
+        "open or switch file / stream source",
     );
     push_agg(
         &mut out,
@@ -533,20 +528,6 @@ pub fn context_entries(app: &App) -> Vec<HintEntry> {
             push_single(
                 &mut out,
                 app,
-                ActionId::LeaderPresetSave,
-                "save",
-                "save filter preset",
-            );
-            push_single(
-                &mut out,
-                app,
-                ActionId::LeaderPresetOpen,
-                "open",
-                "open filter preset",
-            );
-            push_single(
-                &mut out,
-                app,
                 ActionId::LeaderSummary,
                 "stats",
                 "open summary panel",
@@ -611,13 +592,6 @@ pub fn context_entries(app: &App) -> Vec<HintEntry> {
             ] {
                 push_short(&mut out, app, id, label);
             }
-            out
-        }
-        ContextKind::Open => {
-            let mut out = Vec::new();
-            push_short(&mut out, app, ActionId::OpenFile, "file");
-            push_short(&mut out, app, ActionId::OpenStream, "stream");
-            push_short(&mut out, app, ActionId::OpenCancel, "cancel");
             out
         }
         ContextKind::StripD => {
@@ -729,8 +703,7 @@ pub fn active_section_id(kind: ContextKind) -> SectionId {
         ContextKind::Bookmark
         | ContextKind::Lock
         | ContextKind::Time
-        | ContextKind::Yank
-        | ContextKind::Open => SectionId::Session,
+        | ContextKind::Yank => SectionId::Session,
         ContextKind::Detail | ContextKind::TimePanel => SectionId::Overlays,
         ContextKind::LogList | ContextKind::LogListLive => SectionId::Navigation,
         ContextKind::CommandPalette => SectionId::LeaderPickers,
@@ -797,26 +770,6 @@ fn catalog_entries(app: &App, live: bool) -> Vec<(SectionId, &'static str, Vec<H
             format!("{a} {b}"),
             "manage",
             "unified manage picker",
-        ));
-    }
-    if let (Some(a), Some(b)) = (
-        key_of(app, ActionId::LogListLeader),
-        key_of(app, ActionId::LeaderPresetSave),
-    ) {
-        leader.push(HintEntry::new(
-            format!("{a} {b}"),
-            "save preset",
-            "save Filter/Exclude/Highlight preset",
-        ));
-    }
-    if let (Some(a), Some(b)) = (
-        key_of(app, ActionId::LogListLeader),
-        key_of(app, ActionId::LeaderPresetOpen),
-    ) {
-        leader.push(HintEntry::new(
-            format!("{a} {b}"),
-            "open preset",
-            "search and apply named preset",
         ));
     }
     if let (Some(a), Some(b)) = (
@@ -905,17 +858,27 @@ fn catalog_entries(app: &App, live: bool) -> Vec<(SectionId, &'static str, Vec<H
     }
 
     let mut session = Vec::new();
-    if let (Some(o), Some(f), Some(s)) = (
-        key_of(app, ActionId::LogListOpen),
-        key_of(app, ActionId::OpenFile),
-        key_of(app, ActionId::OpenStream),
-    ) {
-        session.push(HintEntry::new(
-            format!("{o}{f}/{o}{s}"),
-            "source",
-            "open or switch file / stream source",
-        ));
-    }
+    push_single(
+        &mut session,
+        app,
+        ActionId::LeaderPresetSave,
+        "save preset",
+        "save Filter/Exclude/Highlight preset",
+    );
+    push_single(
+        &mut session,
+        app,
+        ActionId::LeaderPresetOpen,
+        "open preset",
+        "search and apply named preset",
+    );
+    push_agg(
+        &mut session,
+        app,
+        &[ActionId::OpenFile, ActionId::OpenStream],
+        "source",
+        "open or switch file / stream source",
+    );
     if let (Some(p), Some(fp), Some(ft), Some(fu)) = (
         key_of(app, ActionId::LogListLock),
         key_of(app, ActionId::LockPid),
@@ -1083,7 +1046,6 @@ pub fn help_available(app: &App) -> bool {
         || app.pending_chip
         || app.pending_exclude
         || app.pending_yank
-        || app.pending_open
         || app.pending_d
     {
         return false;
@@ -1347,9 +1309,6 @@ mod tests {
         app.pending_yank = true;
         assert_eq!(context_kind(&app), ContextKind::Yank);
         app.pending_yank = false;
-        app.pending_open = true;
-        assert_eq!(context_kind(&app), ContextKind::Open);
-        app.pending_open = false;
         app.focus = Focus::ChipStrip;
         app.pending_d = true;
         assert_eq!(context_kind(&app), ContextKind::StripD);

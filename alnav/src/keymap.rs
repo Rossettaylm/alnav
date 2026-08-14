@@ -459,7 +459,6 @@ pub enum ActionId {
     LogListExcludeChip,
     LogListYank,
     LogListLock,
-    LogListOpen,
     LogListTime,
     LogListWrapToggle,
     LeaderManage,
@@ -479,7 +478,6 @@ pub enum ActionId {
     LockCancel,
     OpenFile,
     OpenStream,
-    OpenCancel,
     TimeSet,
     TimeClear,
     TimeCancel,
@@ -639,7 +637,6 @@ impl ActionId {
         Self::LogListExcludeChip,
         Self::LogListYank,
         Self::LogListLock,
-        Self::LogListOpen,
         Self::LogListTime,
         Self::LogListWrapToggle,
         Self::LeaderManage,
@@ -659,7 +656,6 @@ impl ActionId {
         Self::LockCancel,
         Self::OpenFile,
         Self::OpenStream,
-        Self::OpenCancel,
         Self::TimeSet,
         Self::TimeClear,
         Self::TimeCancel,
@@ -1223,19 +1219,6 @@ impl ActionId {
                 palette_title: "",
                 palette_icon: "",
             },
-            Self::LogListOpen => ActionMeta {
-                id: Self::LogListOpen,
-                context: KeyContext::LogList,
-                toml_key: "open",
-                default: Binding::parse_str("o").expect("default binding"),
-                kind: ActionKind::Prefix,
-                capabilities: &[],
-                label: "source",
-                detail: "open or switch source",
-                in_palette: false,
-                palette_title: "",
-                palette_icon: "",
-            },
             Self::LogListTime => ActionMeta {
                 id: Self::LogListTime,
                 context: KeyContext::LogList,
@@ -1279,9 +1262,9 @@ impl ActionId {
             .with_palette("Manage Filters", theme::GLYPH_MODE_MANAGE),
             Self::LeaderPresetSave => ActionMeta {
                 id: Self::LeaderPresetSave,
-                context: KeyContext::Leader,
+                context: KeyContext::Global,
                 toml_key: "preset_save",
-                default: Binding::parse_str("w").expect("default binding"),
+                default: Binding::parse_str("C-s").expect("default binding"),
                 kind: ActionKind::Leaf,
                 capabilities: &[],
                 label: "save",
@@ -1293,9 +1276,9 @@ impl ActionId {
             .with_palette("Save Preset", theme::GLYPH_MODE_NEW),
             Self::LeaderPresetOpen => ActionMeta {
                 id: Self::LeaderPresetOpen,
-                context: KeyContext::Leader,
+                context: KeyContext::Global,
                 toml_key: "preset_open",
-                default: Binding::parse_str("o").expect("default binding"),
+                default: Binding::parse_str("C-o").expect("default binding"),
                 kind: ActionKind::Leaf,
                 capabilities: &[],
                 label: "open",
@@ -1472,9 +1455,9 @@ impl ActionId {
             },
             Self::OpenFile => ActionMeta {
                 id: Self::OpenFile,
-                context: KeyContext::Open,
-                toml_key: "file",
-                default: Binding::parse_str("f").expect("default binding"),
+                context: KeyContext::Global,
+                toml_key: "open_file",
+                default: Binding::parse_str("C-f").expect("default binding"),
                 kind: ActionKind::Leaf,
                 capabilities: &[],
                 label: "file",
@@ -1486,9 +1469,9 @@ impl ActionId {
             .with_palette("Open File", theme::GLYPH_SOURCE_OPEN_FILE),
             Self::OpenStream => ActionMeta {
                 id: Self::OpenStream,
-                context: KeyContext::Open,
-                toml_key: "stream",
-                default: Binding::parse_str("s").expect("default binding"),
+                context: KeyContext::Global,
+                toml_key: "open_stream",
+                default: Binding::parse_str("C-g").expect("default binding"),
                 kind: ActionKind::Leaf,
                 capabilities: &[],
                 label: "stream",
@@ -1498,19 +1481,6 @@ impl ActionId {
                 palette_icon: "",
             }
             .with_palette("Open Stream", theme::GLYPH_SOURCE_HDC),
-            Self::OpenCancel => ActionMeta {
-                id: Self::OpenCancel,
-                context: KeyContext::Open,
-                toml_key: "cancel",
-                default: Binding::parse_str("Esc").expect("default binding"),
-                kind: ActionKind::Leaf,
-                capabilities: &[],
-                label: "cancel",
-                detail: "cancel open-source operator",
-                in_palette: false,
-                palette_title: "",
-                palette_icon: "",
-            },
             Self::TimeSet => ActionMeta {
                 id: Self::TimeSet,
                 context: KeyContext::Time,
@@ -2608,6 +2578,10 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::Global, "exclude_new") => Some(ActionId::GlobalExcludeNew),
         (KeyContext::Global, "open_help") => Some(ActionId::GlobalOpenHelp),
         (KeyContext::Global, "command_palette") => Some(ActionId::GlobalCommandPalette),
+        (KeyContext::Global, "preset_save") => Some(ActionId::LeaderPresetSave),
+        (KeyContext::Global, "preset_open") => Some(ActionId::LeaderPresetOpen),
+        (KeyContext::Global, "open_file") => Some(ActionId::OpenFile),
+        (KeyContext::Global, "open_stream") => Some(ActionId::OpenStream),
         (KeyContext::LogList, "move_down") => Some(ActionId::LogListMoveDown),
         (KeyContext::LogList, "move_up") => Some(ActionId::LogListMoveUp),
         (KeyContext::LogList, "jump_down") => Some(ActionId::LogListJumpDown),
@@ -2632,12 +2606,9 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::LogList, "exclude_chip") => Some(ActionId::LogListExcludeChip),
         (KeyContext::LogList, "yank") => Some(ActionId::LogListYank),
         (KeyContext::LogList, "lock") => Some(ActionId::LogListLock),
-        (KeyContext::LogList, "open") => Some(ActionId::LogListOpen),
         (KeyContext::LogList, "time") => Some(ActionId::LogListTime),
         (KeyContext::LogList, "wrap_toggle") => Some(ActionId::LogListWrapToggle),
         (KeyContext::Leader, "manage") => Some(ActionId::LeaderManage),
-        (KeyContext::Leader, "preset_save") => Some(ActionId::LeaderPresetSave),
-        (KeyContext::Leader, "preset_open") => Some(ActionId::LeaderPresetOpen),
         (KeyContext::Leader, "summary") => Some(ActionId::LeaderSummary),
         (KeyContext::Leader, "cancel") => Some(ActionId::LeaderCancel),
         (KeyContext::Bookmark, "add") => Some(ActionId::BookmarkAdd),
@@ -2650,9 +2621,6 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::Lock, "view_severe") => Some(ActionId::LockViewSevere),
         (KeyContext::Lock, "clear") => Some(ActionId::LockClear),
         (KeyContext::Lock, "cancel") => Some(ActionId::LockCancel),
-        (KeyContext::Open, "file") => Some(ActionId::OpenFile),
-        (KeyContext::Open, "stream") => Some(ActionId::OpenStream),
-        (KeyContext::Open, "cancel") => Some(ActionId::OpenCancel),
         (KeyContext::Time, "set") => Some(ActionId::TimeSet),
         (KeyContext::Time, "clear") => Some(ActionId::TimeClear),
         (KeyContext::Time, "cancel") => Some(ActionId::TimeCancel),
@@ -3042,10 +3010,10 @@ pub fn serialize_default_config_toml() -> String {
      # is always full-width regardless of this setting.\n\
      picker_preview_enabled = true\n\
      #\n\
-     # recent_files_limit: max paths remembered for Dashboard / of (1..=200).\n\
+     # recent_files_limit: max paths remembered for Dashboard / C-f (1..=200).\n\
      recent_files_limit = 20\n\
      #\n\
-     # log_dirs: directories recursively scanned for Open-file (of) fuzzy corpus.\n\
+     # log_dirs: directories recursively scanned for Open-file (C-f) fuzzy corpus.\n\
      # Empty = recent-only. Supports ~ expansion. No cwd fallback.\n\
      log_dirs = []\n\
      #\n\
@@ -3115,10 +3083,33 @@ mod tests {
         assert!(store.matches_code(ActionId::LogListExcludeChip, KeyCode::Char('C')));
         assert!(store.matches_code(ActionId::LeaderManage, KeyCode::Char(' ')));
         assert!(store.matches_code(ActionId::BookmarkAdd, KeyCode::Char('a')));
-        assert!(store.matches_code(ActionId::LogListOpen, KeyCode::Char('o')));
-        assert!(store.matches_code(ActionId::OpenFile, KeyCode::Char('f')));
-        assert!(store.matches_code(ActionId::OpenStream, KeyCode::Char('s')));
-        assert!(store.matches_code(ActionId::OpenCancel, KeyCode::Esc));
+        assert!(store.matches_event(
+            ActionId::LeaderPresetSave,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        ));
+        assert!(store.matches_event(
+            ActionId::LeaderPresetOpen,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        ));
+        assert!(store.matches_event(
+            ActionId::OpenFile,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        ));
+        assert!(store.matches_event(
+            ActionId::OpenStream,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        ));
+        assert!(!store.matches_event(
+            ActionId::OpenFile,
+            KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+        ));
+        assert!(!store.matches_code(ActionId::OpenFile, KeyCode::Char('f')));
+        assert!(!store.matches_code(ActionId::OpenStream, KeyCode::Char('s')));
+        assert!(!store.matches_code(ActionId::LeaderPresetSave, KeyCode::Char('w')));
+        assert!(!store.matches_code(ActionId::LeaderPresetOpen, KeyCode::Char('o')));
         assert_eq!(
             store.display(ActionId::LogListClearLive).as_deref(),
             Some("C-l")
@@ -3181,11 +3172,13 @@ move_down = "k"
         let text = serialize_default_toml();
         assert!(text.contains("[log_list]"));
         assert!(text.contains("move_down = \"j\""));
-        assert!(text.contains("open = \"o\""));
         assert!(text.contains("[leader]"));
-        assert!(text.contains("[open]"));
-        assert!(text.contains("file = \"f\""));
-        assert!(text.contains("stream = \"s\""));
+        assert!(text.contains("preset_save = \"C-s\""));
+        assert!(text.contains("preset_open = \"C-o\""));
+        assert!(text.contains("open_file = \"C-f\""));
+        assert!(text.contains("open_stream = \"C-g\""));
+        assert!(!text.contains("[open]"));
+        assert!(!text.contains("open = \"o\""));
         assert!(text.contains("[command_palette]"));
         assert!(text.contains("command_palette = \"C-p\""));
         assert!(text.contains("submit = \"Enter\""));
@@ -3209,6 +3202,9 @@ move_down = "k"
         }
         let parsed: toml::Value = toml::from_str(&text).unwrap();
         assert_eq!(parsed["theme"].as_str(), Some("default"));
+        assert!(text.contains("C-f"), "Open-file comments must use C-f");
+        assert!(!text.contains("C-S-o"), "must not document Ctrl-Shift open");
+        assert!(!text.contains(" / of"), "must not document retired of chord");
     }
 
     #[test]

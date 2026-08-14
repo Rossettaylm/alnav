@@ -202,7 +202,6 @@ pub fn dispatch(app: &mut App, id: ActionId) {
             app.pending_yank = true;
         }
         LogListLock => app.begin_lock_from_cursor(),
-        LogListOpen => app.begin_open_op(),
         LogListTime => {
             if app.is_file_mode() {
                 app.begin_time_op();
@@ -212,7 +211,7 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         LeaderPresetSave => app.begin_preset_save(),
         LeaderPresetOpen => app.begin_preset_open(),
         LeaderSummary => app.open_summary_panel(),
-        LeaderCancel | BookmarkCancel | LockCancel | OpenCancel | TimeCancel | ChipFieldCancel
+        LeaderCancel | BookmarkCancel | LockCancel | TimeCancel | ChipFieldCancel
         | YankCancel | StripDCancel | VisualCancel => apply_cancel(app, id),
         BookmarkAdd => app.bookmark_add_current(),
         BookmarkRemove => app.bookmark_remove_current(),
@@ -222,8 +221,8 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         LockViewHighlight => app.toggle_view_focus(ViewFocusKind::Highlight),
         LockViewSevere => app.toggle_view_focus(ViewFocusKind::Severe),
         LockClear => app.clear_session_lock(),
-        OpenFile => app.open_file_source_panel(false),
-        OpenStream => app.open_stream_source_panel(false),
+        OpenFile => app.open_file_source_panel(app.dashboard.is_some()),
+        OpenStream => app.open_stream_source_panel(app.dashboard.is_some()),
         TimeSet => {
             if app.is_file_mode() {
                 let _ = app.open_time_panel();
@@ -343,7 +342,6 @@ fn apply_cancel(app: &mut App, id: ActionId) {
         ActionId::LeaderCancel => app.pending_leader = false,
         ActionId::BookmarkCancel => app.cancel_bookmark_op(),
         ActionId::LockCancel => app.cancel_lock_pending(),
-        ActionId::OpenCancel => app.cancel_open_pending(),
         ActionId::TimeCancel => app.cancel_time_pending(),
         ActionId::ChipFieldCancel => app.cancel_chip_from_cursor(),
         ActionId::YankCancel => app.pending_yank = false,

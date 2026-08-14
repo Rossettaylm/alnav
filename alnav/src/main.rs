@@ -2256,6 +2256,9 @@ fn handle_dashboard_key(app: &mut App, live: &mut Option<LiveIngestCtl>, key: ev
         app.should_quit = true;
         return;
     }
+    if dispatch_global_chords(app, key) {
+        return;
+    }
     let Some(dash) = app.dashboard.as_mut() else {
         return;
     };
@@ -2415,10 +2418,6 @@ fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     }
     if app.pending_time {
         app.cancel_time_pending();
-        return;
-    }
-    if app.pending_open {
-        app.cancel_open_pending();
         return;
     }
 
@@ -2620,10 +2619,6 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
         app.pending_leader = false;
         if km_code(app, ActionId::LeaderManage, code) {
             crate::action::dispatch(app, ActionId::LeaderManage);
-        } else if km_code(app, ActionId::LeaderPresetSave, code) {
-            crate::action::dispatch(app, ActionId::LeaderPresetSave);
-        } else if km_code(app, ActionId::LeaderPresetOpen, code) {
-            crate::action::dispatch(app, ActionId::LeaderPresetOpen);
         } else if km_code(app, ActionId::LeaderSummary, code) {
             crate::action::dispatch(app, ActionId::LeaderSummary);
         } else if km_code(app, ActionId::LeaderCancel, code) {
@@ -2799,10 +2794,27 @@ fn handle_palette_key(app: &mut App, key: event::KeyEvent) {
     }
 }
 
-/// Ctrl chords (command palette, paging, live-clear) need the full KeyEvent.
+/// Global Ctrl chords (palette, presets, open file/stream). True if handled.
+fn dispatch_global_chords(app: &mut App, key: event::KeyEvent) -> bool {
+    use keymap::ActionId;
+    for id in [
+        ActionId::GlobalCommandPalette,
+        ActionId::LeaderPresetSave,
+        ActionId::LeaderPresetOpen,
+        ActionId::OpenFile,
+        ActionId::OpenStream,
+    ] {
+        if km_event(app, id, key) {
+            crate::action::dispatch(app, id);
+            return true;
+        }
+    }
+    false
+}
+
+/// Ctrl chords (command palette, paging, live-clear, source/preset) need the full KeyEvent.
 fn handle_normal_event(app: &mut App, input: &mut input::InputBox, key: event::KeyEvent) {
-    if km_event(app, keymap::ActionId::GlobalCommandPalette, key) {
-        crate::action::dispatch(app, keymap::ActionId::GlobalCommandPalette);
+    if dispatch_global_chords(app, key) {
         return;
     }
     if app.focus == app::Focus::LogList {
@@ -2861,27 +2873,6 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
     }
 
     if handle_leader_key(app, code) {
-        return;
-    }
-
-    // Open/switch source operator pending (`o` + `f`/`s`).
-    if app.pending_open {
-        app.pending_open = false;
-        if app.focus == Focus::LogList {
-            if km_code(app, ActionId::OpenCancel, code) {
-                crate::action::dispatch(app, ActionId::OpenCancel);
-                return;
-            }
-            if km_code(app, ActionId::OpenFile, code) {
-                crate::action::dispatch(app, ActionId::OpenFile);
-                return;
-            }
-            if km_code(app, ActionId::OpenStream, code) {
-                crate::action::dispatch(app, ActionId::OpenStream);
-                return;
-            }
-            app.set_flash("of=file  os=stream");
-        }
         return;
     }
 
@@ -3095,7 +3086,6 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
             ActionId::LogListLock,
             ActionId::LogListBookmark,
             ActionId::LogListYank,
-            ActionId::LogListOpen,
             ActionId::LogListYankMsgLine,
             ActionId::LogListVisualLine,
             ActionId::LogListNextMatch,
@@ -6795,7 +6785,7 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn space_w_opens_save_dialog_and_space_o_applies_preset() {
+    fn ctrl_s_opens_save_dialog_and_ctrl_o_applies_preset() {
         use crate::input::{build_group_from_chips, Chip, ChipField};
         use tempfile::TempDir;
 
@@ -6824,8 +6814,11 @@ mod dispatch_tests {
         app.rebuild_visible();
         app.following = true;
 
-        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('w'));
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
         assert!(app.preset_name.is_some());
         {
             let d = app.preset_name.as_mut().unwrap();
@@ -6842,8 +6835,11 @@ mod dispatch_tests {
         app.rebuild_visible();
         assert_eq!(app.groups.groups.len(), 0);
 
-        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-        handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
         assert!(matches!(
             app.picker.as_ref().map(|p| &p.kind),
             Some(crate::picker::PickerKind::Preset)
@@ -6860,17 +6856,99 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn space_o_empty_library_flashes_without_opening() {
+    fn ctrl_o_empty_library_flashes_without_opening() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let mut app = App::new(100);
         app.config_dir = dir.path().to_path_buf();
         let mut input = input::InputBox::default();
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(app.picker.is_none());
+        assert_eq!(app.status_msg.as_deref(), Some("NO PRESETS"));
+    }
+
+    #[test]
+    fn ctrl_f_opens_file_and_ctrl_g_opens_stream() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(
+            app.open_file_panel.is_none(),
+            "C-S-o is no longer Open File"
+        );
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        );
+        assert!(app.open_file_panel.is_some());
+        assert!(app.stream_source_panel.is_none());
+
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        );
+        assert!(app.open_file_panel.is_none());
+        assert!(app.stream_source_panel.is_some());
+    }
+
+    #[test]
+    fn dashboard_ctrl_f_opens_file_and_ctrl_g_opens_stream() {
+        let mut app = App::new(100);
+        app.dashboard = Some(dashboard::DashboardState::new(
+            recent::RecentFiles::default(),
+        ));
+        let mut live = None;
+        handle_dashboard_key(
+            &mut app,
+            &mut live,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        );
+        assert!(app.open_file_panel.as_ref().is_some_and(|p| p.from_dashboard));
+        assert!(app.stream_source_panel.is_none());
+
+        handle_dashboard_key(
+            &mut app,
+            &mut live,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        );
+        assert!(app.open_file_panel.is_none());
+        assert!(
+            app.stream_source_panel
+                .as_ref()
+                .is_some_and(|p| p.from_dashboard)
+        );
+    }
+
+    #[test]
+    fn legacy_of_os_and_space_wo_no_longer_open_source_or_preset() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+        assert!(app.open_file_panel.is_none());
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+        assert!(app.stream_source_panel.is_none());
+        handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('w'));
+        assert!(app.preset_name.is_none());
         handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
         handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
         assert!(app.picker.is_none());
-        assert_eq!(app.status_msg.as_deref(), Some("NO PRESETS"));
     }
 
     #[test]

@@ -315,17 +315,15 @@ pub struct App {
     pub pending_m: bool,
     /// Armed by leader key (`Space`); second key opens fzf-style picker (Task 5).
     pub pending_leader: bool,
-    /// Armed by `o` on LogList; second key opens file (`f`) or stream (`s`) source panel.
-    pub pending_open: bool,
     /// One-shot startup Dashboard (unbound source). `None` after first bind.
     pub dashboard: Option<crate::dashboard::DashboardState>,
     /// Persisted recent files (config dir).
     pub recent: crate::recent::RecentFiles,
     /// Configured log_dirs corpus for Open-file fuzzy search.
     pub log_corpus: crate::log_corpus::LogCorpus,
-    /// Open-file source panel (`of` / Dashboard Open file…).
+    /// Open-file source panel (`C-f` / Dashboard Open file…).
     pub open_file_panel: Option<crate::source_panel::OpenFilePanel>,
-    /// Centered HDC/ADB panel (`os`).
+    /// Centered HDC/ADB panel (`C-g`).
     pub stream_source_panel: Option<crate::source_panel::StreamSourcePanel>,
     /// Open fzf-style picker session (Unified Manage / Filter / Highlight / Bookmark / Exclude).
     pub picker: Option<crate::picker::PickerSession>,
@@ -377,7 +375,7 @@ pub struct App {
     pub config_dir: PathBuf,
     /// Cached preset catalog for `PickerKind::Preset` Manage.
     pub preset_catalog: Vec<crate::preset::Preset>,
-    /// Save / rename name dialog (`Space w` / Ctrl-X).
+    /// Save / rename name dialog (`C-s` / Ctrl-X).
     pub preset_name: Option<crate::preset::PresetNameDialog>,
     /// Vocabulary accumulated from ingested rows (tag/pkg/msg tokens).
     pub vocab: Vocab,
@@ -449,7 +447,6 @@ impl App {
             pending_time: false,
             pending_m: false,
             pending_leader: false,
-            pending_open: false,
             dashboard: None,
             recent: crate::recent::RecentFiles::default(),
             log_corpus: crate::log_corpus::LogCorpus::new(),
@@ -615,7 +612,6 @@ impl App {
         self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
-        self.pending_open = false;
     }
 
     /// Whether `C-p` may open the command palette (R3: Normal LogList/strips,
@@ -737,7 +733,6 @@ impl App {
         self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
-        self.pending_open = false;
         let mut session = PickerSession::open(kind);
         if prefer_new {
             session.enter_new();
@@ -750,26 +745,8 @@ impl App {
         self.dashboard.is_some()
     }
 
-    /// Arm `o` operator-pending (open/switch source).
-    pub fn begin_open_op(&mut self) {
-        self.clear_visual();
-        self.pending_yank = false;
-        self.pending_d = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_m = false;
-        self.pending_leader = false;
-        self.pending_open = true;
-    }
-
-    pub fn cancel_open_pending(&mut self) {
-        self.pending_open = false;
-    }
-
     pub fn open_file_source_panel(&mut self, from_dashboard: bool) {
-        self.pending_open = false;
+        self.clear_pending_all();
         self.stream_source_panel = None;
         self.picker = None;
         self.log_corpus.configure(
@@ -788,7 +765,7 @@ impl App {
     }
 
     pub fn open_stream_source_panel(&mut self, from_dashboard: bool) {
-        self.pending_open = false;
+        self.clear_pending_all();
         if self.open_file_panel.is_some() {
             self.log_corpus.cancel_inflight();
         }
@@ -816,7 +793,6 @@ impl App {
     pub fn close_source_panels(&mut self) {
         self.close_open_file_panel();
         self.stream_source_panel = None;
-        self.pending_open = false;
     }
 
     /// Reset session for a confirmed source switch. Keeps Filter / Exclude / Highlight only.
@@ -853,7 +829,6 @@ impl App {
         self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
-        self.pending_open = false;
         self.close_source_panels();
         self.picker = None;
         self.preset_name = None;
@@ -1729,7 +1704,6 @@ impl App {
         self.pending_time = false;
         self.pending_m = false;
         self.pending_leader = false;
-        self.pending_open = false;
         self.cursor = 0;
         self.list_offset = 0;
         self.match_stats_stale = true;
@@ -2107,7 +2081,6 @@ impl App {
         self.pending_time = false;
         self.pending_exclude = false;
         self.pending_leader = false;
-        self.pending_open = false;
         self.pending_chip = true;
     }
 
@@ -2120,7 +2093,6 @@ impl App {
         self.pending_time = false;
         self.pending_chip = false;
         self.pending_leader = false;
-        self.pending_open = false;
         self.pending_exclude = true;
     }
 
@@ -2147,7 +2119,6 @@ impl App {
         self.pending_exclude = false;
         self.pending_time = false;
         self.pending_leader = false;
-        self.pending_open = false;
         self.pending_lock = true;
     }
 
@@ -2167,7 +2138,6 @@ impl App {
         self.pending_lock = false;
         self.pending_m = false;
         self.pending_leader = false;
-        self.pending_open = false;
         self.pending_time = true;
     }
 
@@ -2808,17 +2778,18 @@ impl App {
         self.rebuild_visible();
     }
 
-    /// Begin `Space w` save: open name dialog, or flash if nothing to capture.
+    /// Begin Ctrl-S save: open name dialog, or flash if nothing to capture.
     pub fn begin_preset_save(&mut self) {
         if !crate::preset::has_savable_rules(&self.groups, &self.highlight_groups) {
             self.set_flash("NO RULES TO SAVE");
             return;
         }
+        self.clear_pending_all();
         self.close_picker();
         self.preset_name = Some(crate::preset::PresetNameDialog::save());
     }
 
-    /// Begin `Space o` open: load catalog; empty → flash; else Manage picker.
+    /// Begin Ctrl-O open: load catalog; empty → flash; else Manage picker.
     pub fn begin_preset_open(&mut self) {
         let (list, skipped) = crate::preset::list(&self.config_dir);
         if list.is_empty() {
@@ -3719,7 +3690,6 @@ mod tests {
         tx.send(row("A")).unwrap();
         drop(tx);
         app.drain(&rx);
-        app.pending_open = true;
 
         app.reset_for_source_switch();
 
@@ -3729,7 +3699,6 @@ mod tests {
         assert_eq!(app.highlight_groups.groups.len(), 1);
         assert!(app.lock_pid.is_none());
         assert!(app.time_bound.is_none());
-        assert!(!app.pending_open);
         assert!(app.following);
     }
 

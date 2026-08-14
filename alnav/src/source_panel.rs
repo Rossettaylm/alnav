@@ -1,4 +1,4 @@
-//! Runtime / Dashboard source-switch panels (`of` / `os` / Open file…).
+//! Runtime / Dashboard source-switch panels (`C-f` / `C-g` / Open file…).
 
 use std::path::{Path, PathBuf};
 

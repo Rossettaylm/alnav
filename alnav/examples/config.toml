@@ -23,10 +23,10 @@ picker_left_ratio = 0.4
 # 注意：聚合面板（Space Space）无论此项设置如何，始终全宽（无 Preview）。
 picker_preview_enabled = true
 
-# Dashboard / of 最近文件条数上限（1..=200）。默认 20。
+# Dashboard / C-f 最近文件条数上限（1..=200）。默认 20。
 recent_files_limit = 20
 
-# Open file（of）模糊检索语料目录（递归扫描）。空 = 仅 recent。支持 ~。
+# Open file（C-f）模糊检索语料目录（递归扫描）。空 = 仅 recent。支持 ~。
 log_dirs = []
 
 # 语料文件后缀过滤（忽略大小写）。省略或空列表 → 默认 .log / .txt。

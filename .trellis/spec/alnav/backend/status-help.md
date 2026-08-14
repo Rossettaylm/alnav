@@ -87,6 +87,8 @@ Left (never yields) → middle flash pill → pad + right-aligned hints.
 - Do **not** rebind `?` to Highlight New.
 - LogList L1: `f` label is `focus` (lock + view focus); L2_LOCK includes `p`/`t`/`h`/`e`/`u`.
 - L2_TIME: `t` set / `u` clear (open key is `tt`, not `ts`). Catalog session: `f h/e`, `t t/u`.
+- Source switch: `C-f` Open File, `C-g` Open Stream (not `of`/`os`, not `C-S-o`/`C-S-l`). Dashboard bare `o` still opens the file panel.
+- Presets: `C-s` save / `C-o` open (not `Space w` / `Space o`).
 
 ### Flash language
 

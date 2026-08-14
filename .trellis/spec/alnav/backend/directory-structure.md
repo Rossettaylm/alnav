@@ -53,6 +53,30 @@ commands appear in the palette (`when`, `catalog`, `filtered_catalog`).
 Do **not** reuse `PickerSession` for the palette. See
 [command-palette.md](./command-palette.md).
 
+### Global source / preset chords
+
+`OpenFile` / `OpenStream` / `LeaderPresetSave` / `LeaderPresetOpen` /
+`GlobalCommandPalette` are `KeyContext::Global` leaves. Defaults:
+
+| Action | Default | Notes |
+|--------|---------|-------|
+| Open File | `C-f` | Dashboard bare `o` still opens the file panel |
+| Open Stream | `C-g` | |
+| Preset Save | `C-s` | |
+| Preset Open | `C-o` | |
+| Command Palette | `C-p` | Dashboard: consumed, but `open_command_palette` no-ops |
+
+`main.rs::dispatch_global_chords` is the single matcher. Call it from
+`handle_normal_event` **and** `handle_dashboard_key` (after Ctrl+C quit).
+`OpenFile` / `OpenStream` pass `from_dashboard: app.dashboard.is_some()`
+so Esc returns to Dashboard.
+
+Do **not** bind default chords as `C-S-<letter>`: Cursor/VS Code steals
+`C-S-o` / `C-S-l`, and traditional TTYs often drop Shift so the exact
+modifier match never fires. Analysis operators (`c`/`C`/`y`/`f`/`t`/`mm`/`dd`)
+stay two-stage. Retired: `of`/`os`, `LogListOpen` / `pending_open` /
+`KeyContext::Open`.
+
 ### Global time window module
 
 `time_panel.rs` owns the `ts` editor only. Matching and persistence live on

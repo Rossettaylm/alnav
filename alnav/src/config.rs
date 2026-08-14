@@ -57,7 +57,7 @@ pub struct AppConfig {
     pub picker_left_ratio: f32,
     /// When false, all picker panels render full-width (no right preview pane).
     pub picker_preview_enabled: bool,
-    /// Max recent files remembered for Dashboard / `of` (clamped 1..=200).
+    /// Max recent files remembered for Dashboard / `C-f` (clamped 1..=200).
     pub recent_files_limit: usize,
     /// Directories recursively scanned for Open-file fuzzy corpus.
     pub log_dirs: Vec<String>,

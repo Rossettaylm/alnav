@@ -307,6 +307,16 @@ pub fn palette_keyhint_style() -> Style {
     muted().add_modifier(Modifier::DIM)
 }
 
+/// Tag/message foreground for severe log rows (E/F or crash signature).
+/// `emphatic` is Fatal and crash lines (bold); Error-level stays red without bold.
+pub fn severe_entry_style(emphatic: bool) -> Style {
+    let mut style = Style::default().fg(t().error);
+    if emphatic {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
+}
+
 /// Colored level badge (e.g. `" E "` on a red background).
 pub fn level_badge_style(level: Level) -> Style {
     let bg = match level {
@@ -1158,6 +1168,17 @@ mod tests {
         let style = log_selection_style();
         assert_eq!(style.bg, Some(Color::DarkGray));
         assert!(!style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn severe_entry_style_uses_theme_error_red() {
+        install(UiTokens::builtin());
+        let normal = severe_entry_style(false);
+        assert_eq!(normal.fg, Some(Color::Red));
+        assert!(!normal.add_modifier.contains(Modifier::BOLD));
+        let emphatic = severe_entry_style(true);
+        assert_eq!(emphatic.fg, Some(Color::Red));
+        assert!(emphatic.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

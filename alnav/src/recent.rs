@@ -1,4 +1,4 @@
-//! Persisted recent-files list for Dashboard / `of` source picker.
+//! Persisted recent-files list for Dashboard / `C-f` source picker.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -53,7 +53,9 @@ Update this spec when changing:
 - Pending chords **are** allowed: open clears them (`c` then `C-p` opens the palette).
 - Esc / Ctrl+C → `close_command_palette()` (same as Help/Detail: no resume follow).
 - Enter with hits → close, then `dispatch(selected id)`. Zero hits → Enter no-op, stay open.
-- Dashboard `C-p` is not supported.
+- Dashboard `C-p` is consumed by `dispatch_global_chords` but
+  `command_palette_available()` is false while `dashboard` is set, so open
+  is a no-op. Do not open the palette over the startup Dashboard.
 
 **Widget**
 

@@ -783,6 +783,22 @@ fn push_tag_column_spans(
     }
 }
 
+/// Tag + message styles: accent/bold tag and default msg, or theme-red for
+/// severe (E/F/crash) rows. Fatal and crash signatures are bold.
+fn entry_text_styles(row: &EntryRow) -> (Style, Style) {
+    if !row.severe {
+        return (
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+            Style::default(),
+        );
+    }
+    let emphatic = !matches!(row.level, alnav::parser::Level::E);
+    let base = theme::severe_entry_style(emphatic);
+    (base.add_modifier(Modifier::BOLD), base)
+}
+
 /// Renders one log entry as one or more physical `Line`s: a header
 /// (lineno/timestamp/level/fixed tag column) followed by the message,
 /// word-wrapped to `area_width`. The tag field uses a fixed column (pad /
@@ -809,9 +825,7 @@ fn render_entry_lines(
     let first_width = area_width.saturating_sub(header_width).max(8);
     let cont_width = area_width.saturating_sub(header_width).max(8);
 
-    let tag_style = Style::default()
-        .fg(theme::accent())
-        .add_modifier(Modifier::BOLD);
+    let (tag_style, msg_style) = entry_text_styles(row);
     let tag_matches = collect_field_matches(row, patterns, PaintField::Tag);
     let msg_matches = collect_field_matches(row, patterns, PaintField::Msg);
 
@@ -848,12 +862,7 @@ fn render_entry_lines(
                     Style::default().add_modifier(Modifier::DIM),
                 ));
             }
-            spans.extend(spans_for_range(
-                &row.msg,
-                range,
-                &msg_matches,
-                Style::default(),
-            ));
+            spans.extend(spans_for_range(&row.msg, range, &msg_matches, msg_style));
             Line::from(spans)
         })
         .collect()
@@ -881,9 +890,7 @@ fn render_entry_line_single(
     let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
     let msg_budget = area_width.saturating_sub(header_width).max(1);
 
-    let tag_style = Style::default()
-        .fg(theme::accent())
-        .add_modifier(Modifier::BOLD);
+    let (tag_style, msg_style) = entry_text_styles(row);
     let tag_matches = collect_field_matches(row, patterns, PaintField::Tag);
     let msg_matches = collect_field_matches(row, patterns, PaintField::Msg);
 
@@ -906,19 +913,19 @@ fn render_entry_line_single(
             &row.msg,
             (0, row.msg.len()),
             &msg_matches,
-            Style::default(),
+            msg_style,
         ));
     } else if msg_budget == 1 {
-        spans.push(Span::styled("…".to_string(), Style::default()));
+        spans.push(Span::styled("…".to_string(), msg_style));
     } else {
         let visible_end = byte_end_for_chars(&row.msg, msg_budget - 1);
         spans.extend(spans_for_range(
             &row.msg,
             (0, visible_end),
             &msg_matches,
-            Style::default(),
+            msg_style,
         ));
-        spans.push(Span::styled("…".to_string(), Style::default()));
+        spans.push(Span::styled("…".to_string(), msg_style));
     }
     Line::from(spans)
 }
@@ -943,9 +950,7 @@ fn render_entry_line_collapsed(
     let header_width = prefix_without_tag + tag_col + TAG_MSG_GAP;
     let msg_budget = area_width.saturating_sub(header_width).max(1);
 
-    let tag_style = Style::default()
-        .fg(theme::accent())
-        .add_modifier(Modifier::BOLD);
+    let (tag_style, msg_style) = entry_text_styles(row);
     let tag_matches = collect_field_matches(row, patterns, PaintField::Tag);
     let msg_matches = collect_field_matches(row, patterns, PaintField::Msg);
 
@@ -969,19 +974,19 @@ fn render_entry_line_collapsed(
             &row.msg,
             (0, row.msg.len()),
             &msg_matches,
-            Style::default(),
+            msg_style,
         ));
     } else if msg_budget == 1 {
-        spans.push(Span::styled("…".to_string(), Style::default()));
+        spans.push(Span::styled("…".to_string(), msg_style));
     } else {
         let visible_end = byte_end_for_chars(&row.msg, msg_budget - 1);
         spans.extend(spans_for_range(
             &row.msg,
             (0, visible_end),
             &msg_matches,
-            Style::default(),
+            msg_style,
         ));
-        spans.push(Span::styled("…".to_string(), Style::default()));
+        spans.push(Span::styled("…".to_string(), msg_style));
     }
     Line::from(spans)
 }
@@ -3730,7 +3735,7 @@ fn take_display_suffix(text: &str, max_width: usize) -> String {
 /// Open-file left pane: at least half width so basename-first labels stay readable.
 const OPEN_FILE_LEFT_RATIO_FLOOR: f32 = 0.55;
 
-/// Open-file source panel (`of`): left candidates + draft, right full path.
+/// Open-file source panel (`C-f`): left candidates + draft, right full path.
 pub fn render_open_file_panel(
     panel: &crate::source_panel::OpenFilePanel,
     left_ratio: f32,
@@ -3806,7 +3811,7 @@ pub fn render_open_file_panel(
     )
 }
 
-/// Centered HDC / ADB chooser (`os`).
+/// Centered HDC / ADB chooser (`C-g`).
 pub fn render_stream_source_panel(
     panel: &crate::source_panel::StreamSourcePanel,
     frame: &mut Frame,
@@ -4121,6 +4126,39 @@ mod tests {
         );
     }
 
+    fn fg_of_needle(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<Color> {
+        for y in 0..buf.area.height {
+            let mut text = String::new();
+            let mut starts = Vec::new();
+            for x in 0..buf.area.width {
+                starts.push(text.len());
+                text.push_str(buf[(x, y)].symbol());
+            }
+            if let Some(i) = text.find(needle) {
+                let x = starts.iter().rposition(|&s| s <= i)? as u16;
+                return Some(buf[(x, y)].fg);
+            }
+        }
+        None
+    }
+
+    fn render_lines(app: &mut App, lines: &[&str]) -> ratatui::buffer::Buffer {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for line in lines {
+            tx.send(crate::model::EntryRow::from_line(line).unwrap())
+                .unwrap();
+        }
+        drop(tx);
+        app.drain(&rx);
+        app.focus = Focus::Input;
+        let backend = TestBackend::new(100, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_log_list(app, frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
     #[test]
     fn test_render_log_list_shows_tag_and_msg() {
         let mut app = App::new(100);
@@ -4142,6 +4180,30 @@ mod tests {
         let content = cell_text(terminal.backend().buffer());
         assert!(content.contains("MyTag"));
         assert!(content.contains("hello world"));
+    }
+
+    #[test]
+    fn error_and_crash_rows_paint_tag_and_msg_in_theme_red() {
+        crate::theme::install(crate::theme::UiTokens::builtin());
+        let mut app = App::new(100);
+        let buf = render_lines(
+            &mut app,
+            &[
+                "04-02 10:00:00.000  1  1 I InfoTag : UNIQUEINFOMSG",
+                "04-02 10:00:01.000  1  1 E ErrTag  : UNIQUEERRMSG",
+                "04-02 10:00:02.000  1  1 F FatTag  : UNIQUEFATALMSG",
+                "04-02 10:00:03.000  1  1 I AndroidRuntime: FATAL EXCEPTION: main UNIQUECRASH",
+            ],
+        );
+        assert_ne!(
+            fg_of_needle(&buf, "UNIQUEINFOMSG"),
+            Some(Color::Red),
+            "info msg must not use error red"
+        );
+        assert_eq!(fg_of_needle(&buf, "UNIQUEERRMSG"), Some(Color::Red));
+        assert_eq!(fg_of_needle(&buf, "ErrTag"), Some(Color::Red));
+        assert_eq!(fg_of_needle(&buf, "UNIQUEFATALMSG"), Some(Color::Red));
+        assert_eq!(fg_of_needle(&buf, "UNIQUECRASH"), Some(Color::Red));
     }
 
     #[test]

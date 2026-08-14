@@ -173,6 +173,20 @@ Highlight ramp (index `i % 8`):
 Log timestamp/pid/tid style uses `muted`. Package tint uses Pkg field color.
 CLI `--highlight` / `USER_HIGHLIGHT` stay on `logcolor` (CLI-only).
 
+### Severe log rows (E / F / crash)
+
+When `row.severe` is true (`is_severe_row`: level E/F **or** crash signature),
+**tag and message** foreground uses `theme::severe_entry_style(emphatic)`
+(`t().error`, default `Color::Red`). Line number and timestamp stay `muted`.
+Level badges are unchanged (`level_badge_style`). Keyword / search highlights
+still overlay on top.
+
+`emphatic` (Bold) is Fatal (`Level::F`) and crash-signature rows that are not
+plain Error. Plain E-level is red without Bold.
+
+Do **not** paint the whole `ListItem` red, and do **not** hard-code `Color::Red`
+in `ui.rs`.
+
 ### Mix (named themes with RGB `background` only)
 
 | Token | Mix |

@@ -45,6 +45,8 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Read [theme-system.md](./theme-system.md) before changing `theme.rs` / `palette.rs` / `theme.toml` / `config.toml` `theme`.
 - [ ] Touching picker Manage: read Directory Structure "Picker session dispatch".
 - [ ] Read [command-palette.md](./command-palette.md) before changing `C-p` / `action::dispatch` / palette catalog / `when`.
+- [ ] Read Directory Structure "Global source / preset chords" before changing `C-f`/`C-g`/`C-s`/`C-o` or Dashboard key dispatch. Do not default-bind `C-S-<letter>`.
+- [ ] Severe log tag/msg paint goes through `theme::severe_entry_style` (see [theme-system.md](./theme-system.md)); do not hard-code red in `ui.rs`.
 
 ## Quality Check
 
