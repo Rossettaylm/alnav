@@ -413,3 +413,37 @@ Open file 改为 log_dirs 异步语料 + nucleo Pattern::parse；移除 path_com
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: TUI command palette (C-p)
+
+**Date**: 2026-08-14
+**Task**: TUI command palette (C-p)
+**Package**: alnav
+**Branch**: `master`
+
+### Summary
+
+Shipped a VS Code-style command palette on C-p: ActionStore owns catalog/when/dispatch, palette searches titles with nucleo, LogList and strips open it, Enter dispatches after close. 611 alnav tests green. Merged feat/tui-command-palette into master.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4f1f109` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
