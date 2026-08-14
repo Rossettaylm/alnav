@@ -447,3 +447,37 @@ Shipped a VS Code-style command palette on C-p: ActionStore owns catalog/when/di
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: Severe row red + Global C-f/C-g
+
+**Date**: 2026-08-14
+**Task**: Severe row red + Global C-f/C-g
+**Package**: alnav
+**Branch**: `master`
+
+### Summary
+
+Painted E/F/crash tag+msg in theme error red. Moved Open File/Stream to C-f/C-g (Ctrl+Shift is stolen/unreliable) and made Global chords work on Dashboard; presets stay C-s/C-o.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5e4b89c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 13
+- **Total Sessions**: 14
 - **Last Active**: 2026-08-14
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~449 | Active |
+| `journal-1.md` | ~483 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 14 | 2026-08-14 | Severe row red + Global C-f/C-g | `5e4b89c` | `master` |
 | 13 | 2026-08-14 | TUI command palette (C-p) | `4f1f109` | `master` |
 | 12 | 2026-08-13 | TUI open-file log_dirs nucleo search | `52fea12` | `master` |
 | 11 | 2026-08-13 | 候选面板检索一级指标 | `552a6f9`, `3d7e2ed` | `master` |
