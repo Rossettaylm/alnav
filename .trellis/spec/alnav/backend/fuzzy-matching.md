@@ -66,7 +66,7 @@ CandidateMatchService::request / poll / clear  // gen-cancel async
 | Field keyword candidates | `InputBox::field_candidates` fuzzy on keywords (`tag`/`msg`/…). |
 | Highlight history candidates | `HighlightBox::candidate_indices` fuzzy on patterns; cap 6; score-ordered. |
 | Group compose | Chips AND (interactive) / same-field OR at startup; groups OR; excludes AND NOT; then lock → time_bound → view_focus. |
-| Candidate lists | `fuzzy_label_indices` / vocab filter / `contains_indices`: empty → stable/freq order **truncated to `CANDIDATE_RESULT_CAP` (256)**; else score-sorted then truncate. |
+| Candidate lists | `fuzzy_label_indices` / vocab filter / `contains_indices`: empty → stable/freq order **truncated to `CANDIDATE_RESULT_CAP` (256)**; else score-sorted then truncate. **Exception**: command palette `filtered_catalog` must return **no rows** on empty query (do not use the first-N empty path). |
 | Paint (log) | Substring ranges mapped to `FieldSpan` on tag/msg (or Raw); `ui` must not use fuzzy gaps or `Regex::find_iter`. |
 | Paint (candidate list) | `candidate_label_spans` uses `fuzzy_char_indices` ranges — not substring `contains`. **ViewportPaint**: `render_candidate_list` only builds items for the visible window (`candidate_viewport_range`). |
 

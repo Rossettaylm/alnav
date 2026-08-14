@@ -51,9 +51,9 @@ and diverges from CLI global-AND semantics. See
 
 ### Don't: let modal Ctrl+C fall through as a typed character
 
-When a top modal owns key routing (Time panel, Help, etc.), Ctrl+C must cancel
-like Esc at the `KeyEvent` layer — otherwise `Char('c')` is inserted into the
-draft or quits the app while a modal is open.
+When a top modal owns key routing (Time panel, Help, command palette, etc.),
+Ctrl+C must cancel like Esc at the `KeyEvent` layer — otherwise `Char('c')`
+is inserted into the draft or quits the app while a modal is open.
 
 ### Don't: duplicate keybinding copy outside `help.rs`
 
@@ -63,7 +63,15 @@ paragraph table in `ui.rs`. See [status-help.md](./status-help.md).
 
 ### Don't: resume following when closing Help
 
-`close_help()` must not call `resume_following` — same as Detail Esc.
+`close_help()` must not call `resume_following` — same as Detail Esc and
+`close_command_palette()`.
+
+### Don't: reuse PickerSession for the command palette
+
+The `C-p` palette is `App.command_palette` + `command_palette.rs`. Do not
+route it through `PickerKind` / `UnifiedKind`. Empty query must not list
+commands; `j`/`k` type into the query (Up/Down move). See
+[command-palette.md](./command-palette.md).
 
 ---
 

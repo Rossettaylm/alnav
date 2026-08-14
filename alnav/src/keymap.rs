@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::theme;
+
 /// Action classification for chord trees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
@@ -362,6 +364,7 @@ pub enum KeyContext {
     TimePanel,
     Visual,
     Yank,
+    CommandPalette,
 }
 
 impl KeyContext {
@@ -386,6 +389,7 @@ impl KeyContext {
             Self::TimePanel => "time_panel",
             Self::Visual => "visual",
             Self::Yank => "yank",
+            Self::CommandPalette => "command_palette",
         }
     }
     pub fn from_toml(s: &str) -> Option<Self> {
@@ -409,6 +413,7 @@ impl KeyContext {
             "time_panel" => Some(Self::TimePanel),
             "visual" => Some(Self::Visual),
             "yank" => Some(Self::Yank),
+            "command_palette" => Some(Self::CommandPalette),
             _ => None,
         }
     }
@@ -429,6 +434,7 @@ pub enum ActionId {
     GlobalHighlightNew,
     GlobalExcludeNew,
     GlobalOpenHelp,
+    GlobalCommandPalette,
     LogListMoveDown,
     LogListMoveUp,
     LogListJumpDown,
@@ -551,6 +557,10 @@ pub enum ActionId {
     HighlightModalConfirm,
     HighlightModalConfirmTab,
     HighlightModalCancel,
+    PaletteSubmit,
+    PaletteUp,
+    PaletteDown,
+    PaletteClose,
 }
 
 /// Metadata for one registered action (defaults live here).
@@ -564,6 +574,10 @@ pub struct ActionMeta {
     pub capabilities: &'static [Capability],
     pub label: &'static str,
     pub detail: &'static str,
+    /// Intent-command catalog (command palette). Unused when `in_palette` is false.
+    pub in_palette: bool,
+    pub palette_title: &'static str,
+    pub palette_icon: &'static str,
 }
 
 impl ActionMeta {
@@ -576,6 +590,13 @@ impl ActionMeta {
             }
         }
         true
+    }
+
+    pub fn with_palette(mut self, title: &'static str, icon: &'static str) -> Self {
+        self.in_palette = true;
+        self.palette_title = title;
+        self.palette_icon = icon;
+        self
     }
 }
 
@@ -593,6 +614,7 @@ impl ActionId {
         Self::GlobalHighlightNew,
         Self::GlobalExcludeNew,
         Self::GlobalOpenHelp,
+        Self::GlobalCommandPalette,
         Self::LogListMoveDown,
         Self::LogListMoveUp,
         Self::LogListJumpDown,
@@ -715,6 +737,10 @@ impl ActionId {
         Self::HighlightModalConfirm,
         Self::HighlightModalConfirmTab,
         Self::HighlightModalCancel,
+        Self::PaletteSubmit,
+        Self::PaletteUp,
+        Self::PaletteDown,
+        Self::PaletteClose,
     ];
 
     pub fn meta(self) -> ActionMeta {
@@ -728,7 +754,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "quit",
                 detail: "quit the application",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Quit", theme::GLYPH_QUIT),
             Self::GlobalFocusNext => ActionMeta {
                 id: Self::GlobalFocusNext,
                 context: KeyContext::Global,
@@ -738,6 +768,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "focus",
                 detail: "next focus region",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::GlobalFocusPrev => ActionMeta {
                 id: Self::GlobalFocusPrev,
@@ -748,6 +781,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "focus",
                 detail: "previous focus region",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::GlobalFocusFilter => ActionMeta {
                 id: Self::GlobalFocusFilter,
@@ -758,6 +794,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "filter",
                 detail: "focus filter strip",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::GlobalFocusExclude => ActionMeta {
                 id: Self::GlobalFocusExclude,
@@ -768,6 +807,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "exclude",
                 detail: "focus exclude strip",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::GlobalFocusHighlight => ActionMeta {
                 id: Self::GlobalFocusHighlight,
@@ -778,6 +820,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "highlight",
                 detail: "focus highlight strip",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::GlobalFocusLog => ActionMeta {
                 id: Self::GlobalFocusLog,
@@ -788,6 +833,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "log",
                 detail: "focus log list",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::GlobalFocusInput => ActionMeta {
                 id: Self::GlobalFocusInput,
@@ -798,6 +846,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "input",
                 detail: "open unified manage",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::GlobalFilterNew => ActionMeta {
                 id: Self::GlobalFilterNew,
@@ -808,7 +859,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "filter",
                 detail: "open filter picker in new mode",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Add Filter", theme::GLYPH_TITLE_FILTER),
             Self::GlobalHighlightNew => ActionMeta {
                 id: Self::GlobalHighlightNew,
                 context: KeyContext::Global,
@@ -818,7 +873,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "highlight",
                 detail: "open highlight picker in new mode",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Add Highlight", theme::GLYPH_TITLE_HIGHLIGHT),
             Self::GlobalExcludeNew => ActionMeta {
                 id: Self::GlobalExcludeNew,
                 context: KeyContext::Global,
@@ -828,7 +887,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "exclude",
                 detail: "open exclude picker in new mode",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Add Exclude", theme::GLYPH_TITLE_EXCLUDE),
             Self::GlobalOpenHelp => ActionMeta {
                 id: Self::GlobalOpenHelp,
                 context: KeyContext::Global,
@@ -838,7 +901,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "help",
                 detail: "open help panel",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Open Help", theme::GLYPH_HELP),
             Self::LogListMoveDown => ActionMeta {
                 id: Self::LogListMoveDown,
                 context: KeyContext::LogList,
@@ -848,6 +915,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "move",
                 detail: "move cursor down",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListMoveUp => ActionMeta {
                 id: Self::LogListMoveUp,
@@ -858,6 +928,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "move",
                 detail: "move cursor up",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListJumpDown => ActionMeta {
                 id: Self::LogListJumpDown,
@@ -868,6 +941,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "jump",
                 detail: "move down fast",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListJumpUp => ActionMeta {
                 id: Self::LogListJumpUp,
@@ -878,6 +954,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "jump",
                 detail: "move up fast",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListJumpTop => ActionMeta {
                 id: Self::LogListJumpTop,
@@ -888,6 +967,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "top",
                 detail: "jump to top",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListJumpBottom => ActionMeta {
                 id: Self::LogListJumpBottom,
@@ -898,6 +980,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "bottom",
                 detail: "jump to bottom and resume follow",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListResumeFollow => ActionMeta {
                 id: Self::LogListResumeFollow,
@@ -908,7 +993,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "follow",
                 detail: "resume following and pin to bottom",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Resume Following", theme::GLYPH_FOLLOWING),
             Self::LogListNextMatch => ActionMeta {
                 id: Self::LogListNextMatch,
                 context: KeyContext::LogList,
@@ -918,6 +1007,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "next",
                 detail: "next highlight match",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListPrevMatch => ActionMeta {
                 id: Self::LogListPrevMatch,
@@ -928,6 +1020,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "prev",
                 detail: "previous highlight match",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListNextSevere => ActionMeta {
                 id: Self::LogListNextSevere,
@@ -938,6 +1033,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "error",
                 detail: "next severe line",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListPrevSevere => ActionMeta {
                 id: Self::LogListPrevSevere,
@@ -948,6 +1046,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "error",
                 detail: "previous severe line",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListDetailFields => ActionMeta {
                 id: Self::LogListDetailFields,
@@ -958,7 +1059,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "detail",
                 detail: "toggle fields overlay",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Show Fields", theme::GLYPH_VIEW_FOCUS),
             Self::LogListDetailPretty => ActionMeta {
                 id: Self::LogListDetailPretty,
                 context: KeyContext::LogList,
@@ -968,7 +1073,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "pretty",
                 detail: "toggle pretty / swap overlay (crash rows show structured detail)",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Show Pretty", theme::GLYPH_VIEW_FOCUS),
             Self::LogListVisualLine => ActionMeta {
                 id: Self::LogListVisualLine,
                 context: KeyContext::LogList,
@@ -978,6 +1087,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "visual",
                 detail: "enter visual line mode",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListYankMsgLine => ActionMeta {
                 id: Self::LogListYankMsgLine,
@@ -988,7 +1100,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "yank",
                 detail: "yank message of current line",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Yank Message", theme::GLYPH_FIELD_MSG),
             Self::LogListClearLive => ActionMeta {
                 id: Self::LogListClearLive,
                 context: KeyContext::LogList,
@@ -998,7 +1114,11 @@ impl ActionId {
                 capabilities: &[Capability::LiveOnly],
                 label: "clear",
                 detail: "clear buffered live logs",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Clear Live Buffer", theme::GLYPH_DISCONNECT),
             Self::LogListPageDown => ActionMeta {
                 id: Self::LogListPageDown,
                 context: KeyContext::LogList,
@@ -1008,6 +1128,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "page",
                 detail: "page down",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListPageUp => ActionMeta {
                 id: Self::LogListPageUp,
@@ -1018,6 +1141,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "page",
                 detail: "page up",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListLeader => ActionMeta {
                 id: Self::LogListLeader,
@@ -1028,6 +1154,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "menu",
                 detail: "leader prefix",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListBookmark => ActionMeta {
                 id: Self::LogListBookmark,
@@ -1038,6 +1167,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "mark",
                 detail: "bookmark operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListChip => ActionMeta {
                 id: Self::LogListChip,
@@ -1048,6 +1180,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "chip",
                 detail: "filter chip from row",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListExcludeChip => ActionMeta {
                 id: Self::LogListExcludeChip,
@@ -1058,6 +1193,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "exclude",
                 detail: "exclude chip from row",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListYank => ActionMeta {
                 id: Self::LogListYank,
@@ -1068,6 +1206,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "yank",
                 detail: "yank operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListLock => ActionMeta {
                 id: Self::LogListLock,
@@ -1078,6 +1219,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "focus",
                 detail: "lock / view focus operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListOpen => ActionMeta {
                 id: Self::LogListOpen,
@@ -1088,6 +1232,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "source",
                 detail: "open or switch source",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListTime => ActionMeta {
                 id: Self::LogListTime,
@@ -1098,6 +1245,9 @@ impl ActionId {
                 capabilities: &[Capability::FileOnly],
                 label: "time",
                 detail: "time window operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LogListWrapToggle => ActionMeta {
                 id: Self::LogListWrapToggle,
@@ -1108,7 +1258,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "wrap",
                 detail: "toggle multi-line / single-line collapsed view",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Toggle Wrap", theme::GLYPH_TITLE_LOG),
             Self::LeaderManage => ActionMeta {
                 id: Self::LeaderManage,
                 context: KeyContext::Leader,
@@ -1118,7 +1272,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "manage",
                 detail: "open unified manage panel",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Manage Filters", theme::GLYPH_MODE_MANAGE),
             Self::LeaderPresetSave => ActionMeta {
                 id: Self::LeaderPresetSave,
                 context: KeyContext::Leader,
@@ -1128,7 +1286,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "save",
                 detail: "save filter preset",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Save Preset", theme::GLYPH_MODE_NEW),
             Self::LeaderPresetOpen => ActionMeta {
                 id: Self::LeaderPresetOpen,
                 context: KeyContext::Leader,
@@ -1138,7 +1300,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "open",
                 detail: "open filter preset",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Open Preset", theme::GLYPH_SOURCE_DIR),
             Self::LeaderSummary => ActionMeta {
                 id: Self::LeaderSummary,
                 context: KeyContext::Leader,
@@ -1148,7 +1314,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "stats",
                 detail: "open summary panel",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Show Summary", theme::GLYPH_TITLE_DASHBOARD),
             Self::LeaderCancel => ActionMeta {
                 id: Self::LeaderCancel,
                 context: KeyContext::Leader,
@@ -1158,6 +1328,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel leader",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::BookmarkAdd => ActionMeta {
                 id: Self::BookmarkAdd,
@@ -1168,7 +1341,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "add",
                 detail: "bookmark current row",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Add Bookmark", theme::GLYPH_BOOKMARK),
             Self::BookmarkRemove => ActionMeta {
                 id: Self::BookmarkRemove,
                 context: KeyContext::Bookmark,
@@ -1178,7 +1355,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "delete",
                 detail: "remove bookmark on current row",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Remove Bookmark", theme::GLYPH_BOOKMARK),
             Self::BookmarkManage => ActionMeta {
                 id: Self::BookmarkManage,
                 context: KeyContext::Bookmark,
@@ -1188,7 +1369,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "manage",
                 detail: "open bookmark manage",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Manage Bookmarks", theme::GLYPH_BOOKMARK),
             Self::BookmarkCancel => ActionMeta {
                 id: Self::BookmarkCancel,
                 context: KeyContext::Bookmark,
@@ -1198,6 +1383,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel bookmark operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::LockPid => ActionMeta {
                 id: Self::LockPid,
@@ -1208,7 +1396,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "pid",
                 detail: "lock to pid",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Lock PID", theme::GLYPH_LOCK),
             Self::LockTid => ActionMeta {
                 id: Self::LockTid,
                 context: KeyContext::Lock,
@@ -1218,7 +1410,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "tid",
                 detail: "lock to tid",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Lock TID", theme::GLYPH_LOCK),
             Self::LockViewHighlight => ActionMeta {
                 id: Self::LockViewHighlight,
                 context: KeyContext::Lock,
@@ -1228,7 +1424,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "hl",
                 detail: "toggle highlight-only view",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("View Focus Highlight", theme::GLYPH_VIEW_FOCUS),
             Self::LockViewSevere => ActionMeta {
                 id: Self::LockViewSevere,
                 context: KeyContext::Lock,
@@ -1238,7 +1438,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "err",
                 detail: "toggle severe-only view",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("View Focus Severe", theme::GLYPH_CRASH),
             Self::LockClear => ActionMeta {
                 id: Self::LockClear,
                 context: KeyContext::Lock,
@@ -1248,7 +1452,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "clear",
                 detail: "clear session lock",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Clear Lock", theme::GLYPH_LOCK),
             Self::LockCancel => ActionMeta {
                 id: Self::LockCancel,
                 context: KeyContext::Lock,
@@ -1258,6 +1466,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel lock operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::OpenFile => ActionMeta {
                 id: Self::OpenFile,
@@ -1268,7 +1479,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "file",
                 detail: "open or switch to a file",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Open File", theme::GLYPH_SOURCE_OPEN_FILE),
             Self::OpenStream => ActionMeta {
                 id: Self::OpenStream,
                 context: KeyContext::Open,
@@ -1278,7 +1493,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "stream",
                 detail: "open or switch to hdc/adb",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Open Stream", theme::GLYPH_SOURCE_HDC),
             Self::OpenCancel => ActionMeta {
                 id: Self::OpenCancel,
                 context: KeyContext::Open,
@@ -1288,6 +1507,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel open-source operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::TimeSet => ActionMeta {
                 id: Self::TimeSet,
@@ -1298,7 +1520,11 @@ impl ActionId {
                 capabilities: &[Capability::FileOnly],
                 label: "set",
                 detail: "open time window panel",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Set Time Window", theme::GLYPH_TIME),
             Self::TimeClear => ActionMeta {
                 id: Self::TimeClear,
                 context: KeyContext::Time,
@@ -1308,7 +1534,11 @@ impl ActionId {
                 capabilities: &[Capability::FileOnly],
                 label: "clear",
                 detail: "clear time window",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Clear Time Window", theme::GLYPH_TIME),
             Self::TimeCancel => ActionMeta {
                 id: Self::TimeCancel,
                 context: KeyContext::Time,
@@ -1318,6 +1548,9 @@ impl ActionId {
                 capabilities: &[Capability::FileOnly],
                 label: "cancel",
                 detail: "cancel time operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ChipFieldTag => ActionMeta {
                 id: Self::ChipFieldTag,
@@ -1328,6 +1561,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "tag",
                 detail: "select tag field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ChipFieldMsg => ActionMeta {
                 id: Self::ChipFieldMsg,
@@ -1338,6 +1574,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "msg",
                 detail: "select msg field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ChipFieldPkg => ActionMeta {
                 id: Self::ChipFieldPkg,
@@ -1348,6 +1587,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "pkg",
                 detail: "select pkg field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ChipFieldPid => ActionMeta {
                 id: Self::ChipFieldPid,
@@ -1358,6 +1600,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "pid",
                 detail: "select pid field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ChipFieldTid => ActionMeta {
                 id: Self::ChipFieldTid,
@@ -1368,6 +1613,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "tid",
                 detail: "select tid field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ChipFieldLevel => ActionMeta {
                 id: Self::ChipFieldLevel,
@@ -1378,6 +1626,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "level",
                 detail: "select level field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ChipFieldCancel => ActionMeta {
                 id: Self::ChipFieldCancel,
@@ -1388,6 +1639,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "select cancel field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankCli => ActionMeta {
                 id: Self::YankCli,
@@ -1398,7 +1652,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "cli",
                 detail: "yank filters as alnav grep CLI",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Yank CLI", theme::GLYPH_TITLE_LOG),
             Self::YankTag => ActionMeta {
                 id: Self::YankTag,
                 context: KeyContext::Yank,
@@ -1408,6 +1666,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "tag",
                 detail: "yank tag",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankMsg => ActionMeta {
                 id: Self::YankMsg,
@@ -1418,6 +1679,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "msg",
                 detail: "yank msg tokens",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankPkg => ActionMeta {
                 id: Self::YankPkg,
@@ -1428,6 +1692,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "pkg",
                 detail: "yank package",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankPid => ActionMeta {
                 id: Self::YankPid,
@@ -1438,6 +1705,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "pid",
                 detail: "yank pid",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankTid => ActionMeta {
                 id: Self::YankTid,
@@ -1448,6 +1718,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "tid",
                 detail: "yank tid",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankLevel => ActionMeta {
                 id: Self::YankLevel,
@@ -1458,6 +1731,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "level",
                 detail: "yank level",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankRaw => ActionMeta {
                 id: Self::YankRaw,
@@ -1468,6 +1744,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "raw",
                 detail: "yank raw line",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankLine => ActionMeta {
                 id: Self::YankLine,
@@ -1478,6 +1757,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "line",
                 detail: "yank formatted line",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankTime => ActionMeta {
                 id: Self::YankTime,
@@ -1488,6 +1770,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "time",
                 detail: "yank timestamp",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::YankCancel => ActionMeta {
                 id: Self::YankCancel,
@@ -1498,6 +1783,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel yank operator",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::StripDDelete => ActionMeta {
                 id: Self::StripDDelete,
@@ -1508,7 +1796,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "delete",
                 detail: "delete selected strip group",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Delete Selected Group", theme::GLYPH_TITLE_EXCLUDE),
             Self::StripDDisable => ActionMeta {
                 id: Self::StripDDisable,
                 context: KeyContext::StripD,
@@ -1518,7 +1810,11 @@ impl ActionId {
                 capabilities: &[],
                 label: "disable",
                 detail: "toggle disable selected strip group",
-            },
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Toggle Selected Group", theme::GLYPH_ACTION_TOGGLE_OFF),
             Self::StripDCancel => ActionMeta {
                 id: Self::StripDCancel,
                 context: KeyContext::StripD,
@@ -1528,6 +1824,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel strip delete",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::StripPendingD => ActionMeta {
                 id: Self::StripPendingD,
@@ -1538,6 +1837,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "del…",
                 detail: "dd delete / di disable",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::StripPrevGroup => ActionMeta {
                 id: Self::StripPrevGroup,
@@ -1548,6 +1850,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "group",
                 detail: "previous strip group",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::StripNextGroup => ActionMeta {
                 id: Self::StripNextGroup,
@@ -1558,6 +1863,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "group",
                 detail: "next strip group",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::StripResumeFollow => ActionMeta {
                 id: Self::StripResumeFollow,
@@ -1568,6 +1876,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "follow",
                 detail: "resume following",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::StripOpenHelp => ActionMeta {
                 id: Self::StripOpenHelp,
@@ -1578,6 +1889,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "help",
                 detail: "open help",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::StripFocusNext => ActionMeta {
                 id: Self::StripFocusNext,
@@ -1588,6 +1902,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "focus",
                 detail: "cycle focus",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::VisualMoveDown => ActionMeta {
                 id: Self::VisualMoveDown,
@@ -1598,6 +1915,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "move",
                 detail: "extend selection down",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::VisualMoveUp => ActionMeta {
                 id: Self::VisualMoveUp,
@@ -1608,6 +1928,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "move",
                 detail: "extend selection up",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::VisualJumpDown => ActionMeta {
                 id: Self::VisualJumpDown,
@@ -1618,6 +1941,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "jump",
                 detail: "extend selection down fast",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::VisualJumpUp => ActionMeta {
                 id: Self::VisualJumpUp,
@@ -1628,6 +1954,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "jump",
                 detail: "extend selection up fast",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::VisualYankRaw => ActionMeta {
                 id: Self::VisualYankRaw,
@@ -1638,6 +1967,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "yank",
                 detail: "yank selection raw",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::VisualYankMsg => ActionMeta {
                 id: Self::VisualYankMsg,
@@ -1648,6 +1980,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "yank",
                 detail: "yank selection messages",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::VisualCancel => ActionMeta {
                 id: Self::VisualCancel,
@@ -1658,6 +1993,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "leave visual mode",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpClose => ActionMeta {
                 id: Self::HelpClose,
@@ -1668,6 +2006,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "close",
                 detail: "close help",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpToggle => ActionMeta {
                 id: Self::HelpToggle,
@@ -1678,6 +2019,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "close",
                 detail: "close help",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpScrollDown => ActionMeta {
                 id: Self::HelpScrollDown,
@@ -1688,6 +2032,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "scroll",
                 detail: "scroll help down",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpScrollUp => ActionMeta {
                 id: Self::HelpScrollUp,
@@ -1698,6 +2045,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "scroll",
                 detail: "scroll help up",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpJumpDown => ActionMeta {
                 id: Self::HelpJumpDown,
@@ -1708,6 +2058,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "jump",
                 detail: "scroll help down fast",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpJumpUp => ActionMeta {
                 id: Self::HelpJumpUp,
@@ -1718,6 +2071,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "jump",
                 detail: "scroll help up fast",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpTop => ActionMeta {
                 id: Self::HelpTop,
@@ -1728,6 +2084,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "top",
                 detail: "scroll help to top",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HelpBottom => ActionMeta {
                 id: Self::HelpBottom,
@@ -1738,6 +2097,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "bottom",
                 detail: "scroll help to bottom",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerSubmit => ActionMeta {
                 id: Self::PickerSubmit,
@@ -1748,6 +2110,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "toggle",
                 detail: "enable/disable or submit",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerUp => ActionMeta {
                 id: Self::PickerUp,
@@ -1758,6 +2123,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "select",
                 detail: "previous candidate",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerDown => ActionMeta {
                 id: Self::PickerDown,
@@ -1768,6 +2136,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "select",
                 detail: "next candidate",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerMulti => ActionMeta {
                 id: Self::PickerMulti,
@@ -1778,6 +2149,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "multi",
                 detail: "toggle multi-select",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerEdit => ActionMeta {
                 id: Self::PickerEdit,
@@ -1788,6 +2162,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "edit",
                 detail: "edit selected",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerDelete => ActionMeta {
                 id: Self::PickerDelete,
@@ -1798,6 +2175,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "delete",
                 detail: "delete with confirm",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerDeleteAlt => ActionMeta {
                 id: Self::PickerDeleteAlt,
@@ -1808,6 +2188,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "delete",
                 detail: "delete with confirm",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::PickerClose => ActionMeta {
                 id: Self::PickerClose,
@@ -1818,6 +2201,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "close",
                 detail: "close picker",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ConfirmYes => ActionMeta {
                 id: Self::ConfirmYes,
@@ -1828,6 +2214,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "confirm",
                 detail: "confirm",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ConfirmYesEnter => ActionMeta {
                 id: Self::ConfirmYesEnter,
@@ -1838,6 +2227,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "confirm",
                 detail: "confirm",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ConfirmNo => ActionMeta {
                 id: Self::ConfirmNo,
@@ -1848,6 +2240,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::ConfirmCancel => ActionMeta {
                 id: Self::ConfirmCancel,
@@ -1858,6 +2253,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::DetailCloseFields => ActionMeta {
                 id: Self::DetailCloseFields,
@@ -1868,6 +2266,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "close",
                 detail: "close detail",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::DetailSwap => ActionMeta {
                 id: Self::DetailSwap,
@@ -1878,6 +2279,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "swap",
                 detail: "swap fields/pretty",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::DetailChip => ActionMeta {
                 id: Self::DetailChip,
@@ -1888,6 +2292,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "chip",
                 detail: "filter field from detail",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::DetailExclude => ActionMeta {
                 id: Self::DetailExclude,
@@ -1898,6 +2305,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "exclude",
                 detail: "exclude field from detail",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::DetailMoveDown => ActionMeta {
                 id: Self::DetailMoveDown,
@@ -1908,6 +2318,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "row",
                 detail: "next row",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::DetailMoveUp => ActionMeta {
                 id: Self::DetailMoveUp,
@@ -1918,6 +2331,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "row",
                 detail: "previous row",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::DetailClose => ActionMeta {
                 id: Self::DetailClose,
@@ -1928,6 +2344,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "close",
                 detail: "close detail",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::TimePanelNext => ActionMeta {
                 id: Self::TimePanelNext,
@@ -1938,6 +2357,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "next",
                 detail: "next field",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::TimePanelSubmit => ActionMeta {
                 id: Self::TimePanelSubmit,
@@ -1948,6 +2370,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "next",
                 detail: "next field / submit",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::TimePanelDateUp => ActionMeta {
                 id: Self::TimePanelDateUp,
@@ -1958,6 +2383,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "date",
                 detail: "previous date",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::TimePanelDateDown => ActionMeta {
                 id: Self::TimePanelDateDown,
@@ -1968,6 +2396,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "date",
                 detail: "next date",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::TimePanelCancel => ActionMeta {
                 id: Self::TimePanelCancel,
@@ -1978,6 +2409,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel time panel",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::InputDraftSpace => ActionMeta {
                 id: Self::InputDraftSpace,
@@ -1988,6 +2422,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "draft",
                 detail: "space in draft",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::InputCommit => ActionMeta {
                 id: Self::InputCommit,
@@ -1998,6 +2435,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "commit",
                 detail: "pill then submit group",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::InputToggleExclude => ActionMeta {
                 id: Self::InputToggleExclude,
@@ -2008,6 +2448,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "exclude",
                 detail: "toggle exclude draft",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::InputCancel => ActionMeta {
                 id: Self::InputCancel,
@@ -2018,6 +2461,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel input",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HighlightModalDraftSpace => ActionMeta {
                 id: Self::HighlightModalDraftSpace,
@@ -2028,6 +2474,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "draft",
                 detail: "space in draft",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HighlightModalConfirm => ActionMeta {
                 id: Self::HighlightModalConfirm,
@@ -2038,6 +2487,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "ok",
                 detail: "confirm pattern",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HighlightModalConfirmTab => ActionMeta {
                 id: Self::HighlightModalConfirmTab,
@@ -2048,6 +2500,9 @@ impl ActionId {
                 capabilities: &[],
                 label: "ok",
                 detail: "confirm pattern",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
             Self::HighlightModalCancel => ActionMeta {
                 id: Self::HighlightModalCancel,
@@ -2058,6 +2513,74 @@ impl ActionId {
                 capabilities: &[],
                 label: "cancel",
                 detail: "cancel",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::GlobalCommandPalette => ActionMeta {
+                id: Self::GlobalCommandPalette,
+                context: KeyContext::Global,
+                toml_key: "command_palette",
+                default: Binding::parse_str("C-p").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "palette",
+                detail: "open command palette",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::PaletteSubmit => ActionMeta {
+                id: Self::PaletteSubmit,
+                context: KeyContext::CommandPalette,
+                toml_key: "submit",
+                default: Binding::parse_str("Enter").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "run",
+                detail: "run selected command",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::PaletteUp => ActionMeta {
+                id: Self::PaletteUp,
+                context: KeyContext::CommandPalette,
+                toml_key: "up",
+                default: Binding::parse_str("Up").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "up",
+                detail: "select previous command",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::PaletteDown => ActionMeta {
+                id: Self::PaletteDown,
+                context: KeyContext::CommandPalette,
+                toml_key: "down",
+                default: Binding::parse_str("Down").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "down",
+                detail: "select next command",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::PaletteClose => ActionMeta {
+                id: Self::PaletteClose,
+                context: KeyContext::CommandPalette,
+                toml_key: "close",
+                default: Binding::parse_str("Esc").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "close",
+                detail: "close command palette",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
             },
         }
     }
@@ -2084,6 +2607,7 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::Global, "highlight_new") => Some(ActionId::GlobalHighlightNew),
         (KeyContext::Global, "exclude_new") => Some(ActionId::GlobalExcludeNew),
         (KeyContext::Global, "open_help") => Some(ActionId::GlobalOpenHelp),
+        (KeyContext::Global, "command_palette") => Some(ActionId::GlobalCommandPalette),
         (KeyContext::LogList, "move_down") => Some(ActionId::LogListMoveDown),
         (KeyContext::LogList, "move_up") => Some(ActionId::LogListMoveUp),
         (KeyContext::LogList, "jump_down") => Some(ActionId::LogListJumpDown),
@@ -2206,6 +2730,10 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::HighlightModal, "confirm") => Some(ActionId::HighlightModalConfirm),
         (KeyContext::HighlightModal, "confirm_tab") => Some(ActionId::HighlightModalConfirmTab),
         (KeyContext::HighlightModal, "cancel") => Some(ActionId::HighlightModalCancel),
+        (KeyContext::CommandPalette, "submit") => Some(ActionId::PaletteSubmit),
+        (KeyContext::CommandPalette, "up") => Some(ActionId::PaletteUp),
+        (KeyContext::CommandPalette, "down") => Some(ActionId::PaletteDown),
+        (KeyContext::CommandPalette, "close") => Some(ActionId::PaletteClose),
         _ => None,
     }
 }
@@ -2595,6 +3123,14 @@ mod tests {
             store.display(ActionId::LogListClearLive).as_deref(),
             Some("C-l")
         );
+        assert!(store.matches_event(
+            ActionId::GlobalCommandPalette,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        ));
+        assert!(!store.matches_code(ActionId::GlobalCommandPalette, KeyCode::Char('p')));
+        assert!(!store.matches_code(ActionId::GlobalCommandPalette, KeyCode::Char(':')));
+        assert!(store.matches_code(ActionId::PaletteSubmit, KeyCode::Enter));
+        assert!(store.matches_code(ActionId::PaletteClose, KeyCode::Esc));
     }
 
     #[test]
@@ -2650,6 +3186,9 @@ move_down = "k"
         assert!(text.contains("[open]"));
         assert!(text.contains("file = \"f\""));
         assert!(text.contains("stream = \"s\""));
+        assert!(text.contains("[command_palette]"));
+        assert!(text.contains("command_palette = \"C-p\""));
+        assert!(text.contains("submit = \"Enter\""));
     }
 
     #[test]
@@ -2679,6 +3218,9 @@ move_down = "k"
         assert!(msgs.iter().any(|m| m.contains("keymap.toml")));
         assert!(dir.join("config.toml").is_file());
         assert!(dir.join("keymap.toml").is_file());
+        let keymap = fs::read_to_string(dir.join("keymap.toml")).unwrap();
+        assert!(keymap.contains("[command_palette]"));
+        assert!(keymap.contains("command_palette = \"C-p\""));
         assert!(!dir.join("theme.toml").exists());
         let msgs2 = init_config_dir(&dir, false).unwrap();
         assert!(msgs2.iter().all(|m| m.starts_with("skip")));

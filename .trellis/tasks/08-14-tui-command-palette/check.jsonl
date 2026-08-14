@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/alnav/backend/directory-structure.md", "reason": "Verify action.rs/command_palette.rs ownership; keymap.rs not a second handler dump"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Verify idle status still two hints; Help lists : ; palette open blocks help_available"}
+{"file": ".trellis/spec/alnav/backend/fuzzy-matching.md", "reason": "Verify nucleo title search; empty query does not dump catalog; ViewportPaint"}
+{"file": ".trellis/spec/alnav/backend/theme-system.md", "reason": "Verify no Color::* / inline glyphs in ui.rs; icons from theme::GLYPH_*"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Verify Ctrl+C closes palette; no duplicate hint tables"}
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "Verify live hides Time; lock/bookmark when needs a current row"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Verify palette did not copy PickerSession; dispatch is match not closures"}

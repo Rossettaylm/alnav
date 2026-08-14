@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/alnav/backend/directory-structure.md", "reason": "Flat src/ modules; keymap.rs vs new action.rs / command_palette.rs ownership"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Help catalog vs idle two-hint status; help_available; no resume_following on modal close"}
+{"file": ".trellis/spec/alnav/backend/fuzzy-matching.md", "reason": "Reuse fuzzy_label_indices + ViewportPaint; empty-query must NOT use first-N catalog"}
+{"file": ".trellis/spec/alnav/backend/theme-system.md", "reason": "All palette chrome through theme glyphs/tokens; no Color in ui.rs"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Ctrl+C on modal = Esc; do not duplicate keybinding copy outside help.rs"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse TextField, apply_text_field_key, top_modal_rect, render_modal_shell, candidate tokens — do not fork PickerSession"}
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "Time/lock when-clauses and file-mode gates for catalog hiding"}
+{"file": ".trellis/tasks/07-31-tui-custom-keymap/design.md", "reason": "Original handler-id intent; KeymapStore stays bindings-only"}

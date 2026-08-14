@@ -15,7 +15,8 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module layout + picker/time_panel ownership | Active |
+| [Directory Structure](./directory-structure.md) | Module layout + picker/time_panel/ActionStore ownership | Active |
+| [Command Palette + ActionStore](./command-palette.md) | `C-p` palette, `when`/`catalog`/`dispatch` | Active |
 | [Session Filters](./session-filters.md) | Lock + global `App.time_bound` contracts | Active |
 | [TUI Fuzzy Matching](./fuzzy-matching.md) | nucleo-matcher contracts for Picker/Filter/Highlight | Active |
 | [Stream Visible + Live Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest ADB/HDC ring | Active |
@@ -43,6 +44,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Read [tui-ux-boosters.md](./tui-ux-boosters.md) before changing `DetailView::Pretty`'s crash branch, `SummaryView`/`summary_gen`, the disconnect icon, or `App.collapsed_view`.
 - [ ] Read [theme-system.md](./theme-system.md) before changing `theme.rs` / `palette.rs` / `theme.toml` / `config.toml` `theme`.
 - [ ] Touching picker Manage: read Directory Structure "Picker session dispatch".
+- [ ] Read [command-palette.md](./command-palette.md) before changing `C-p` / `action::dispatch` / palette catalog / `when`.
 
 ## Quality Check
 
@@ -53,6 +55,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] `--hdc` and `--adb` ingest use the same drop-oldest ring (`INGEST_RING_CAP`), not a blocking/unbounded channel.
 - [ ] File highlight stats / `n`/`N` use hit index (no UI O(visible) `row_at`); FilterBatch does not full-parse.
 - [ ] New modal key paths handle Ctrl+C as cancel when appropriate.
+- [ ] Command palette is not a `PickerSession`; empty query lists nothing; idle status has no third `C-p` hint.
 - [ ] Popup shells stay rounded; strips stay divider; confirm uses the same `picker_area` as the picker.
 - [ ] TUI paint goes through `theme::*` tokens (palette-mapped). CLI colored output stays on `alnav::logcolor`.
 - [ ] Status hints / Help copy stay in `help.rs` (`HintEntry`); Help Esc does not resume following; LogList/Help `J`/`K` share `FAST_SCROLL_STEP`.

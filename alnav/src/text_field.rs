@@ -2,6 +2,52 @@
 
 use std::ops::Deref;
 
+use crossterm::event::KeyCode;
+
+/// Shared readline-subset keys for a [`TextField`].
+/// Does not handle Ctrl-Backspace or Delete (mode-specific).
+pub fn apply_key(field: &mut TextField, code: KeyCode, ctrl: bool) -> bool {
+    match code {
+        KeyCode::Left => {
+            field.move_left();
+            true
+        }
+        KeyCode::Right => {
+            field.move_right();
+            true
+        }
+        KeyCode::Home => {
+            field.home();
+            true
+        }
+        KeyCode::End => {
+            field.end();
+            true
+        }
+        KeyCode::Char('a') if ctrl => {
+            field.home();
+            true
+        }
+        KeyCode::Char('e') if ctrl => {
+            field.end();
+            true
+        }
+        KeyCode::Char('u') if ctrl => {
+            field.kill_to_start();
+            true
+        }
+        KeyCode::Backspace if !ctrl => {
+            let _ = field.backspace();
+            true
+        }
+        KeyCode::Char(c) if !ctrl => {
+            field.insert(c);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Owned text + caret. `cursor` is a Unicode scalar index into `text` (not bytes).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextField {

@@ -1,6 +1,8 @@
+mod action;
 mod app;
 mod bookmark;
 mod candidate_match;
+mod command_palette;
 mod config;
 mod dashboard;
 mod export;
@@ -48,10 +50,6 @@ use app::App;
 use filter_model::{Group, GroupList, TimeBound};
 use fuzzy::SameFieldOp;
 
-/// Page size for Ctrl-d/Ctrl-u paging in the log list. `App` doesn't track
-/// the rendered viewport height (that's `ui.rs`'s job at render time), so a
-/// fixed page size is the simplest correct approach.
-const PAGE_SIZE: isize = 10;
 const LEVEL_CANDIDATES: &[&str] = &["V", "D", "I", "W", "E", "F"];
 
 #[inline]
@@ -761,6 +759,7 @@ fn popup_rect(modal: Rect, frame_area: Rect, match_count: usize) -> Rect {
     ui::candidate_popup_rect(modal, frame_area, match_count)
 }
 
+#[allow(dead_code)]
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text.to_string()))
@@ -768,11 +767,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 }
 
 fn apply_yank(app: &mut App, text: String) {
-    app.record_yank(text.clone());
-    match copy_to_clipboard(&text) {
-        Ok(()) => app.set_flash("YANKED (approx)"),
-        Err(e) => app.set_flash(format!("YANK FAILED: {e}")),
-    }
+    app.apply_yank(text);
 }
 
 fn run<B: ratatui::backend::Backend>(
@@ -975,6 +970,8 @@ fn run<B: ratatui::backend::Backend>(
                         let h = ui::time_panel_height(frame_area);
                         let area = ui::top_modal_rect(frame_area, modal_w.max(56), h);
                         hw_cursor = ui::render_time_panel(app, frame, area);
+                    } else if app.command_palette.is_some() {
+                        hw_cursor = ui::render_command_palette(app, frame, frame_area);
                     } else if app.help_open {
                         let content_rows = crate::help::help_body_lines(app).len().max(1);
                         let h = ui::help_modal_height(frame_area, content_rows);
@@ -1059,6 +1056,10 @@ fn run<B: ratatui::backend::Backend>(
             handle_highlight_box_key(app, key);
             continue;
         }
+        if app.command_palette.is_some() {
+            handle_palette_key(app, key);
+            continue;
+        }
         if app.help_open {
             handle_help_key(app, key);
             continue;
@@ -1075,25 +1076,8 @@ fn run<B: ratatui::backend::Backend>(
             continue;
         }
 
-        // Page / clear-live chords (may include Ctrl) — resolved via keymap.
-        // Intercepted here rather than threading KeyEvent into `handle_normal_key`.
-        if app.mode == Mode::Normal && app.focus == app::Focus::LogList {
-            if km_event(app, keymap::ActionId::LogListPageDown, key) {
-                app.move_cursor_manual(PAGE_SIZE);
-                continue;
-            }
-            if km_event(app, keymap::ActionId::LogListPageUp, key) {
-                app.move_cursor_manual(-PAGE_SIZE);
-                continue;
-            }
-            if km_event(app, keymap::ActionId::LogListClearLive, key) {
-                try_handle_ctrl_l(app);
-                continue;
-            }
-        }
-
         match app.mode {
-            Mode::Normal => handle_normal_key(app, input, key.code),
+            Mode::Normal => handle_normal_event(app, input, key),
             Mode::Insert => handle_insert_key(app, input, key.code)?,
         }
     }
@@ -1781,45 +1765,7 @@ fn apply_text_field_key(
     code: KeyCode,
     ctrl: bool,
 ) -> bool {
-    match code {
-        KeyCode::Left => {
-            field.move_left();
-            true
-        }
-        KeyCode::Right => {
-            field.move_right();
-            true
-        }
-        KeyCode::Home => {
-            field.home();
-            true
-        }
-        KeyCode::End => {
-            field.end();
-            true
-        }
-        KeyCode::Char('a') if ctrl => {
-            field.home();
-            true
-        }
-        KeyCode::Char('e') if ctrl => {
-            field.end();
-            true
-        }
-        KeyCode::Char('u') if ctrl => {
-            field.kill_to_start();
-            true
-        }
-        KeyCode::Backspace if !ctrl => {
-            let _ = field.backspace();
-            true
-        }
-        KeyCode::Char(c) if !ctrl => {
-            field.insert(c);
-            true
-        }
-        _ => false,
-    }
+    crate::text_field::apply_key(field, code, ctrl)
 }
 
 fn manage_request_delete_selected(app: &mut App) {
@@ -2518,8 +2464,8 @@ fn focus_input_insert(app: &mut App) {
     app.mode = app::Mode::Insert;
 }
 
-/// Mouse wheel step size for the log list, independent of `PAGE_SIZE`
-/// (Ctrl-d/Ctrl-u) and the `Shift+J`/`Shift+K` fast-move binding — a wheel
+/// Mouse wheel step size for the log list, independent of
+/// `action::PAGE_SIZE` (Ctrl-d/Ctrl-u) and the `Shift+J`/`Shift+K` fast-move binding — a wheel
 /// "notch" is a smaller, more frequent unit than either of those.
 const MOUSE_SCROLL_STEP: isize = 3;
 
@@ -2610,21 +2556,18 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
     }
     if app.pending_d {
         if km_code(app, ActionId::StripDDelete, code) {
-            app.delete_focused_strip_group(kind);
-            app.pending_d = false;
+            crate::action::dispatch(app, ActionId::StripDDelete);
             return true;
         }
         if km_code(app, ActionId::StripDDisable, code) {
-            app.toggle_disable_focused(kind);
-            app.pending_d = false;
+            crate::action::dispatch(app, ActionId::StripDDisable);
             return true;
         }
         app.pending_d = false;
         return false;
     }
     if km_code(app, ActionId::StripPendingD, code) {
-        app.pending_leader = false;
-        app.pending_d = true;
+        crate::action::dispatch(app, ActionId::StripPendingD);
         return true;
     }
     false
@@ -2676,15 +2619,15 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
     if app.pending_leader {
         app.pending_leader = false;
         if km_code(app, ActionId::LeaderManage, code) {
-            app.open_unified_picker();
+            crate::action::dispatch(app, ActionId::LeaderManage);
         } else if km_code(app, ActionId::LeaderPresetSave, code) {
-            app.begin_preset_save();
+            crate::action::dispatch(app, ActionId::LeaderPresetSave);
         } else if km_code(app, ActionId::LeaderPresetOpen, code) {
-            app.begin_preset_open();
+            crate::action::dispatch(app, ActionId::LeaderPresetOpen);
         } else if km_code(app, ActionId::LeaderSummary, code) {
-            app.open_summary_panel();
+            crate::action::dispatch(app, ActionId::LeaderSummary);
         } else if km_code(app, ActionId::LeaderCancel, code) {
-            // cancel
+            crate::action::dispatch(app, ActionId::LeaderCancel);
         } else {
             app.set_flash("UNKNOWN LEADER");
         }
@@ -2692,16 +2635,7 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
     }
 
     if km_code(app, ActionId::LogListLeader, code) {
-        app.clear_visual();
-        app.pending_d = false;
-        app.pending_yank = false;
-        app.pending_chip = false;
-        app.pending_exclude = false;
-        app.pending_lock = false;
-        app.pending_time = false;
-        app.pending_m = false;
-        app.pending_open = false;
-        app.pending_leader = true;
+        crate::action::dispatch(app, ActionId::LogListLeader);
         return true;
     }
     false
@@ -2797,49 +2731,129 @@ fn handle_time_panel_key(app: &mut App, key: event::KeyEvent) {
     }
 }
 
+fn handle_palette_key(app: &mut App, key: event::KeyEvent) {
+    use keymap::ActionId;
+    let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
+    let is_ctrl_c = key.code == KeyCode::Char('c') && ctrl;
+    if is_ctrl_c || km_event(app, ActionId::PaletteClose, key) {
+        app.close_command_palette();
+        return;
+    }
+    if km_event(app, ActionId::PaletteSubmit, key) {
+        let query = app
+            .command_palette
+            .as_ref()
+            .map(|p| p.query.as_str().to_string())
+            .unwrap_or_default();
+        let hits = crate::action::filtered_catalog(app, &query);
+        if hits.is_empty() {
+            return;
+        }
+        let selected = app
+            .command_palette
+            .as_ref()
+            .map(|p| p.selected.min(hits.len() - 1))
+            .unwrap_or(0);
+        let id = hits[selected].id;
+        app.close_command_palette();
+        crate::action::dispatch(app, id);
+        return;
+    }
+    if km_event(app, ActionId::PaletteDown, key) {
+        let query = app
+            .command_palette
+            .as_ref()
+            .map(|p| p.query.as_str().to_string())
+            .unwrap_or_default();
+        let n = crate::action::filtered_catalog(app, &query).len();
+        if let Some(p) = app.command_palette.as_mut() {
+            p.move_sel(1, n);
+        }
+        return;
+    }
+    if km_event(app, ActionId::PaletteUp, key) {
+        let query = app
+            .command_palette
+            .as_ref()
+            .map(|p| p.query.as_str().to_string())
+            .unwrap_or_default();
+        let n = crate::action::filtered_catalog(app, &query).len();
+        if let Some(p) = app.command_palette.as_mut() {
+            p.move_sel(-1, n);
+        }
+        return;
+    }
+    if let Some(p) = app.command_palette.as_mut() {
+        if !apply_text_field_key(&mut p.query, key.code, ctrl) {
+            return;
+        }
+    }
+    let query = app
+        .command_palette
+        .as_ref()
+        .map(|p| p.query.as_str().to_string())
+        .unwrap_or_default();
+    let n = crate::action::filtered_catalog(app, &query).len();
+    if let Some(p) = app.command_palette.as_mut() {
+        p.clamp_selected(n);
+    }
+}
+
+/// Ctrl chords (command palette, paging, live-clear) need the full KeyEvent.
+fn handle_normal_event(app: &mut App, input: &mut input::InputBox, key: event::KeyEvent) {
+    if km_event(app, keymap::ActionId::GlobalCommandPalette, key) {
+        crate::action::dispatch(app, keymap::ActionId::GlobalCommandPalette);
+        return;
+    }
+    if app.focus == app::Focus::LogList {
+        if km_event(app, keymap::ActionId::LogListPageDown, key) {
+            crate::action::dispatch(app, keymap::ActionId::LogListPageDown);
+            return;
+        }
+        if km_event(app, keymap::ActionId::LogListPageUp, key) {
+            crate::action::dispatch(app, keymap::ActionId::LogListPageUp);
+            return;
+        }
+        if km_event(app, keymap::ActionId::LogListClearLive, key) {
+            crate::action::dispatch(app, keymap::ActionId::LogListClearLive);
+            return;
+        }
+    }
+    handle_normal_key(app, input, key.code);
+}
+
 fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
-    use app::{Focus, StripKind, YankField};
+    use app::{Focus, StripKind};
     use keymap::ActionId;
 
     // Visual-line: handle selection motions / yank before anything else.
     if app.visual_anchor.is_some() && app.focus == Focus::LogList {
         if km_code(app, ActionId::VisualMoveDown, code) {
-            app.move_cursor_manual(1);
+            crate::action::dispatch(app, ActionId::VisualMoveDown);
             return;
         }
         if km_code(app, ActionId::VisualMoveUp, code) {
-            app.move_cursor_manual(-1);
+            crate::action::dispatch(app, ActionId::VisualMoveUp);
             return;
         }
         if km_code(app, ActionId::VisualJumpDown, code) {
-            app.move_cursor_manual(FAST_SCROLL_STEP);
+            crate::action::dispatch(app, ActionId::VisualJumpDown);
             return;
         }
         if km_code(app, ActionId::VisualJumpUp, code) {
-            app.move_cursor_manual(-FAST_SCROLL_STEP);
+            crate::action::dispatch(app, ActionId::VisualJumpUp);
             return;
         }
         if km_code(app, ActionId::VisualYankRaw, code) {
-            if let Some((lo, hi)) = app.selection_range() {
-                if let Some(text) = app.yank_range(lo, hi, YankField::Raw) {
-                    apply_yank(app, text);
-                }
-            }
-            app.clear_visual();
+            crate::action::dispatch(app, ActionId::VisualYankRaw);
             return;
         }
         if km_code(app, ActionId::VisualYankMsg, code) {
-            if let Some((lo, hi)) = app.selection_range() {
-                if let Some(text) = app.yank_range(lo, hi, YankField::Msg) {
-                    apply_yank(app, text);
-                }
-            }
-            app.clear_visual();
+            crate::action::dispatch(app, ActionId::VisualYankMsg);
             return;
         }
         if km_code(app, ActionId::VisualCancel, code) {
-            app.clear_visual();
-            focus_loglist_and_follow(app);
+            crate::action::dispatch(app, ActionId::VisualCancel);
             return;
         }
         app.clear_visual();
@@ -2855,14 +2869,15 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         app.pending_open = false;
         if app.focus == Focus::LogList {
             if km_code(app, ActionId::OpenCancel, code) {
+                crate::action::dispatch(app, ActionId::OpenCancel);
                 return;
             }
             if km_code(app, ActionId::OpenFile, code) {
-                app.open_file_source_panel(false);
+                crate::action::dispatch(app, ActionId::OpenFile);
                 return;
             }
             if km_code(app, ActionId::OpenStream, code) {
-                app.open_stream_source_panel(false);
+                crate::action::dispatch(app, ActionId::OpenStream);
                 return;
             }
             app.set_flash("of=file  os=stream");
@@ -2872,101 +2887,79 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
 
     // Yank operator pending: consume the second key (or Esc) and return.
     if app.pending_yank {
-        app.pending_yank = false;
         if app.focus == Focus::LogList {
-            if km_code(app, ActionId::YankCancel, code) {
-                return;
-            }
-            if km_code(app, ActionId::YankCli, code) {
-                let cmd = app.export_cli_command();
-                apply_yank(app, cmd);
-                return;
-            }
-            if km_code(app, ActionId::YankMsg, code) {
-                app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Yank);
-                return;
-            }
-            let field = if km_code(app, ActionId::YankTag, code) {
-                Some(YankField::Tag)
+            let yank_id = if km_code(app, ActionId::YankCancel, code) {
+                Some(ActionId::YankCancel)
+            } else if km_code(app, ActionId::YankCli, code) {
+                Some(ActionId::YankCli)
+            } else if km_code(app, ActionId::YankMsg, code) {
+                Some(ActionId::YankMsg)
+            } else if km_code(app, ActionId::YankTag, code) {
+                Some(ActionId::YankTag)
             } else if km_code(app, ActionId::YankPkg, code) {
-                Some(YankField::Pkg)
+                Some(ActionId::YankPkg)
             } else if km_code(app, ActionId::YankPid, code) {
-                Some(YankField::Pid)
+                Some(ActionId::YankPid)
             } else if km_code(app, ActionId::YankTid, code) {
-                Some(YankField::Tid)
+                Some(ActionId::YankTid)
             } else if km_code(app, ActionId::YankLevel, code) {
-                Some(YankField::Level)
+                Some(ActionId::YankLevel)
             } else if km_code(app, ActionId::YankRaw, code)
                 || km_code(app, ActionId::YankLine, code)
             {
-                // Historical: both `y` and `r` yank the raw line.
-                Some(YankField::Raw)
+                Some(ActionId::YankRaw)
             } else if km_code(app, ActionId::YankTime, code) {
-                Some(YankField::Timestamp)
+                Some(ActionId::YankTime)
             } else {
                 None
             };
-            if let Some(field) = field {
-                if let Some(text) = app.yank_field(field) {
-                    apply_yank(app, text);
-                }
+            if let Some(id) = yank_id {
+                crate::action::dispatch(app, id);
+            } else {
+                app.pending_yank = false;
             }
+        } else {
+            app.pending_yank = false;
         }
         return;
     }
 
     // Chip-from-cursor operator pending.
     if app.pending_chip {
-        app.pending_chip = false;
         if app.focus == Focus::LogList {
             if km_code(app, ActionId::ChipFieldCancel, code) {
-                app.cancel_chip_from_cursor();
-                return;
-            }
-            if let Some(field) = chip_field_from_keymap(app, code) {
-                match field {
-                    input::ChipField::Msg => {
-                        app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Chip {
-                            exclude: false,
-                        });
-                    }
-                    other => {
-                        let _ = app.push_chip_from_field(other);
-                    }
-                }
+                crate::action::dispatch(app, ActionId::ChipFieldCancel);
+            } else if let Some(id) = chip_action_from_keymap(app, code) {
+                crate::action::dispatch(app, id);
             } else if chip_field_unsupported_key(app, code) {
+                app.pending_chip = false;
                 app.set_flash("NO RAW/TIMESTAMP");
             } else {
+                app.pending_chip = false;
                 app.set_flash("UNKNOWN FIELD");
             }
+        } else {
+            app.pending_chip = false;
         }
         return;
     }
 
     // Exclude-from-cursor operator pending.
     if app.pending_exclude {
-        app.pending_exclude = false;
         if app.focus == Focus::LogList {
             if km_code(app, ActionId::ChipFieldCancel, code) {
-                app.cancel_chip_from_cursor();
-                return;
-            }
-            if let Some(field) = chip_field_from_keymap(app, code) {
-                match field {
-                    input::ChipField::Msg => {
-                        app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Chip {
-                            exclude: true,
-                        });
-                    }
-                    other => {
-                        let _ = app.push_exclude_from_field(other);
-                    }
-                }
+                crate::action::dispatch(app, ActionId::ChipFieldCancel);
+            } else if let Some(id) = chip_action_from_keymap(app, code) {
+                crate::action::dispatch(app, id);
             } else if chip_field_unsupported_key(app, code) {
+                app.pending_exclude = false;
                 app.set_flash("NO RAW/TIMESTAMP");
             } else {
+                app.pending_exclude = false;
                 app.set_flash("UNKNOWN FIELD");
             }
+        } else {
+            app.pending_exclude = false;
         }
         return;
     }
@@ -2976,17 +2969,17 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         app.pending_lock = false;
         if app.focus == Focus::LogList {
             if km_code(app, ActionId::LockCancel, code) {
-                app.cancel_lock_pending();
+                crate::action::dispatch(app, ActionId::LockCancel);
             } else if km_code(app, ActionId::LockPid, code) {
-                app.apply_session_lock(app::LockKind::Pid);
+                crate::action::dispatch(app, ActionId::LockPid);
             } else if km_code(app, ActionId::LockTid, code) {
-                app.apply_session_lock(app::LockKind::Tid);
+                crate::action::dispatch(app, ActionId::LockTid);
             } else if km_code(app, ActionId::LockClear, code) {
-                app.clear_session_lock();
+                crate::action::dispatch(app, ActionId::LockClear);
             } else if km_code(app, ActionId::LockViewHighlight, code) {
-                app.toggle_view_focus(app::ViewFocusKind::Highlight);
+                crate::action::dispatch(app, ActionId::LockViewHighlight);
             } else if km_code(app, ActionId::LockViewSevere, code) {
-                app.toggle_view_focus(app::ViewFocusKind::Severe);
+                crate::action::dispatch(app, ActionId::LockViewSevere);
             } else {
                 app.set_flash("UNKNOWN");
             }
@@ -2999,11 +2992,11 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         app.pending_time = false;
         if app.focus == Focus::LogList {
             if km_code(app, ActionId::TimeCancel, code) {
-                app.cancel_time_pending();
+                crate::action::dispatch(app, ActionId::TimeCancel);
             } else if km_code(app, ActionId::TimeSet, code) {
-                let _ = app.open_time_panel();
+                crate::action::dispatch(app, ActionId::TimeSet);
             } else if km_code(app, ActionId::TimeClear, code) {
-                app.clear_time_bound();
+                crate::action::dispatch(app, ActionId::TimeClear);
             } else {
                 app.set_flash("UNKNOWN");
             }
@@ -3016,13 +3009,13 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         app.pending_m = false;
         if app.focus == Focus::LogList {
             if km_code(app, ActionId::BookmarkCancel, code) {
-                app.cancel_bookmark_op();
+                crate::action::dispatch(app, ActionId::BookmarkCancel);
             } else if km_code(app, ActionId::BookmarkAdd, code) {
-                app.bookmark_add_current();
+                crate::action::dispatch(app, ActionId::BookmarkAdd);
             } else if km_code(app, ActionId::BookmarkRemove, code) {
-                app.bookmark_remove_current();
+                crate::action::dispatch(app, ActionId::BookmarkRemove);
             } else if km_code(app, ActionId::BookmarkManage, code) {
-                app.open_picker(crate::picker::PickerKind::Bookmark);
+                crate::action::dispatch(app, ActionId::BookmarkManage);
             } else {
                 app.set_flash("UNKNOWN");
             }
@@ -3045,163 +3038,78 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
     }
 
     if km_code(app, ActionId::GlobalQuit, code) {
-        app.should_quit = true;
+        crate::action::dispatch(app, ActionId::GlobalQuit);
         return;
     }
     if km_code(app, ActionId::GlobalFocusNext, code) {
-        app.cycle_visible_focus_forward();
+        crate::action::dispatch(app, ActionId::GlobalFocusNext);
         return;
     }
     if km_code(app, ActionId::GlobalFocusPrev, code) {
-        app.cycle_visible_focus_backward();
+        crate::action::dispatch(app, ActionId::GlobalFocusPrev);
         return;
     }
     if km_code(app, ActionId::GlobalFocusFilter, code) {
-        app.focus = Focus::ChipStrip;
+        crate::action::dispatch(app, ActionId::GlobalFocusFilter);
         return;
     }
     if km_code(app, ActionId::GlobalFocusExclude, code) {
-        app.focus = Focus::ExcludeStrip;
+        crate::action::dispatch(app, ActionId::GlobalFocusExclude);
         return;
     }
     if km_code(app, ActionId::GlobalFocusHighlight, code) {
-        app.focus = Focus::HighlightStrip;
+        crate::action::dispatch(app, ActionId::GlobalFocusHighlight);
         return;
     }
     if km_code(app, ActionId::GlobalFocusLog, code) {
-        app.focus = Focus::LogList;
+        crate::action::dispatch(app, ActionId::GlobalFocusLog);
         return;
     }
     if km_code(app, ActionId::GlobalFocusInput, code) {
-        app.open_unified_picker();
+        crate::action::dispatch(app, ActionId::GlobalFocusInput);
         return;
     }
 
     // Esc / resume: detail close, follow, or return to log list.
-    let esc = km_code(app, ActionId::LogListResumeFollow, code)
+    if km_code(app, ActionId::LogListResumeFollow, code)
         || km_code(app, ActionId::StripResumeFollow, code)
-        || km_code(app, ActionId::DetailClose, code);
-    if esc {
-        if app.detail_open() {
-            app.close_detail();
-            app.focus = Focus::LogList;
-        } else if app.focus == Focus::LogList {
-            focus_loglist_and_follow(app);
-        } else {
-            focus_loglist(app);
-        }
+        || km_code(app, ActionId::DetailClose, code)
+    {
+        crate::action::dispatch(app, ActionId::LogListResumeFollow);
         return;
     }
 
     if app.focus == Focus::LogList {
-        if km_code(app, ActionId::LogListMoveDown, code) {
-            app.move_cursor_manual(1);
-            return;
-        }
-        if km_code(app, ActionId::LogListMoveUp, code) {
-            app.move_cursor_manual(-1);
-            return;
-        }
-        if km_code(app, ActionId::LogListJumpDown, code) {
-            app.move_cursor_manual(FAST_SCROLL_STEP);
-            return;
-        }
-        if km_code(app, ActionId::LogListJumpUp, code) {
-            app.move_cursor_manual(-FAST_SCROLL_STEP);
-            return;
-        }
-        if km_code(app, ActionId::LogListJumpTop, code) {
-            app.following = false;
-            app.jump_top();
-            return;
-        }
-        if km_code(app, ActionId::LogListJumpBottom, code) {
-            app.resume_following();
-            return;
-        }
-        if km_code(app, ActionId::LogListDetailFields, code) {
-            app.toggle_detail_fields();
-            return;
-        }
-        if km_code(app, ActionId::LogListDetailPretty, code) {
-            app.toggle_detail_pretty();
-            return;
-        }
-        if km_code(app, ActionId::LogListWrapToggle, code) {
-            app.toggle_collapsed_view();
-            return;
-        }
-        if km_code(app, ActionId::LogListChip, code) {
-            app.begin_chip_from_cursor();
-            return;
-        }
-        if km_code(app, ActionId::LogListExcludeChip, code) {
-            app.begin_exclude_from_cursor();
-            return;
-        }
-        if km_code(app, ActionId::LogListLock, code) {
-            app.begin_lock_from_cursor();
-            return;
-        }
-        if km_code(app, ActionId::LogListTime, code) && app.is_file_mode() {
-            app.begin_time_op();
-            return;
-        }
-        if km_code(app, ActionId::LogListBookmark, code) {
-            app.begin_bookmark_op();
-            return;
-        }
-        if km_code(app, ActionId::LogListYank, code) {
-            app.pending_chip = false;
-            app.pending_exclude = false;
-            app.pending_lock = false;
-            app.pending_time = false;
-            app.pending_m = false;
-            app.pending_leader = false;
-            app.pending_open = false;
-            app.pending_yank = true;
-            return;
-        }
-        if km_code(app, ActionId::LogListOpen, code) {
-            app.begin_open_op();
-            return;
-        }
-        if km_code(app, ActionId::LogListYankMsgLine, code) {
-            if let Some(text) = app.yank_field(YankField::Msg) {
-                apply_yank(app, text);
+        for id in [
+            ActionId::LogListMoveDown,
+            ActionId::LogListMoveUp,
+            ActionId::LogListJumpDown,
+            ActionId::LogListJumpUp,
+            ActionId::LogListJumpTop,
+            ActionId::LogListJumpBottom,
+            ActionId::LogListDetailFields,
+            ActionId::LogListDetailPretty,
+            ActionId::LogListWrapToggle,
+            ActionId::LogListChip,
+            ActionId::LogListExcludeChip,
+            ActionId::LogListLock,
+            ActionId::LogListBookmark,
+            ActionId::LogListYank,
+            ActionId::LogListOpen,
+            ActionId::LogListYankMsgLine,
+            ActionId::LogListVisualLine,
+            ActionId::LogListNextMatch,
+            ActionId::LogListPrevMatch,
+            ActionId::LogListNextSevere,
+            ActionId::LogListPrevSevere,
+        ] {
+            if km_code(app, id, code) {
+                crate::action::dispatch(app, id);
+                return;
             }
-            return;
         }
-        if km_code(app, ActionId::LogListVisualLine, code) {
-            app.enter_visual_line();
-            return;
-        }
-        if km_code(app, ActionId::LogListNextMatch, code) {
-            if matches!(app.find_match(1), app::FindJumpResult::NoMore) {
-                app.set_flash("NO MORE");
-            }
-            return;
-        }
-        if km_code(app, ActionId::LogListPrevMatch, code) {
-            if matches!(app.find_match(-1), app::FindJumpResult::NoMore) {
-                app.set_flash("NO MORE");
-            }
-            return;
-        }
-        if km_code(app, ActionId::LogListNextSevere, code) {
-            match app.find_severe(1) {
-                app::FindJumpResult::None => app.set_flash("NO ERROR"),
-                app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
-                app::FindJumpResult::Moved => {}
-            }
-            return;
-        }
-        if km_code(app, ActionId::LogListPrevSevere, code) {
-            match app.find_severe(-1) {
-                app::FindJumpResult::None => app.set_flash("NO ERROR"),
-                app::FindJumpResult::NoMore => app.set_flash("NO MORE"),
-                app::FindJumpResult::Moved => {}
-            }
+        if km_code(app, ActionId::LogListTime, code) {
+            crate::action::dispatch(app, ActionId::LogListTime);
             return;
         }
     }
@@ -3210,60 +3118,47 @@ fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode)
         app.focus,
         Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
     ) {
-        let kind = match app.focus {
-            Focus::ChipStrip => StripKind::Filter,
-            Focus::ExcludeStrip => StripKind::Exclude,
-            Focus::HighlightStrip => StripKind::Highlight,
-            _ => unreachable!(),
-        };
         if km_code(app, ActionId::StripPrevGroup, code) {
-            app.move_strip_cursor(kind, -1);
+            crate::action::dispatch(app, ActionId::StripPrevGroup);
             return;
         }
         if km_code(app, ActionId::StripNextGroup, code) {
-            app.move_strip_cursor(kind, 1);
+            crate::action::dispatch(app, ActionId::StripNextGroup);
             return;
         }
     }
 
     if km_code(app, ActionId::GlobalFilterNew, code) {
-        app.open_picker_new(crate::picker::PickerKind::Filter);
+        crate::action::dispatch(app, ActionId::GlobalFilterNew);
         return;
     }
     if km_code(app, ActionId::GlobalHighlightNew, code) {
-        app.open_picker_new(crate::picker::PickerKind::Highlight);
+        crate::action::dispatch(app, ActionId::GlobalHighlightNew);
         return;
     }
     if km_code(app, ActionId::GlobalExcludeNew, code) {
-        app.open_picker_new(crate::picker::PickerKind::Exclude);
+        crate::action::dispatch(app, ActionId::GlobalExcludeNew);
         return;
     }
     if km_code(app, ActionId::GlobalOpenHelp, code) || km_code(app, ActionId::StripOpenHelp, code) {
-        if matches!(
-            app.focus,
-            Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
-        ) && crate::help::help_available(app)
-        {
-            app.open_help();
-        }
+        crate::action::dispatch(app, ActionId::GlobalOpenHelp);
     }
 }
 
-fn chip_field_from_keymap(app: &App, code: KeyCode) -> Option<input::ChipField> {
-    use input::ChipField;
+fn chip_action_from_keymap(app: &App, code: KeyCode) -> Option<keymap::ActionId> {
     use keymap::ActionId;
     if km_code(app, ActionId::ChipFieldTag, code) {
-        Some(ChipField::Tag)
+        Some(ActionId::ChipFieldTag)
     } else if km_code(app, ActionId::ChipFieldMsg, code) {
-        Some(ChipField::Msg)
+        Some(ActionId::ChipFieldMsg)
     } else if km_code(app, ActionId::ChipFieldPkg, code) {
-        Some(ChipField::Pkg)
+        Some(ActionId::ChipFieldPkg)
     } else if km_code(app, ActionId::ChipFieldPid, code) {
-        Some(ChipField::Pid)
+        Some(ActionId::ChipFieldPid)
     } else if km_code(app, ActionId::ChipFieldTid, code) {
-        Some(ChipField::Tid)
+        Some(ActionId::ChipFieldTid)
     } else if km_code(app, ActionId::ChipFieldLevel, code) {
-        Some(ChipField::Level)
+        Some(ActionId::ChipFieldLevel)
     } else {
         None
     }
@@ -3662,6 +3557,139 @@ mod dispatch_tests {
         app.pending_yank = true;
         handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
         assert!(!app.help_open);
+    }
+
+    #[test]
+    fn ctrl_p_opens_empty_command_palette() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.following = true;
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        let pal = app.command_palette.as_ref().expect("palette");
+        assert!(pal.query.is_empty());
+        assert!(!app.following);
+        assert_eq!(app.focus, app::Focus::LogList);
+    }
+
+    #[test]
+    fn colon_does_not_open_command_palette() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+        );
+        assert!(app.command_palette.is_none());
+    }
+
+    #[test]
+    fn pending_chip_then_ctrl_p_opens_palette() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+        assert!(app.pending_chip);
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(app.command_palette.is_some());
+        assert!(!app.pending_chip);
+        assert!(app.command_palette.as_ref().unwrap().query.is_empty());
+    }
+
+    #[test]
+    fn ctrl_p_ignored_when_detail_open() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.toggle_detail_fields();
+        assert!(app.detail_open());
+        handle_normal_event(
+            &mut app,
+            &mut input,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            app.command_palette.is_none(),
+            "R3: palette must not open over Detail"
+        );
+        assert!(app.detail_open());
+    }
+
+    #[test]
+    fn palette_esc_closes_without_resume_following() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.open_command_palette();
+        handle_palette_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.command_palette.is_none());
+        assert!(!app.following);
+    }
+
+    #[test]
+    fn palette_ctrl_c_closes_without_resume_following() {
+        let mut app = App::new(100);
+        app.following = false;
+        app.open_command_palette();
+        handle_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(app.command_palette.is_none());
+        assert!(!app.following);
+    }
+
+    #[test]
+    fn palette_typing_bookmark_k_does_not_move_selection() {
+        let mut app = App::new(100);
+        app.open_command_palette();
+        for c in ['b', 'o', 'o', 'k', 'm', 'a', 'r', 'k'] {
+            handle_palette_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        let pal = app.command_palette.as_ref().unwrap();
+        assert_eq!(pal.query.as_str(), "bookmark");
+        assert_eq!(pal.selected, 0, "k must type, not move Down");
+    }
+
+    #[test]
+    fn palette_zero_match_enter_is_noop() {
+        let mut app = App::new(100);
+        app.open_command_palette();
+        for c in "zzzznotacommand".chars() {
+            handle_palette_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_palette_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.command_palette.is_some());
+        assert!(app.picker.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn palette_enter_filter_opens_filter_new() {
+        let mut app = App::new(100);
+        app.open_command_palette();
+        for c in "filter".chars() {
+            handle_palette_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_palette_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.command_palette.is_none());
+        let picker = app.picker.as_ref().expect("filter picker");
+        assert_eq!(picker.kind, crate::picker::PickerKind::Filter);
+        assert!(matches!(picker.mode, crate::picker::PickerMode::New));
     }
 
     #[test]

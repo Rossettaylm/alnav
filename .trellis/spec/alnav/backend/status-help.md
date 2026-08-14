@@ -34,7 +34,9 @@ Update this spec when changing:
 | `status_hint_entries(app) -> Vec<HintEntry>` | `help.rs` | Status bar subset: idle LogList/Strip curated 1–2 keys; else full |
 | `keymap.toml` / `KeymapStore` | `keymap.rs` | Startup deep-merge; `--init` serializes defaults |
 | `context_hint_spans(app, max)` | `help.rs` | Consumes `status_hint_entries`; dim key + label; gap `"  "`; no `:`/`\|` |
-| `help_available(app) -> bool` | `help.rs` | Gate for opening Help |
+| `help_available(app) -> bool` | `help.rs` | Gate for opening Help; **false** when command palette is open |
+| `ContextKind::CommandPalette` | `help.rs` | Palette open → status L2 is palette keys (Esc/Enter/Up/Down) |
+| `GlobalCommandPalette` | `keymap.rs` | Default `C-p`; listed in Help catalog, **not** idle status |
 | `help_body_lines(app)` | `help.rs` | Active block + fixed catalog |
 | `FAST_SCROLL_STEP` | `help.rs` (`pub const`, value `7`) | Shared by LogList `J`/`K` and Help `J`/`K` |
 | `App.help_open` / `help_scroll` | `app.rs` | Panel state; `close_help` does **not** `resume_following` |
@@ -66,21 +68,22 @@ Left (never yields) → middle flash pill → pad + right-aligned hints.
 - English only; key dim, label normal weight; entries separated by spaces only.
 - Idle **LogList / LogListLive**: exactly `? help` and `; filter` (from keymap via `status_hint_entries`).
 - Idle **ChipStrip / ExcludeStrip / HighlightStrip**: exactly `? help` and `d del…`.
-- Operator-pending and modal (Picker / Time / Detail / Confirm / Highlight-edit / Input / Leader): full `context_entries`.
+- Operator-pending and modal (Picker / Time / Detail / Confirm / Highlight-edit / Input / Leader / **CommandPalette**): full `context_entries`.
+- Do **not** add idle `: palette` / `C-p palette` — Open Command Palette is Help-catalog only.
 - Help Active + catalog still use the full `context_entries` list — do not shrink that source.
 - Hints hide first when budget `< MIN_HELP_WIDTH` (8); flash keeps a ~12-column floor (`FLASH_MIN`) while visible.
 
 ### Help panel (`?`)
 
 - **Read-only** — never executes commands / never replaces Picker.
-- Open when: focus ∈ {LogList, ChipStrip, ExcludeStrip, HighlightStrip} AND no picker/time/detail/highlight edit AND no `pending_*` / `pending_leader`.
+- Open when: focus ∈ {LogList, ChipStrip, ExcludeStrip, HighlightStrip} AND no picker/time/detail/highlight edit/**command palette** AND no `pending_*` / `pending_leader`.
 - Content: top **Active** (current context detailed) + **All commands** catalog; active catalog section emphasized.
 - Close: Esc / `?` / Ctrl+C → `close_help()`; does **not** resume following.
 - Scroll: `j`/`k` (and arrows) = 1 line; `J`/`K` = `FAST_SCROLL_STEP` (7), same as LogList.
 
 ### Keybinding note
 
-- `?` opens Help. `/` remains Highlight New (`open_picker_new`).
+- `?` opens Help. `/` remains Highlight New (`open_picker_new`). `C-p` opens the command palette (not Help).
 - Do **not** rebind `?` to Highlight New.
 - LogList L1: `f` label is `focus` (lock + view focus); L2_LOCK includes `p`/`t`/`h`/`e`/`u`.
 - L2_TIME: `t` set / `u` clear (open key is `tt`, not `ts`). Catalog session: `f h/e`, `t t/u`.

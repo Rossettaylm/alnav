@@ -65,6 +65,8 @@ pub const GLYPH_SOURCE_RECENT: &str = "\u{f1da}"; // nf-fa-history
 pub const GLYPH_SOURCE_FILE: &str = "\u{f15b}"; // nf-fa-file
 pub const GLYPH_SOURCE_DIR: &str = "\u{f07b}"; // nf-fa-folder
 pub const GLYPH_TITLE_DASHBOARD: &str = "\u{f0e4}"; // nf-fa-tachometer
+pub const GLYPH_TITLE_PALETTE: &str = "\u{f0ca}"; // nf-fa-list-ul (command palette)
+pub const GLYPH_QUIT: &str = "\u{f08b}"; // nf-fa-sign_out
 
 /// Six-line dashboard-nvim-style Unicode wordmark. Keeping this in the theme
 /// module makes the startup branding a single visual asset alongside semantic
@@ -298,6 +300,11 @@ pub fn canvas_style() -> Style {
 /// Timestamp/pid/tid/separator tint from the active palette's muted slot.
 pub fn muted() -> Style {
     Style::default().fg(t().muted)
+}
+
+/// Right-aligned key chord in the command palette candidate list.
+pub fn palette_keyhint_style() -> Style {
+    muted().add_modifier(Modifier::DIM)
 }
 
 /// Colored level badge (e.g. `" E "` on a red background).

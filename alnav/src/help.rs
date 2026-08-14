@@ -66,6 +66,7 @@ pub enum ContextKind {
     HighlightStrip,
     LogList,
     LogListLive,
+    CommandPalette,
 }
 
 impl ContextKind {
@@ -90,6 +91,7 @@ impl ContextKind {
             Self::HighlightStrip => "Highlight strip",
             Self::LogList => "Log list",
             Self::LogListLive => "Log list (live)",
+            Self::CommandPalette => "Command palette",
         }
     }
 }
@@ -180,6 +182,9 @@ pub fn context_kind(app: &App) -> ContextKind {
     if app.time_panel.is_some() {
         return ContextKind::TimePanel;
     }
+    if app.command_palette.is_some() {
+        return ContextKind::CommandPalette;
+    }
     if app.detail_open() {
         return ContextKind::Detail;
     }
@@ -239,6 +244,13 @@ fn l1_loglist(app: &App, live: bool) -> Vec<HintEntry> {
         "resume following",
     );
     push_single(&mut out, app, ActionId::GlobalOpenHelp, "help", "open help");
+    push_single(
+        &mut out,
+        app,
+        ActionId::GlobalCommandPalette,
+        "palette",
+        "open command palette",
+    );
     push_single(
         &mut out,
         app,
@@ -646,6 +658,26 @@ pub fn context_entries(app: &App) -> Vec<HintEntry> {
         }
         ContextKind::LogList => l1_loglist(app, false),
         ContextKind::LogListLive => l1_loglist(app, true),
+        ContextKind::CommandPalette => {
+            let mut out = Vec::new();
+            push_literal(&mut out, "type", "filter", "type to filter commands");
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::PaletteUp, ActionId::PaletteDown],
+                "select",
+                "select",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::PaletteSubmit,
+                "run",
+                "run selected command",
+            );
+            push_short(&mut out, app, ActionId::PaletteClose, "close");
+            out
+        }
     }
 }
 
@@ -701,6 +733,7 @@ pub fn active_section_id(kind: ContextKind) -> SectionId {
         | ContextKind::Open => SectionId::Session,
         ContextKind::Detail | ContextKind::TimePanel => SectionId::Overlays,
         ContextKind::LogList | ContextKind::LogListLive => SectionId::Navigation,
+        ContextKind::CommandPalette => SectionId::LeaderPickers,
     }
 }
 
@@ -994,6 +1027,13 @@ fn catalog_entries(app: &App, live: bool) -> Vec<(SectionId, &'static str, Vec<H
         "help",
         "toggle this help panel",
     );
+    push_single(
+        &mut help,
+        app,
+        ActionId::GlobalCommandPalette,
+        "palette",
+        "open command palette",
+    );
     push_agg(
         &mut help,
         app,
@@ -1032,6 +1072,7 @@ pub fn help_available(app: &App) -> bool {
         || app.time_panel.is_some()
         || app.detail_open()
         || app.highlight_box.editing
+        || app.command_palette.is_some()
     {
         return false;
     }
@@ -1518,5 +1559,48 @@ move_down = "Down"
             entries.iter().any(|e| e.key.contains("Down")),
             "custom move_down must appear: {entries:?}"
         );
+    }
+
+    #[test]
+    fn catalog_and_loglist_include_command_palette() {
+        let app = app_with_focus(Focus::LogList);
+        let entries = context_entries(&app);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "C-p" && e.label == "palette"),
+            "LogList Active must list C-p palette: {entries:?}"
+        );
+        let body: String = help_body_lines(&app)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("open command palette") || body.contains("C-p"),
+            "Help catalog must mention the palette binding: {body}"
+        );
+        let idle = status_hint_entries(&app);
+        let labels: Vec<&str> = idle.iter().map(|e| e.label).collect();
+        assert_eq!(labels, ["help", "filter"], "idle status stays two hints");
+    }
+
+    #[test]
+    fn command_palette_open_blocks_help_and_uses_palette_context() {
+        let mut app = app_with_focus(Focus::LogList);
+        app.open_command_palette();
+        assert!(!help_available(&app));
+        assert_eq!(context_kind(&app), ContextKind::CommandPalette);
+        let labels: Vec<&str> = status_hint_entries(&app).iter().map(|e| e.label).collect();
+        assert!(
+            labels.contains(&"close") || labels.contains(&"run"),
+            "{labels:?}"
+        );
+        assert!(!labels.contains(&"help") || labels.len() > 2);
     }
 }

@@ -62,6 +62,23 @@ impl DateCatalog {
         self.dates.is_empty()
     }
 
+    /// Cheap existence check for palette `when` (early-exit, no catalog alloc).
+    pub fn any_in_rows<'a, I>(rows: I) -> bool
+    where
+        I: IntoIterator<Item = &'a EntryRow>,
+    {
+        for row in rows {
+            let entry = row.as_log_entry();
+            let Some(full) = entry.time_full() else {
+                continue;
+            };
+            if split_date_hms(full).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn stats_for(&self, date: &str) -> Option<&DateStats> {
         self.dates.iter().find(|d| d.date == date)
     }

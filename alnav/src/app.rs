@@ -329,6 +329,8 @@ pub struct App {
     pub stream_source_panel: Option<crate::source_panel::StreamSourcePanel>,
     /// Open fzf-style picker session (Unified Manage / Filter / Highlight / Bookmark / Exclude).
     pub picker: Option<crate::picker::PickerSession>,
+    /// VS Code-style command palette (`C-p`). Independent of [`Self::picker`].
+    pub command_palette: Option<crate::command_palette::CommandPalette>,
     /// Session bookmarks (M2).
     pub bookmarks: BookmarkList,
     /// O(1) cache of bookmarked `row_id`s for LogList bg lookup (F1).
@@ -454,6 +456,7 @@ impl App {
             open_file_panel: None,
             stream_source_panel: None,
             picker: None,
+            command_palette: None,
             bookmarks: BookmarkList::default(),
             bookmark_row_ids: HashSet::new(),
             next_row_id: 1,
@@ -602,6 +605,122 @@ impl App {
         self.open_picker_with(kind, false);
     }
 
+    /// Clear every operator-pending flag (leader / yank / chip / lock / …).
+    pub fn clear_pending_all(&mut self) {
+        self.pending_d = false;
+        self.pending_yank = false;
+        self.pending_chip = false;
+        self.pending_exclude = false;
+        self.pending_lock = false;
+        self.pending_time = false;
+        self.pending_m = false;
+        self.pending_leader = false;
+        self.pending_open = false;
+    }
+
+    /// Whether `C-p` may open the command palette (R3: Normal LogList/strips,
+    /// no other modal). Pending chords are allowed — opening clears them.
+    pub fn command_palette_available(&self) -> bool {
+        if self.command_palette.is_some()
+            || self.picker.is_some()
+            || self.time_panel.is_some()
+            || self.detail_open()
+            || self.highlight_box.editing
+            || self.help_open
+            || self.summary_open()
+            || self.dashboard.is_some()
+            || self.open_file_panel.is_some()
+            || self.stream_source_panel.is_some()
+            || self.preset_name.is_some()
+            || self.mode != Mode::Normal
+        {
+            return false;
+        }
+        matches!(
+            self.focus,
+            Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
+        )
+    }
+
+    /// Open the command palette from a Normal LogList/strip surface.
+    /// Clears pending chords and stops following. Does not change focus.
+    /// No-op when [`Self::command_palette_available`] is false.
+    pub fn open_command_palette(&mut self) {
+        if !self.command_palette_available() {
+            return;
+        }
+        self.clear_pending_all();
+        self.clear_visual();
+        self.following = false;
+        self.command_palette = Some(crate::command_palette::CommandPalette::new());
+    }
+
+    /// Close the command palette without resuming follow.
+    pub fn close_command_palette(&mut self) {
+        self.command_palette = None;
+    }
+
+    /// Filter/Exclude/Highlight strip is focused and has a selected group.
+    pub fn focused_strip_has_selection(&self) -> bool {
+        let kind = match self.focus {
+            Focus::ChipStrip => StripKind::Filter,
+            Focus::ExcludeStrip => StripKind::Exclude,
+            Focus::HighlightStrip => StripKind::Highlight,
+            _ => return false,
+        };
+        self.strip_len(kind) > 0
+    }
+
+    fn sample_rows_for_dates(&self) -> Vec<EntryRow> {
+        match &self.store {
+            RowStore::Stream(s) => s.rows.iter().cloned().collect(),
+            RowStore::File(f) => {
+                let n = f.line_count();
+                let step = (n / 4000).max(1);
+                let mut rows = Vec::new();
+                let mut i = 0usize;
+                while i < n {
+                    if let Some(r) = f.row_at(i) {
+                        rows.push(r);
+                    }
+                    i = i.saturating_add(step);
+                }
+                rows
+            }
+        }
+    }
+
+    /// Whether `tt` would find at least one date candidate (file-mode catalog).
+    /// Early-exits; does not clone the stream buffer (palette `when` hot path).
+    pub fn has_time_date_candidates(&self) -> bool {
+        match &self.store {
+            RowStore::Stream(s) => crate::time_panel::DateCatalog::any_in_rows(s.rows.iter()),
+            RowStore::File(f) => {
+                let n = f.line_count();
+                let step = (n / 4000).max(1);
+                let mut i = 0usize;
+                while i < n {
+                    if let Some(r) = f.row_at(i) {
+                        if crate::time_panel::DateCatalog::any_in_rows(std::iter::once(&r)) {
+                            return true;
+                        }
+                    }
+                    i = i.saturating_add(step);
+                }
+                false
+            }
+        }
+    }
+
+    /// Copy `text` to the clipboard and flash YANKED / YANK FAILED.
+    pub fn apply_yank(&mut self, text: String) {
+        self.record_yank(text.clone());
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => self.set_flash("YANKED (approx)"),
+            Err(e) => self.set_flash(format!("YANK FAILED: {e}")),
+        }
+    }
+
     /// Open the picker forced into New mode (`:` `/` `` ` `` `mm`).
     pub fn open_picker_new(&mut self, kind: crate::picker::PickerKind) {
         self.open_picker_with(kind, true);
@@ -713,6 +832,7 @@ impl App {
         self.time_bound = None;
         self.view_focus = ViewFocus::default();
         self.time_panel = None;
+        self.command_palette = None;
         self.detail = DetailView::Closed;
         self.help_open = false;
         self.help_scroll = 0;
@@ -2094,24 +2214,7 @@ impl App {
     /// when refused (empty date candidates). Sets `following=false` on success.
     pub fn open_time_panel(&mut self) -> bool {
         self.pending_time = false;
-        let catalog_rows: Vec<EntryRow> = match &self.store {
-            RowStore::Stream(s) => s.rows.iter().cloned().collect(),
-            RowStore::File(f) => {
-                // Sample up to 4000 lines for date catalog (full scan is ok for
-                // medium files; large files still get a useful date set).
-                let n = f.line_count();
-                let step = (n / 4000).max(1);
-                let mut rows = Vec::new();
-                let mut i = 0usize;
-                while i < n {
-                    if let Some(r) = f.row_at(i) {
-                        rows.push(r);
-                    }
-                    i = i.saturating_add(step);
-                }
-                rows
-            }
-        };
+        let catalog_rows = self.sample_rows_for_dates();
         match TimePanel::open_from_iter(catalog_rows.iter(), self.time_bound.as_ref()) {
             Some(panel) => {
                 self.following = false;

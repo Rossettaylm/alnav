@@ -21,7 +21,9 @@ alnav/src/
 ├── store.rs        # RowStore/FileStore/StreamStore/RowRef (mmap file + stream)
 ├── scan.rs         # File Vis+Inc highlight worker + severe prefetch (async-scans)
 ├── model.rs        # EntryRow: owned line model, from_line()/from_line_or_raw()/as_log_entry()
-├── keymap.rs       # ActionId registry (KeymapStore); keymap.toml load/merge; Help/status share this as key-string source of truth
+├── keymap.rs       # ActionId / ActionMeta / KeymapStore (bindings + --init); palette titles/icons live on ActionMeta
+├── action.rs       # ActionStore: when / catalog / filtered_catalog / dispatch (match, not closures)
+├── command_palette.rs # CommandPalette session (TextField query + selected); no paint, no dispatch
 ├── filter_model.rs # Group/GroupList + TimeBound (global window matching)
 ├── fuzzy.rs        # TUI nucleo-matcher facade (Search/Filter/Picker; see fuzzy-matching.md)
 ├── candidate_match.rs # Async vocab fuzzy for Picker New (gen+cancel)
@@ -41,6 +43,15 @@ alnav/src/
 ├── preview.rs      # H1 preview sampling (stream rows or file lazy parse)
 └── ingest.rs       # spawn_live_ingest (ADB/HDC DropOldestRing) / IngestHandle; file ingest tests-only
 ```
+
+### ActionStore vs KeymapStore vs command palette
+
+`keymap.rs` owns identity and keys (`ActionId`, `ActionMeta`, `KeymapStore`).
+`action.rs` owns what an action **does** (`dispatch`) and which intent
+commands appear in the palette (`when`, `catalog`, `filtered_catalog`).
+`command_palette.rs` is session state only. Paint is `ui.rs::render_command_palette`.
+Do **not** reuse `PickerSession` for the palette. See
+[command-palette.md](./command-palette.md).
 
 ### Global time window module
 
