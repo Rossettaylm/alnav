@@ -481,3 +481,37 @@ Painted E/F/crash tag+msg in theme error red. Moved Open File/Stream to C-f/C-g 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: Two-level Help panel with search
+
+**Date**: 2026-08-17
+**Task**: Two-level Help panel with search
+**Package**: alnav-core
+**Branch**: `master`
+
+### Summary
+
+Shipped two-level Help (Home + seven zone pages with design contracts), global ignore-case substring search/highlight, Esc-closes/h-back split, and centered layout without bottom overscroll.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5a5a5eb` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
