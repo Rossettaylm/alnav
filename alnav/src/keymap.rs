@@ -523,6 +523,12 @@ pub enum ActionId {
     HelpJumpUp,
     HelpTop,
     HelpBottom,
+    HelpBack,
+    HelpBackAlt,
+    HelpSearch,
+    HelpSearchNext,
+    HelpSearchPrev,
+    HelpSubmit,
     PickerSubmit,
     PickerUp,
     PickerDown,
@@ -701,6 +707,12 @@ impl ActionId {
         Self::HelpJumpUp,
         Self::HelpTop,
         Self::HelpBottom,
+        Self::HelpBack,
+        Self::HelpBackAlt,
+        Self::HelpSearch,
+        Self::HelpSearchNext,
+        Self::HelpSearchPrev,
+        Self::HelpSubmit,
         Self::PickerSubmit,
         Self::PickerUp,
         Self::PickerDown,
@@ -2071,6 +2083,84 @@ impl ActionId {
                 palette_title: "",
                 palette_icon: "",
             },
+            Self::HelpBack => ActionMeta {
+                id: Self::HelpBack,
+                context: KeyContext::Help,
+                toml_key: "back",
+                default: Binding::parse_str("h").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "back",
+                detail: "return to help home",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::HelpBackAlt => ActionMeta {
+                id: Self::HelpBackAlt,
+                context: KeyContext::Help,
+                toml_key: "back_alt",
+                default: Binding::parse_str("Backspace").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "back",
+                detail: "return to help home",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::HelpSearch => ActionMeta {
+                id: Self::HelpSearch,
+                context: KeyContext::Help,
+                toml_key: "search",
+                default: Binding::parse_str("/").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "search",
+                detail: "search help",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::HelpSearchNext => ActionMeta {
+                id: Self::HelpSearchNext,
+                context: KeyContext::Help,
+                toml_key: "search_next",
+                default: Binding::parse_str("n").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "next",
+                detail: "next help search hit",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::HelpSearchPrev => ActionMeta {
+                id: Self::HelpSearchPrev,
+                context: KeyContext::Help,
+                toml_key: "search_prev",
+                default: Binding::parse_str("S-n").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "prev",
+                detail: "previous help search hit",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
+            Self::HelpSubmit => ActionMeta {
+                id: Self::HelpSubmit,
+                context: KeyContext::Help,
+                toml_key: "submit",
+                default: Binding::parse_str("Enter").expect("default binding"),
+                kind: ActionKind::Leaf,
+                capabilities: &[],
+                label: "open",
+                detail: "open help page or commit search",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            },
             Self::PickerSubmit => ActionMeta {
                 id: Self::PickerSubmit,
                 context: KeyContext::Picker,
@@ -2666,6 +2756,12 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::Help, "jump_up") => Some(ActionId::HelpJumpUp),
         (KeyContext::Help, "top") => Some(ActionId::HelpTop),
         (KeyContext::Help, "bottom") => Some(ActionId::HelpBottom),
+        (KeyContext::Help, "back") => Some(ActionId::HelpBack),
+        (KeyContext::Help, "back_alt") => Some(ActionId::HelpBackAlt),
+        (KeyContext::Help, "search") => Some(ActionId::HelpSearch),
+        (KeyContext::Help, "search_next") => Some(ActionId::HelpSearchNext),
+        (KeyContext::Help, "search_prev") => Some(ActionId::HelpSearchPrev),
+        (KeyContext::Help, "submit") => Some(ActionId::HelpSubmit),
         (KeyContext::Picker, "submit") => Some(ActionId::PickerSubmit),
         (KeyContext::Picker, "up") => Some(ActionId::PickerUp),
         (KeyContext::Picker, "down") => Some(ActionId::PickerDown),
@@ -3182,6 +3278,13 @@ move_down = "k"
         assert!(text.contains("[command_palette]"));
         assert!(text.contains("command_palette = \"C-p\""));
         assert!(text.contains("submit = \"Enter\""));
+        assert!(text.contains("[help]"));
+        assert!(text.contains("back = \"h\""));
+        assert!(text.contains("back_alt = \"Backspace\""));
+        assert!(text.contains("search = \"/\""));
+        assert!(text.contains("search_next = \"n\""));
+        assert!(text.contains("search_prev = \"S-n\""));
+        assert!(text.contains("submit = \"Enter\""));
     }
 
     #[test]
@@ -3204,7 +3307,10 @@ move_down = "k"
         assert_eq!(parsed["theme"].as_str(), Some("default"));
         assert!(text.contains("C-f"), "Open-file comments must use C-f");
         assert!(!text.contains("C-S-o"), "must not document Ctrl-Shift open");
-        assert!(!text.contains(" / of"), "must not document retired of chord");
+        assert!(
+            !text.contains(" / of"),
+            "must not document retired of chord"
+        );
     }
 
     #[test]
@@ -3217,6 +3323,9 @@ move_down = "k"
         let keymap = fs::read_to_string(dir.join("keymap.toml")).unwrap();
         assert!(keymap.contains("[command_palette]"));
         assert!(keymap.contains("command_palette = \"C-p\""));
+        assert!(keymap.contains("[help]"));
+        assert!(keymap.contains("search = \"/\""));
+        assert!(keymap.contains("back = \"h\""));
         assert!(!dir.join("theme.toml").exists());
         let msgs2 = init_config_dir(&dir, false).unwrap();
         assert!(msgs2.iter().all(|m| m.starts_with("skip")));

@@ -1,11 +1,11 @@
 //! Focus-aware keybinding hints for the status bar and Help panel.
 //!
-//! Two levels: L1 shows single keys / multi-key prefixes; L2 shows the
-//! follow-up keys while an operator is pending. Help Active + catalog use
-//! the full [`context_entries`] set. The status bar uses
-//! [`status_hint_entries`] (idle LogList/Strip are curated 1–2 keys; pending
-//! and modal surfaces keep the full set). Rendering is dim keys + normal
-//! labels with spacing (no `:` / `|` separators).
+//! Status bar uses [`status_hint_entries`] (idle LogList/Strip are curated
+//! 1–2 keys; pending and modal surfaces keep the full [`context_entries`]
+//! set). The `?` Help panel is two-level: Home (short Active + TOC) and
+//! seven zone pages. Copy for contracts and key tables lives here.
+//! Rendering is dim keys + normal labels with spacing (no `:` / `|`
+//! separators).
 //!
 //! Key strings come from [`App::keymap`]; labels/details stay in this module.
 
@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 
 use crate::app::{App, Focus};
 use crate::keymap::ActionId;
+use crate::text_field::TextField;
 use crate::theme;
 
 /// Minimum remaining character budget before we bother showing help.
@@ -94,14 +95,136 @@ impl ContextKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SectionId {
-    Navigation,
-    LeaderPickers,
-    Operators,
+/// Max Active key rows on Help Home (full [`context_entries`] stay elsewhere).
+pub const HOME_ACTIVE_LIMIT: usize = 4;
+
+/// Pinned Home/page footer (this panel's chrome; not a zone page).
+pub const HOME_CHROME: &str = "/ search    n/N next    h back    Esc close";
+
+/// One of the seven Help zone pages (`1`–`7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HelpPage {
+    Filter,
+    Exclude,
+    Highlight,
+    Log,
     Session,
+    Picker,
     Overlays,
-    Help,
+}
+
+impl HelpPage {
+    pub const ALL: [HelpPage; 7] = [
+        Self::Filter,
+        Self::Exclude,
+        Self::Highlight,
+        Self::Log,
+        Self::Session,
+        Self::Picker,
+        Self::Overlays,
+    ];
+
+    pub fn index(self) -> u8 {
+        match self {
+            Self::Filter => 0,
+            Self::Exclude => 1,
+            Self::Highlight => 2,
+            Self::Log => 3,
+            Self::Session => 4,
+            Self::Picker => 5,
+            Self::Overlays => 6,
+        }
+    }
+
+    pub fn from_index(i: u8) -> Option<Self> {
+        Self::ALL.get(i as usize).copied()
+    }
+
+    /// Digit `1`–`7` → page. Other chars → `None`.
+    pub fn from_digit(c: char) -> Option<Self> {
+        let n = c.to_digit(10)?;
+        if !(1..=7).contains(&n) {
+            return None;
+        }
+        Self::from_index((n - 1) as u8)
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Filter => "Filter",
+            Self::Exclude => "Exclude",
+            Self::Highlight => "Highlight",
+            Self::Log => "Log",
+            Self::Session => "Session",
+            Self::Picker => "Picker",
+            Self::Overlays => "Overlays",
+        }
+    }
+}
+
+/// Help panel view: Home TOC or a zone page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpView {
+    Home { toc: u8, toc_off: usize },
+    Page { id: HelpPage, scroll: usize },
+}
+
+impl Default for HelpView {
+    fn default() -> Self {
+        Self::Home { toc: 3, toc_off: 0 }
+    }
+}
+
+/// One ignore-case substring hit in the Help corpus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpHit {
+    /// `None` = Home document; `Some` = that zone page.
+    pub page: Option<HelpPage>,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Optional Help `/` search session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpSearch {
+    pub query: TextField,
+    pub prompt: bool,
+    pub hits: Vec<HelpHit>,
+    pub current: usize,
+}
+
+impl HelpSearch {
+    pub fn new() -> Self {
+        Self {
+            query: TextField::new(),
+            prompt: true,
+            hits: Vec::new(),
+            current: 0,
+        }
+    }
+
+    pub fn has_hits(&self) -> bool {
+        !self.hits.is_empty()
+    }
+}
+
+/// Styled Help line plus the plain haystack used for search/highlight.
+#[derive(Debug, Clone)]
+pub struct HelpLine {
+    pub text: String,
+    pub line: Line<'static>,
+}
+
+/// TOC index from the focus that opened Help.
+pub fn preselect_toc(focus: Focus) -> u8 {
+    match focus {
+        Focus::ChipStrip => 0,
+        Focus::ExcludeStrip => 1,
+        Focus::HighlightStrip => 2,
+        Focus::LogList => 3,
+        Focus::Input => 0,
+    }
 }
 
 fn key_of(app: &App, id: ActionId) -> Option<String> {
@@ -687,160 +810,67 @@ pub fn status_hint_entries(app: &App) -> Vec<HintEntry> {
     }
 }
 
-/// Map context → catalog section to emphasize.
-pub fn active_section_id(kind: ContextKind) -> SectionId {
-    match kind {
-        ContextKind::Leader | ContextKind::Picker | ContextKind::Confirm => {
-            SectionId::LeaderPickers
-        }
-        ContextKind::ChipField
-        | ContextKind::StripD
-        | ContextKind::ChipStrip
-        | ContextKind::ExcludeStrip
-        | ContextKind::HighlightStrip
-        | ContextKind::Input
-        | ContextKind::HighlightModal => SectionId::Operators,
-        ContextKind::Bookmark
-        | ContextKind::Lock
-        | ContextKind::Time
-        | ContextKind::Yank => SectionId::Session,
-        ContextKind::Detail | ContextKind::TimePanel => SectionId::Overlays,
-        ContextKind::LogList | ContextKind::LogListLive => SectionId::Navigation,
-        ContextKind::CommandPalette => SectionId::LeaderPickers,
+/// Design-contract copy for a zone page (at most 5 lines).
+pub fn page_blurb(page: HelpPage) -> &'static [&'static str] {
+    match page {
+        HelpPage::Filter => &[
+            "Filter chips live in groups.",
+            "Inside a group every chip is AND; across enabled groups the result is OR.",
+            "If every group is disabled, that is the same as an empty list: every row stays visible.",
+            "New filters go through the Picker, not the old Input strip.",
+            "Startup CLI flags become group 0 and can be deleted or disabled like any other group.",
+        ],
+        HelpPage::Exclude => &[
+            "Exclude groups apply as global AND NOT after Filter (then lock and the time window).",
+            "They are not an inverted Filter page: a row must pass Filter and then match no enabled Exclude.",
+            "Empty Exclude strip is folded.",
+            "`C` plus a field letter pushes an exclude from the current row.",
+        ],
+        HelpPage::Highlight => &[
+            "Highlight groups paint matching text; they do not hide rows.",
+            "Enabled patterns are OR and walk the 8-slot color ramp in order.",
+            "`/` on LogList opens Highlight New; `/` inside this Help panel is search (Help context) and does not create a highlight.",
+        ],
+        HelpPage::Log => &[
+            "The log list is the action origin: most cancels return here.",
+            "Leaving the last visible row pauses following; landing on the last row resumes it; Esc still resumes explicitly.",
+            "Yank, wrap, visual, and chip-from-row start on the current line.",
+            "File mode can browse the whole file; live mode is a dropping ring.",
+        ],
+        HelpPage::Session => &[
+            "Lock PID and lock TID are mutually exclusive and AND after chips.",
+            "The global time window is file-only and orthogonal to Filter groups.",
+            "Bookmarks are session-only, anchored by `row_id`, and vanish when the process exits.",
+            "Follow and device/file state live in the status bar, not in a chip group.",
+        ],
+        HelpPage::Picker => &[
+            "Space is Leader; Space Space opens unified Manage.",
+            "Bare `;` `/` ` force New for Filter / Highlight / Exclude.",
+            "Typing in Manage with no matches switches to New; Esc always closes the panel and does not return to Manage.",
+            "Bookmark Manage is `mm`, not this unified picker.",
+        ],
+        HelpPage::Overlays => &[
+            "Fields (`p`) and Pretty (`P`) are a top modal on the current row; Esc closes the overlay only and does not resume following.",
+            "Pretty pretty-prints JSON in msg (then raw).",
+            "The command palette (`C-p`) is not a Picker: an empty query shows no list.",
+            "This Help panel's own keys are on the Home footer, not in this list.",
+        ],
     }
 }
 
-fn catalog_entries(app: &App, live: bool) -> Vec<(SectionId, &'static str, Vec<HintEntry>)> {
-    let mut nav = Vec::new();
+fn push_strip_group_ops(out: &mut Vec<HintEntry>, app: &App) {
     push_agg(
-        &mut nav,
-        app,
-        &[ActionId::LogListMoveDown, ActionId::LogListMoveUp],
-        "move",
-        "move cursor one line",
-    );
-    push_agg(
-        &mut nav,
-        app,
-        &[ActionId::LogListJumpDown, ActionId::LogListJumpUp],
-        "jump",
-        "move 7 lines",
-    );
-    push_agg(
-        &mut nav,
-        app,
-        &[ActionId::LogListJumpTop, ActionId::LogListJumpBottom],
-        "top/bottom",
-        "jump top or bottom (G resumes follow)",
-    );
-    push_single(
-        &mut nav,
-        app,
-        ActionId::LogListResumeFollow,
-        "follow",
-        "resume following and pin to bottom",
-    );
-    push_agg(
-        &mut nav,
-        app,
-        &[ActionId::LogListNextMatch, ActionId::LogListPrevMatch],
-        "next hit",
-        "next / previous highlight match",
-    );
-    push_agg(
-        &mut nav,
-        app,
-        &[ActionId::LogListNextSevere, ActionId::LogListPrevSevere],
-        "error",
-        "next / previous severe line",
-    );
-    push_literal(
-        &mut nav,
-        "1-5",
-        "focus",
-        "focus filter / exclude / highlight / log / input",
-    );
-
-    let mut leader = Vec::new();
-    if let (Some(a), Some(b)) = (
-        key_of(app, ActionId::LogListLeader),
-        key_of(app, ActionId::LeaderManage),
-    ) {
-        leader.push(HintEntry::new(
-            format!("{a} {b}"),
-            "manage",
-            "unified manage picker",
-        ));
-    }
-    if let (Some(a), Some(b)) = (
-        key_of(app, ActionId::LogListLeader),
-        key_of(app, ActionId::LeaderSummary),
-    ) {
-        leader.push(HintEntry::new(
-            format!("{a} {b}"),
-            "stats",
-            "open summary panel (level / tags / errors)",
-        ));
-    }
-    push_single(
-        &mut leader,
-        app,
-        ActionId::GlobalFilterNew,
-        "filter new",
-        "open filter picker in new mode",
-    );
-    push_single(
-        &mut leader,
-        app,
-        ActionId::GlobalHighlightNew,
-        "highlight new",
-        "open highlight picker in new mode",
-    );
-    push_single(
-        &mut leader,
-        app,
-        ActionId::GlobalExcludeNew,
-        "exclude new",
-        "open exclude picker in new mode",
-    );
-    if let (Some(a), Some(b)) = (
-        key_of(app, ActionId::LogListBookmark),
-        key_of(app, ActionId::BookmarkManage),
-    ) {
-        leader.push(HintEntry::new(
-            format!("{a}{b}"),
-            "bookmarks",
-            "open bookmark manage",
-        ));
-    }
-
-    let mut ops = Vec::new();
-    push_single(
-        &mut ops,
-        app,
-        ActionId::LogListChip,
-        "chip",
-        "filter/highlight from row (msg → tokens → Filter|Highlight)",
-    );
-    push_single(
-        &mut ops,
-        app,
-        ActionId::LogListExcludeChip,
-        "exclude",
-        "exclude chip from current row field",
-    );
-    push_agg(
-        &mut ops,
+        out,
         app,
         &[ActionId::StripPrevGroup, ActionId::StripNextGroup],
-        "strip",
+        "group",
         "prev / next group on focused strip",
     );
     if let (Some(a), Some(b)) = (
         key_of(app, ActionId::StripPendingD),
         key_of(app, ActionId::StripDDelete),
     ) {
-        ops.push(HintEntry::new(
+        out.push(HintEntry::new(
             format!("{a}{b}"),
             "delete",
             "delete selected strip group",
@@ -850,183 +880,624 @@ fn catalog_entries(app: &App, live: bool) -> Vec<(SectionId, &'static str, Vec<H
         key_of(app, ActionId::StripPendingD),
         key_of(app, ActionId::StripDDisable),
     ) {
-        ops.push(HintEntry::new(
+        out.push(HintEntry::new(
             format!("{a}{b}"),
             "disable",
             "toggle disable selected strip group",
         ));
     }
+}
 
-    let mut session = Vec::new();
-    push_single(
-        &mut session,
-        app,
-        ActionId::LeaderPresetSave,
-        "save preset",
-        "save Filter/Exclude/Highlight preset",
-    );
-    push_single(
-        &mut session,
-        app,
-        ActionId::LeaderPresetOpen,
-        "open preset",
-        "search and apply named preset",
-    );
-    push_agg(
-        &mut session,
-        app,
-        &[ActionId::OpenFile, ActionId::OpenStream],
-        "source",
-        "open or switch file / stream source",
-    );
-    if let (Some(p), Some(fp), Some(ft), Some(fu)) = (
-        key_of(app, ActionId::LogListLock),
-        key_of(app, ActionId::LockPid),
-        key_of(app, ActionId::LockTid),
-        key_of(app, ActionId::LockClear),
-    ) {
-        session.push(HintEntry::new(
-            format!("{p} {fp}/{ft}/{fu}"),
-            "lock",
-            "lock pid / tid / clear",
-        ));
-    }
-    if let (Some(p), Some(h), Some(e)) = (
-        key_of(app, ActionId::LogListLock),
-        key_of(app, ActionId::LockViewHighlight),
-        key_of(app, ActionId::LockViewSevere),
-    ) {
-        session.push(HintEntry::new(
-            format!("{p} {h}/{e}"),
-            "view",
-            "highlight-only / severe-only (independent toggles; both = AND)",
-        ));
-    }
-    if !live {
-        if let (Some(t), Some(tt), Some(tu)) = (
-            key_of(app, ActionId::LogListTime),
-            key_of(app, ActionId::TimeSet),
-            key_of(app, ActionId::TimeClear),
-        ) {
-            session.push(HintEntry::new(
-                format!("{t} {tt}/{tu}"),
-                "time",
-                "set / clear global time window (file only)",
-            ));
+fn page_entries(app: &App, page: HelpPage) -> Vec<HintEntry> {
+    let live = app.export_source.is_live();
+    match page {
+        HelpPage::Filter => {
+            let mut out = Vec::new();
+            push_single(
+                &mut out,
+                app,
+                ActionId::GlobalFilterNew,
+                "filter new",
+                "open filter picker in new mode",
+            );
+            push_strip_group_ops(&mut out, app);
+            push_single(
+                &mut out,
+                app,
+                ActionId::LogListChip,
+                "chip",
+                "filter/highlight from row (msg → tokens → Filter|Highlight)",
+            );
+            out
+        }
+        HelpPage::Exclude => {
+            let mut out = Vec::new();
+            push_single(
+                &mut out,
+                app,
+                ActionId::GlobalExcludeNew,
+                "exclude new",
+                "open exclude picker in new mode",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LogListExcludeChip,
+                "exclude",
+                "exclude chip from current row field",
+            );
+            push_strip_group_ops(&mut out, app);
+            out
+        }
+        HelpPage::Highlight => {
+            let mut out = Vec::new();
+            push_single(
+                &mut out,
+                app,
+                ActionId::GlobalHighlightNew,
+                "highlight new",
+                "open highlight picker in new mode",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::LogListNextMatch, ActionId::LogListPrevMatch],
+                "next hit",
+                "next / previous highlight match",
+            );
+            push_strip_group_ops(&mut out, app);
+            out
+        }
+        HelpPage::Log => {
+            let mut out = Vec::new();
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::LogListMoveDown, ActionId::LogListMoveUp],
+                "move",
+                "move cursor one line",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::LogListJumpDown, ActionId::LogListJumpUp],
+                "jump",
+                "move 7 lines",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::LogListJumpTop, ActionId::LogListJumpBottom],
+                "top/bottom",
+                "jump top or bottom (G resumes follow)",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LogListResumeFollow,
+                "follow",
+                "resume following and pin to bottom",
+            );
+            push_agg(
+                &mut out,
+                app,
+                &[ActionId::LogListNextSevere, ActionId::LogListPrevSevere],
+                "error",
+                "next / previous severe line",
+            );
+            push_literal(
+                &mut out,
+                "1-5",
+                "focus",
+                "focus filter / exclude / highlight / log / input",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LogListWrapToggle,
+                "wrap",
+                "toggle multi-line wrap / single-line collapsed view",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LogListVisualLine,
+                "visual",
+                "visual line mode",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LogListYankMsgLine,
+                "yank msg",
+                "yank message of current line",
+            );
+            push_single(
+                &mut out,
+                app,
+                ActionId::LogListChip,
+                "chip",
+                "filter/highlight from row (msg → tokens → Filter|Highlight)",
+            );
+            if let (Some(y), Some(c)) = (
+                key_of(app, ActionId::LogListYank),
+                key_of(app, ActionId::YankCli),
+            ) {
+                out.push(HintEntry::new(
+                    format!("{y} {c}"),
+                    "export",
+                    "yank filters as alnav grep CLI (literal approx)",
+                ));
+            }
+            if let Some(y) = key_of(app, ActionId::LogListYank) {
+                out.push(HintEntry::new(
+                    format!("{y} …"),
+                    "yank field",
+                    "yank tag/msg(token picker)/pkg/pid/tid/level/raw/line/time",
+                ));
+            }
+            out
+        }
+        HelpPage::Session => {
+            let mut session = Vec::new();
+            push_single(
+                &mut session,
+                app,
+                ActionId::LeaderPresetSave,
+                "save preset",
+                "save Filter/Exclude/Highlight preset",
+            );
+            push_single(
+                &mut session,
+                app,
+                ActionId::LeaderPresetOpen,
+                "open preset",
+                "search and apply named preset",
+            );
+            push_agg(
+                &mut session,
+                app,
+                &[ActionId::OpenFile, ActionId::OpenStream],
+                "source",
+                "open or switch file / stream source",
+            );
+            if let (Some(p), Some(fp), Some(ft), Some(fu)) = (
+                key_of(app, ActionId::LogListLock),
+                key_of(app, ActionId::LockPid),
+                key_of(app, ActionId::LockTid),
+                key_of(app, ActionId::LockClear),
+            ) {
+                session.push(HintEntry::new(
+                    format!("{p} {fp}/{ft}/{fu}"),
+                    "lock",
+                    "lock pid / tid / clear",
+                ));
+            }
+            if let (Some(p), Some(h), Some(e)) = (
+                key_of(app, ActionId::LogListLock),
+                key_of(app, ActionId::LockViewHighlight),
+                key_of(app, ActionId::LockViewSevere),
+            ) {
+                session.push(HintEntry::new(
+                    format!("{p} {h}/{e}"),
+                    "view",
+                    "highlight-only / severe-only (independent toggles; both = AND)",
+                ));
+            }
+            if !live {
+                if let (Some(t), Some(tt), Some(tu)) = (
+                    key_of(app, ActionId::LogListTime),
+                    key_of(app, ActionId::TimeSet),
+                    key_of(app, ActionId::TimeClear),
+                ) {
+                    session.push(HintEntry::new(
+                        format!("{t} {tt}/{tu}"),
+                        "time",
+                        "set / clear global time window (file only)",
+                    ));
+                }
+            }
+            if let (Some(m), Some(a), Some(d)) = (
+                key_of(app, ActionId::LogListBookmark),
+                key_of(app, ActionId::BookmarkAdd),
+                key_of(app, ActionId::BookmarkRemove),
+            ) {
+                session.push(HintEntry::new(
+                    format!("{m}{a}/{m}{d}"),
+                    "bookmark",
+                    "add / remove bookmark on current row",
+                ));
+            }
+            if let (Some(m), Some(b)) = (
+                key_of(app, ActionId::LogListBookmark),
+                key_of(app, ActionId::BookmarkManage),
+            ) {
+                session.push(HintEntry::new(
+                    format!("{m}{b}"),
+                    "bookmarks",
+                    "open bookmark manage",
+                ));
+            }
+            if live {
+                push_single(
+                    &mut session,
+                    app,
+                    ActionId::LogListClearLive,
+                    "clear",
+                    "clear buffered live logs",
+                );
+            }
+            session
+        }
+        HelpPage::Picker => {
+            let mut leader = Vec::new();
+            if let (Some(a), Some(b)) = (
+                key_of(app, ActionId::LogListLeader),
+                key_of(app, ActionId::LeaderManage),
+            ) {
+                leader.push(HintEntry::new(
+                    format!("{a} {b}"),
+                    "manage",
+                    "unified manage picker",
+                ));
+            }
+            push_single(
+                &mut leader,
+                app,
+                ActionId::GlobalFilterNew,
+                "filter new",
+                "open filter picker in new mode",
+            );
+            push_single(
+                &mut leader,
+                app,
+                ActionId::GlobalHighlightNew,
+                "highlight new",
+                "open highlight picker in new mode",
+            );
+            push_single(
+                &mut leader,
+                app,
+                ActionId::GlobalExcludeNew,
+                "exclude new",
+                "open exclude picker in new mode",
+            );
+            push_literal(
+                &mut leader,
+                "type",
+                "filter",
+                "type to fuzzy-filter; Enter toggle; ^X edit; Del delete",
+            );
+            push_single(
+                &mut leader,
+                app,
+                ActionId::PickerEdit,
+                "edit",
+                "edit selected",
+            );
+            push_agg(
+                &mut leader,
+                app,
+                &[ActionId::PickerDelete, ActionId::PickerDeleteAlt],
+                "delete",
+                "delete with confirm",
+            );
+            leader
+        }
+        HelpPage::Overlays => {
+            let mut overlays = Vec::new();
+            push_agg(
+                &mut overlays,
+                app,
+                &[ActionId::LogListDetailFields, ActionId::LogListDetailPretty],
+                "detail",
+                "toggle fields / pretty overlay",
+            );
+            push_single(
+                &mut overlays,
+                app,
+                ActionId::GlobalCommandPalette,
+                "palette",
+                "open command palette",
+            );
+            if let (Some(a), Some(b)) = (
+                key_of(app, ActionId::LogListLeader),
+                key_of(app, ActionId::LeaderSummary),
+            ) {
+                overlays.push(HintEntry::new(
+                    format!("{a} {b}"),
+                    "stats",
+                    "open summary panel (level / tags / errors)",
+                ));
+            }
+            if !live {
+                push_agg(
+                    &mut overlays,
+                    app,
+                    &[ActionId::TimePanelNext, ActionId::TimePanelSubmit],
+                    "next",
+                    "time panel next field",
+                );
+                push_agg(
+                    &mut overlays,
+                    app,
+                    &[ActionId::TimePanelDateUp, ActionId::TimePanelDateDown],
+                    "date",
+                    "time panel date",
+                );
+                push_short(&mut overlays, app, ActionId::TimePanelCancel, "cancel");
+            }
+            overlays
         }
     }
-    if let (Some(m), Some(a), Some(d)) = (
-        key_of(app, ActionId::LogListBookmark),
-        key_of(app, ActionId::BookmarkAdd),
-        key_of(app, ActionId::BookmarkRemove),
-    ) {
-        session.push(HintEntry::new(
-            format!("{m}{a}/{m}{d}"),
-            "bookmark",
-            "add / remove bookmark on current row",
-        ));
-    }
-    if let (Some(y), Some(c)) = (
-        key_of(app, ActionId::LogListYank),
-        key_of(app, ActionId::YankCli),
-    ) {
-        session.push(HintEntry::new(
-            format!("{y} {c}"),
-            "export",
-            "yank filters as alnav grep CLI (literal approx)",
-        ));
-    }
-    if let Some(y) = key_of(app, ActionId::LogListYank) {
-        session.push(HintEntry::new(
-            format!("{y} …"),
-            "yank field",
-            "yank tag/msg(token picker)/pkg/pid/tid/level/raw/line/time",
-        ));
-    }
-    if live {
-        push_single(
-            &mut session,
-            app,
-            ActionId::LogListClearLive,
-            "clear",
-            "clear buffered live logs",
-        );
-    }
+}
 
-    let mut overlays = Vec::new();
-    push_agg(
-        &mut overlays,
-        app,
-        &[ActionId::LogListDetailFields, ActionId::LogListDetailPretty],
-        "detail",
-        "toggle fields / pretty overlay",
-    );
-    push_single(
-        &mut overlays,
-        app,
-        ActionId::LogListWrapToggle,
-        "wrap",
-        "toggle multi-line wrap / single-line collapsed view",
-    );
-    push_single(
-        &mut overlays,
-        app,
-        ActionId::LogListVisualLine,
-        "visual",
-        "visual line mode",
-    );
-    push_literal(
-        &mut overlays,
-        "Picker",
-        "fuzzy",
-        "type to fuzzy-filter; Enter toggle; ^X edit; Del delete",
-    );
+fn styled_help_line(line: Line<'static>) -> HelpLine {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    HelpLine { text, line }
+}
 
-    let mut help = Vec::new();
-    push_single(
-        &mut help,
-        app,
-        ActionId::GlobalOpenHelp,
-        "help",
-        "toggle this help panel",
-    );
-    push_single(
-        &mut help,
-        app,
-        ActionId::GlobalCommandPalette,
-        "palette",
-        "open command palette",
-    );
-    push_agg(
-        &mut help,
-        app,
-        &[ActionId::HelpScrollDown, ActionId::HelpScrollUp],
-        "scroll",
-        "scroll help content one line",
-    );
-    push_agg(
-        &mut help,
-        app,
-        &[ActionId::HelpJumpDown, ActionId::HelpJumpUp],
-        "jump",
-        "scroll help content 7 lines",
-    );
-    push_single(
-        &mut help,
-        app,
-        ActionId::HelpClose,
-        "close",
-        "close help without resuming follow",
-    );
+fn plain_help_line(text: impl Into<String>, style: Style) -> HelpLine {
+    let text = text.into();
+    HelpLine {
+        line: Line::from(Span::styled(text.clone(), style)),
+        text,
+    }
+}
 
-    vec![
-        (SectionId::Navigation, "Navigation", nav),
-        (SectionId::LeaderPickers, "Leader & pickers", leader),
-        (SectionId::Operators, "Filter operators", ops),
-        (SectionId::Session, "Session", session),
-        (SectionId::Overlays, "Overlays", overlays),
-        (SectionId::Help, "Help", help),
+/// Home Active block: title + at most [`HOME_ACTIVE_LIMIT`] context entries.
+pub fn home_active_lines(app: &App) -> Vec<HelpLine> {
+    let kind = context_kind(app);
+    let title = Line::from(vec![
+        Span::styled(
+            "Active  ",
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            kind.title().to_string(),
+            Style::default().fg(theme::accent()),
+        ),
+    ]);
+    let mut lines = vec![styled_help_line(title)];
+    for entry in context_entries(app).into_iter().take(HOME_ACTIVE_LIMIT) {
+        lines.push(styled_help_line(detail_line(&entry)));
+    }
+    lines
+}
+
+/// Numbered TOC rows (`1`–`7`). `selected` is highlighted when `Some`.
+pub fn home_toc_lines(selected: Option<u8>) -> Vec<HelpLine> {
+    HelpPage::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, page)| {
+            let text = format!("{}  {}", i + 1, page.title());
+            let selected = selected == Some(i as u8);
+            let style = if selected {
+                theme::candidate_selected_style()
+            } else {
+                theme::candidate_unselected_style()
+            };
+            HelpLine {
+                line: Line::from(Span::styled(text.clone(), style)),
+                text,
+            }
+        })
+        .collect()
+}
+
+pub fn chrome_help_line() -> HelpLine {
+    let mut spans = Vec::new();
+    for (i, (key, label)) in [
+        ("/", "search"),
+        ("n/N", "next"),
+        ("h", "back"),
+        ("Esc", "close"),
     ]
+    .into_iter()
+    .enumerate()
+    {
+        if i > 0 {
+            spans.push(Span::raw("    "));
+        }
+        spans.push(Span::styled(key.to_string(), key_style()));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(label.to_string(), label_style()));
+    }
+    HelpLine {
+        text: HOME_CHROME.to_string(),
+        line: Line::from(spans),
+    }
+}
+
+/// Home document for search: Active + TOC (unselected) + chrome.
+pub fn home_doc_lines(app: &App) -> Vec<HelpLine> {
+    let mut lines = home_active_lines(app);
+    lines.extend(home_toc_lines(None));
+    lines.push(chrome_help_line());
+    lines
+}
+
+/// Zone page document: title, blurb, key table.
+pub fn page_doc_lines(app: &App, page: HelpPage) -> Vec<HelpLine> {
+    let mut lines = Vec::new();
+    lines.push(plain_help_line(
+        page.title().to_string(),
+        Style::default()
+            .fg(theme::accent())
+            .add_modifier(Modifier::BOLD),
+    ));
+    for blurb in page_blurb(page) {
+        lines.push(plain_help_line((*blurb).to_string(), label_style()));
+    }
+    lines.push(HelpLine {
+        text: String::new(),
+        line: Line::from(""),
+    });
+    for entry in page_entries(app, page) {
+        lines.push(styled_help_line(detail_line(&entry)));
+    }
+    lines
+}
+
+/// Max page `scroll` so the last line sits at the bottom of the viewport
+/// instead of the top (which would leave a blank remainder).
+pub fn page_max_scroll(line_count: usize, viewport_rows: usize) -> usize {
+    line_count.saturating_sub(viewport_rows.max(1))
+}
+
+/// Lines for the current Help view (unwindowed; tests + modal height).
+pub fn help_body_lines(app: &App) -> Vec<Line<'static>> {
+    match app.help_view {
+        HelpView::Home { toc, .. } => {
+            let mut lines: Vec<Line<'static>> =
+                home_active_lines(app).into_iter().map(|l| l.line).collect();
+            lines.extend(home_toc_lines(Some(toc)).into_iter().map(|l| l.line));
+            lines.push(chrome_help_line().line);
+            lines
+        }
+        HelpView::Page { id, .. } => {
+            let mut lines: Vec<Line<'static>> = page_doc_lines(app, id)
+                .into_iter()
+                .map(|l| l.line)
+                .collect();
+            lines.push(chrome_help_line().line);
+            lines
+        }
+    }
+}
+
+pub fn home_active_len(app: &App) -> usize {
+    home_active_lines(app).len()
+}
+
+fn substring_spans(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let h = haystack.to_ascii_lowercase();
+    let n = needle.to_ascii_lowercase();
+    h.match_indices(&n).map(|(i, m)| (i, i + m.len())).collect()
+}
+
+/// Ignore-case substring hits across Home + all seven pages.
+pub fn search_help_hits(app: &App, query: &str) -> Vec<HelpHit> {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for (line_idx, row) in home_doc_lines(app).iter().enumerate() {
+        for (start, end) in substring_spans(&row.text, needle) {
+            hits.push(HelpHit {
+                page: None,
+                line: line_idx,
+                start,
+                end,
+            });
+        }
+    }
+    for page in HelpPage::ALL {
+        for (line_idx, row) in page_doc_lines(app, page).iter().enumerate() {
+            for (start, end) in substring_spans(&row.text, needle) {
+                hits.push(HelpHit {
+                    page: Some(page),
+                    line: line_idx,
+                    start,
+                    end,
+                });
+            }
+        }
+    }
+    hits
+}
+
+pub fn hits_on_line(
+    search: Option<&HelpSearch>,
+    page: Option<HelpPage>,
+    line: usize,
+) -> Vec<(usize, usize, bool)> {
+    let Some(search) = search else {
+        return Vec::new();
+    };
+    if search.hits.is_empty() {
+        return Vec::new();
+    }
+    search
+        .hits
+        .iter()
+        .enumerate()
+        .filter(|(_, hit)| hit.page == page && hit.line == line)
+        .map(|(i, hit)| (hit.start, hit.end, i == search.current))
+        .collect()
+}
+
+/// Overlay substring hits onto an already-styled line.
+pub fn overlay_search_hits(line: Line<'static>, hits: &[(usize, usize, bool)]) -> Line<'static> {
+    if hits.is_empty() {
+        return line;
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut byte = 0usize;
+    for span in line.spans {
+        let content = span.content.into_owned();
+        let style = span.style;
+        let end = byte + content.len();
+        let mut cursor = 0usize;
+        let mut marks: Vec<(usize, usize, bool)> = hits
+            .iter()
+            .filter_map(|&(s, e, cur)| {
+                let a = s.max(byte);
+                let b = e.min(end);
+                if a < b {
+                    Some((a - byte, b - byte, cur))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        marks.sort_by_key(|m| (m.0, !m.2, m.1));
+        for (s, e, current) in marks {
+            let s = s.max(cursor);
+            if s > cursor {
+                out.push(Span::styled(content[cursor..s].to_string(), style));
+            }
+            if e > s {
+                let hit_style = if current {
+                    theme::help_search_current_style()
+                } else {
+                    theme::help_search_hit_style()
+                };
+                out.push(Span::styled(content[s..e].to_string(), hit_style));
+                cursor = e;
+            }
+        }
+        if cursor < content.len() {
+            out.push(Span::styled(content[cursor..].to_string(), style));
+        }
+        byte = end;
+    }
+    Line::from(out)
+}
+
+pub fn decode_home_hit_line(app: &App, line: usize) -> HomeHitKind {
+    let active = home_active_len(app);
+    if line < active {
+        HomeHitKind::Active
+    } else if line < active + HelpPage::ALL.len() {
+        HomeHitKind::Toc((line - active) as u8)
+    } else {
+        HomeHitKind::Chrome
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeHitKind {
+    Active,
+    Toc(u8),
+    Chrome,
 }
 
 /// Whether Help may open for the current app state.
@@ -1107,52 +1578,6 @@ pub fn context_hint_spans(app: &App, max_chars: usize) -> Option<Vec<Span<'stati
     } else {
         Some(spans)
     }
-}
-
-/// Build scrollable Help body lines (Active + catalog).
-pub fn help_body_lines(app: &App) -> Vec<Line<'static>> {
-    let kind = context_kind(app);
-    let active_id = active_section_id(kind);
-    let live = matches!(kind, ContextKind::LogListLive) || app.export_source.is_live();
-
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Active  ",
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            kind.title().to_string(),
-            Style::default().fg(theme::accent()),
-        ),
-    ]));
-
-    for entry in context_entries(app) {
-        lines.push(detail_line(&entry));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "All commands",
-        Style::default()
-            .fg(theme::accent())
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    for (id, title, entries) in catalog_entries(app, live) {
-        let is_active = id == active_id;
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            title.to_string(),
-            theme::help_section_style(is_active),
-        )));
-        for entry in entries {
-            lines.push(detail_line(&entry));
-        }
-    }
-    lines
 }
 
 fn detail_line(entry: &HintEntry) -> Line<'static> {
@@ -1410,25 +1835,36 @@ mod tests {
         assert_eq!(labels(&app), full(&app), "Picker must expand full set");
     }
 
+    fn joined_lines(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn help_body_still_lists_move_cursor() {
         let app = app_with_focus(Focus::LogList);
-        let lines = help_body_lines(&app);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("");
-        assert!(text.contains("j/k") || text.contains("move"), "{text}");
-        assert!(
-            text.contains("move cursor") || text.contains("move"),
-            "{text}"
-        );
+        let home = joined_lines(&help_body_lines(&app));
+        assert!(home.contains("move"), "{home}");
         let active = context_entries(&app);
         assert!(
             active.iter().any(|e| e.label == "move"),
             "Help Active must keep full LogList L1: {active:?}"
         );
+        let log = joined_lines(
+            &page_doc_lines(&app, HelpPage::Log)
+                .into_iter()
+                .map(|l| l.line)
+                .collect::<Vec<_>>(),
+        );
+        assert!(log.contains("move cursor") || log.contains("move"), "{log}");
     }
 
     #[test]
@@ -1443,29 +1879,25 @@ mod tests {
     }
 
     #[test]
-    fn help_body_has_active_and_catalog() {
+    fn help_home_has_active_and_toc() {
         let app = app_with_focus(Focus::LogList);
-        let lines = help_body_lines(&app);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("");
+        let text = joined_lines(&help_body_lines(&app));
         assert!(text.contains("Active"), "{text}");
-        assert!(text.contains("All commands"), "{text}");
-        assert!(text.contains("Navigation"), "{text}");
+        assert!(text.contains("Filter"), "{text}");
+        assert!(text.contains("1"), "{text}");
+        assert!(!text.contains("All commands"), "{text}");
     }
 
     #[test]
     fn adb_help_hides_time_and_shows_clear() {
         let mut app = app_with_focus(Focus::LogList);
         app.export_source = crate::export::ExportSource::Adb { device: None };
-        let lines = help_body_lines(&app);
-        let text: String = lines
-            .iter()
-            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("");
+        let text = joined_lines(
+            &page_doc_lines(&app, HelpPage::Session)
+                .into_iter()
+                .map(|l| l.line)
+                .collect::<Vec<_>>(),
+        );
 
         assert!(!text.contains("set / clear global time window"), "{text}");
         assert!(text.contains("clear buffered live logs"), "{text}");
@@ -1475,32 +1907,83 @@ mod tests {
     fn catalog_jk_details_match_fast_scroll_step() {
         let app = app_with_focus(Focus::LogList);
         let step = FAST_SCROLL_STEP.to_string();
-        let catalog = catalog_entries(&app, false);
-        let nav = &catalog
-            .iter()
-            .find(|(id, _, _)| *id == SectionId::Navigation)
-            .expect("nav")
-            .2;
-        let help = &catalog
-            .iter()
-            .find(|(id, _, _)| *id == SectionId::Help)
-            .expect("help")
-            .2;
-        let nav_jk = nav
+        let log_entries = page_entries(&app, HelpPage::Log);
+        let nav_jk = log_entries
             .iter()
             .find(|e| e.key.contains('/') && e.label == "jump")
-            .expect("nav jump");
-        let help_jk = help.iter().find(|e| e.label == "jump").expect("help jump");
+            .expect("log jump");
         assert!(
             nav_jk.detail.contains(&step),
-            "nav detail {:?} must mention FAST_SCROLL_STEP={step}",
+            "log jump detail {:?} must mention FAST_SCROLL_STEP={step}",
             nav_jk.detail
         );
-        assert!(
-            help_jk.detail.contains(&step),
-            "help detail {:?} must mention FAST_SCROLL_STEP={step}",
-            help_jk.detail
+    }
+
+    #[test]
+    fn page_blurbs_are_at_most_five_lines() {
+        for page in HelpPage::ALL {
+            let n = page_blurb(page).len();
+            assert!(n <= 5, "{:?} blurb has {n} lines", page);
+            assert!(n >= 1, "{:?} missing blurb", page);
+        }
+    }
+
+    #[test]
+    fn filter_page_lists_filter_new_overlays_omits_help_search() {
+        let app = app_with_focus(Focus::LogList);
+        let filter = page_entries(&app, HelpPage::Filter);
+        assert!(filter.iter().any(|e| e.label == "filter new"), "{filter:?}");
+        let overlays = joined_lines(
+            &page_doc_lines(&app, HelpPage::Overlays)
+                .into_iter()
+                .map(|l| l.line)
+                .collect::<Vec<_>>(),
         );
+        assert!(
+            !overlays.contains("search help") && !overlays.to_lowercase().contains("/ search"),
+            "Overlays must not list Help chrome /: {overlays}"
+        );
+        assert!(
+            overlays.contains("command palette") || overlays.contains("C-p"),
+            "{overlays}"
+        );
+    }
+
+    #[test]
+    fn log_page_owns_wrap_visual_yank_overlays_do_not() {
+        let app = app_with_focus(Focus::LogList);
+        let log = page_entries(&app, HelpPage::Log);
+        let labels: Vec<&str> = log.iter().map(|e| e.label).collect();
+        assert!(labels.contains(&"wrap"), "{labels:?}");
+        assert!(labels.contains(&"visual"), "{labels:?}");
+        assert!(labels.contains(&"yank msg"), "{labels:?}");
+        assert!(labels.contains(&"yank field"), "{labels:?}");
+        let overlays = page_entries(&app, HelpPage::Overlays);
+        let overlay_labels: Vec<&str> = overlays.iter().map(|e| e.label).collect();
+        assert!(
+            !overlay_labels.contains(&"wrap") && !overlay_labels.contains(&"visual"),
+            "{overlay_labels:?}"
+        );
+        let session = page_entries(&app, HelpPage::Session);
+        assert!(
+            session.iter().any(|e| e.label == "bookmarks"),
+            "{session:?}"
+        );
+    }
+
+    #[test]
+    fn search_chip_is_ignore_case_substring() {
+        let app = app_with_focus(Focus::LogList);
+        let hits = search_help_hits(&app, "CHIP");
+        assert!(!hits.is_empty(), "expected substring hits for CHIP");
+        assert!(hits.iter().any(|h| {
+            let text = if let Some(page) = h.page {
+                page_doc_lines(&app, page)[h.line].text.clone()
+            } else {
+                home_doc_lines(&app)[h.line].text.clone()
+            };
+            text[h.start..h.end].eq_ignore_ascii_case("chip")
+        }));
     }
 
     #[test]
@@ -1530,19 +2013,15 @@ move_down = "Down"
                 .any(|e| e.key == "C-p" && e.label == "palette"),
             "LogList Active must list C-p palette: {entries:?}"
         );
-        let body: String = help_body_lines(&app)
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let overlay = joined_lines(
+            &page_doc_lines(&app, HelpPage::Overlays)
+                .into_iter()
+                .map(|l| l.line)
+                .collect::<Vec<_>>(),
+        );
         assert!(
-            body.contains("open command palette") || body.contains("C-p"),
-            "Help catalog must mention the palette binding: {body}"
+            overlay.contains("open command palette") || overlay.contains("C-p"),
+            "Overlays page must mention the palette binding: {overlay}"
         );
         let idle = status_hint_entries(&app);
         let labels: Vec<&str> = idle.iter().map(|e| e.label).collect();
@@ -1561,5 +2040,13 @@ move_down = "Down"
             "{labels:?}"
         );
         assert!(!labels.contains(&"help") || labels.len() > 2);
+    }
+
+    #[test]
+    fn page_max_scroll_keeps_last_line_at_bottom() {
+        assert_eq!(page_max_scroll(10, 20), 0);
+        assert_eq!(page_max_scroll(25, 10), 15);
+        assert_eq!(page_max_scroll(1, 1), 0);
+        assert_eq!(page_max_scroll(8, 0), 7);
     }
 }

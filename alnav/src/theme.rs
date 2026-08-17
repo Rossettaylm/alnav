@@ -852,6 +852,16 @@ pub fn help_section_style(active: bool) -> Style {
     }
 }
 
+/// Substring hit inside the Help panel (non-current).
+pub fn help_search_hit_style() -> Style {
+    highlight_style(0)
+}
+
+/// Current Help search hit (same ramp slot, underlined).
+pub fn help_search_current_style() -> Style {
+    highlight_style_active(0)
+}
+
 /// Faint search-hit highlight inside the H1 Preview window (distinct from
 /// formal [`highlight_style`] chips).
 pub fn preview_highlight_style() -> Style {

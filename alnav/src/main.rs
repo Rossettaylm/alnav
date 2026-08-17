@@ -974,9 +974,8 @@ fn run<B: ratatui::backend::Backend>(
                         hw_cursor = ui::render_command_palette(app, frame, frame_area);
                     } else if app.help_open {
                         let content_rows = crate::help::help_body_lines(app).len().max(1);
-                        let h = ui::help_modal_height(frame_area, content_rows);
-                        let area = ui::top_modal_rect(frame_area, modal_w.max(56), h);
-                        ui::render_help_panel(app, frame, area);
+                        let area = ui::help_modal_rect(frame_area, modal_w.max(56), content_rows);
+                        hw_cursor = ui::render_help_panel(app, frame, area);
                     } else if app.detail_open() {
                         let inner_w = modal_w.saturating_sub(2).max(1);
                         let content_rows = ui::detail_content_lines(app, inner_w).len().max(1);
@@ -1888,11 +1887,11 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                 }
             },
             PickerKind::Bookmark => {
-                // Bookmark panel (F2): Tab no-op, Ctrl-X flash, Delete/Ctrl-Backspace delete,
+                // Bookmark panel (F2): Tab no-op, Ctrl-X flash, Delete/Ctrl-D delete,
                 // Enter jump-to-row + close + focus LogList.
                 let vis = bookmark_visible_indices(app);
                 let is_delete = matches!(key.code, KeyCode::Delete)
-                    || (matches!(key.code, KeyCode::Backspace) && ctrl);
+                    || (matches!(key.code, KeyCode::Char('d')) && ctrl);
                 match key.code {
                     KeyCode::Up => {
                         app.picker.as_mut().unwrap().selected =
@@ -1940,7 +1939,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
             PickerKind::Preset => {
                 let vis = preset_visible_indices(app);
                 let is_delete = matches!(key.code, KeyCode::Delete)
-                    || (matches!(key.code, KeyCode::Backspace) && ctrl);
+                    || (matches!(key.code, KeyCode::Char('d')) && ctrl);
                 match key.code {
                     KeyCode::Up => {
                         app.picker.as_mut().unwrap().selected =
@@ -1989,7 +1988,7 @@ fn handle_picker_key(app: &mut App, key: event::KeyEvent) {
                 // Unified panel (Filter/Highlight/Exclude).
                 let ids = unified_visible_ids(app);
                 let is_delete = matches!(key.code, KeyCode::Delete)
-                    || (matches!(key.code, KeyCode::Backspace) && ctrl);
+                    || (matches!(key.code, KeyCode::Char('d')) && ctrl);
                 match key.code {
                     KeyCode::Up => {
                         app.picker.as_mut().unwrap().selected =
@@ -2636,7 +2635,8 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
     false
 }
 
-/// Read-only Help panel keys. Esc / `?` / Ctrl+C close without resuming follow.
+/// Read-only Help panel keys. Esc / `?` / Ctrl+C close without resuming follow
+/// except Esc while searching, which clears search first.
 fn handle_help_key(app: &mut App, key: event::KeyEvent) {
     use keymap::ActionId;
     let ctrl = key.modifiers.contains(event::KeyModifiers::CONTROL);
@@ -2644,9 +2644,82 @@ fn handle_help_key(app: &mut App, key: event::KeyEvent) {
         app.close_help();
         return;
     }
-    if km_event(app, ActionId::HelpClose, key) || km_event(app, ActionId::HelpToggle, key) {
+    if km_event(app, ActionId::HelpToggle, key) {
         app.close_help();
-    } else if km_event(app, ActionId::HelpScrollDown, key) || key.code == KeyCode::Down {
+        return;
+    }
+
+    if app.help_search_prompting() {
+        if km_event(app, ActionId::HelpClose, key) || key.code == KeyCode::Esc {
+            app.help_clear_search();
+            return;
+        }
+        if km_event(app, ActionId::HelpSubmit, key) || key.code == KeyCode::Enter {
+            app.help_commit_search();
+            return;
+        }
+        if key.code == KeyCode::Up {
+            app.help_search_step_prompt(-1);
+            return;
+        }
+        if key.code == KeyCode::Down {
+            app.help_search_step_prompt(1);
+            return;
+        }
+        let edited = if let Some(search) = app.help_search.as_mut() {
+            apply_text_field_key(&mut search.query, key.code, ctrl)
+        } else {
+            false
+        };
+        if edited {
+            app.help_on_query_edit();
+        }
+        return;
+    }
+
+    if km_event(app, ActionId::HelpClose, key) {
+        if app.help_search.as_ref().is_some_and(|s| s.has_hits()) {
+            app.help_clear_search();
+        } else {
+            app.close_help();
+        }
+        return;
+    }
+
+    if let KeyCode::Char(c) = key.code {
+        if !ctrl {
+            if let Some(page) = crate::help::HelpPage::from_digit(c) {
+                app.help_open_page(page);
+                return;
+            }
+        }
+    }
+
+    if km_event(app, ActionId::HelpSearch, key) {
+        app.help_begin_search();
+        return;
+    }
+    if km_event(app, ActionId::HelpSearchNext, key) {
+        app.help_search_step(1);
+        return;
+    }
+    if km_event(app, ActionId::HelpSearchPrev, key) {
+        app.help_search_step(-1);
+        return;
+    }
+    if km_event(app, ActionId::HelpBack, key) || km_event(app, ActionId::HelpBackAlt, key) {
+        app.help_pop_to_home();
+        return;
+    }
+    if km_event(app, ActionId::HelpSubmit, key) {
+        if let crate::help::HelpView::Home { toc, .. } = app.help_view {
+            if let Some(page) = crate::help::HelpPage::from_index(toc) {
+                app.help_open_page(page);
+            }
+        }
+        return;
+    }
+    if km_event(app, ActionId::HelpScrollDown, key) || key.code == KeyCode::Down {
         app.scroll_help(1);
     } else if km_event(app, ActionId::HelpScrollUp, key) || key.code == KeyCode::Up {
         app.scroll_help(-1);
@@ -2655,10 +2728,9 @@ fn handle_help_key(app: &mut App, key: event::KeyEvent) {
     } else if km_event(app, ActionId::HelpJumpUp, key) {
         app.scroll_help(-FAST_SCROLL_STEP);
     } else if km_event(app, ActionId::HelpBottom, key) {
-        let n = crate::help::help_body_lines(app).len();
-        app.help_scroll = n.saturating_sub(1);
+        app.help_scroll_bottom();
     } else if km_event(app, ActionId::HelpTop, key) {
-        app.help_scroll = 0;
+        app.help_scroll_top();
     }
 }
 
@@ -3494,22 +3566,44 @@ mod dispatch_tests {
         let mut input = input::InputBox::default();
         handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
         assert!(app.help_open);
-        let body_len = crate::help::help_body_lines(&app).len();
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE),
+        );
+        let body_len = crate::help::page_doc_lines(&app, crate::help::HelpPage::Log).len();
         assert!(
             body_len > FAST_SCROLL_STEP as usize,
-            "help body needs more than {FAST_SCROLL_STEP} lines, got {body_len}"
+            "log help page needs more than {FAST_SCROLL_STEP} lines, got {body_len}"
         );
-        assert_eq!(app.help_scroll, 0);
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Log,
+                scroll: 0
+            }
+        ));
         handle_help_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE),
         );
-        assert_eq!(app.help_scroll, FAST_SCROLL_STEP as usize);
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Log,
+                scroll: 7
+            }
+        ));
         handle_help_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE),
         );
-        assert_eq!(app.help_scroll, 0);
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Log,
+                scroll: 0
+            }
+        ));
     }
 
     #[test]
@@ -3521,14 +3615,30 @@ mod dispatch_tests {
         assert!(app.help_open);
         handle_help_key(
             &mut app,
+            KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE),
+        );
+        handle_help_key(
+            &mut app,
             KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
         );
-        assert_eq!(app.help_scroll, 1);
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Log,
+                scroll: 1
+            }
+        ));
         handle_help_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
         );
-        assert_eq!(app.help_scroll, 0);
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Log,
+                scroll: 0
+            }
+        ));
         handle_help_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
@@ -3538,6 +3648,223 @@ mod dispatch_tests {
             !app.following,
             "closing help with ? must not resume following"
         );
+    }
+
+    #[test]
+    fn help_h_backs_to_home_esc_closes() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Exclude,
+                ..
+            }
+        ));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(app.help_view, crate::help::HelpView::Home { toc: 1, .. }),
+            "{:?}",
+            app.help_view
+        );
+        assert!(app.help_open);
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+        );
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(app.help_view, crate::help::HelpView::Home { toc: 1, .. }),
+            "{:?}",
+            app.help_view
+        );
+        handle_help_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn help_home_h_is_noop() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        );
+        assert!(app.help_open);
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Home { toc: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn help_digit_jumps_across_pages() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Filter,
+                ..
+            }
+        ));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Overlays,
+                scroll: 0
+            }
+        ));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Overlays,
+                scroll: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn help_enter_opens_preselected_exclude() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.focus = app::Focus::ExcludeStrip;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Home { toc: 1, .. }
+        ));
+        handle_help_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.help_view,
+            crate::help::HelpView::Page {
+                id: crate::help::HelpPage::Exclude,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn help_search_prompt_k_types_and_esc_clears() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        assert!(app.help_search_prompting());
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.help_search.as_ref().map(|s| s.query.as_str()),
+            Some("k")
+        );
+        handle_help_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.help_open);
+        assert!(app.help_search.is_none());
+        handle_help_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn help_search_empty_enter_clears() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        handle_help_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.help_open);
+        assert!(app.help_search.is_none());
+    }
+
+    #[test]
+    fn help_search_n_walks_hits_and_ctrl_c_closes() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        app.following = false;
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        for c in ['c', 'h', 'i', 'p'] {
+            handle_help_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_help_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let search = app.help_search.as_ref().expect("committed search");
+        assert!(!search.prompt);
+        assert!(search.hits.len() >= 2, "chip should hit more than once");
+        let first = search.current;
+        let first_hit = search.hits[first].clone();
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
+        let search = app.help_search.as_ref().expect("hits kept");
+        assert_ne!(search.current, first);
+        assert_ne!(search.hits[search.current], first_hit);
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(!app.help_open);
+        assert!(!app.following);
+        assert!(app.help_search.is_none());
+    }
+
+    #[test]
+    fn help_search_no_match_flashes() {
+        let mut app = App::new(100);
+        let mut input = input::InputBox::default();
+        handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+        let view = app.help_view.clone();
+        handle_help_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        for c in ['~', '~', '~'] {
+            handle_help_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(app.status_msg.as_deref(), Some("NO MATCH"));
+        assert!(app.help_open);
+        assert_eq!(app.help_view, view);
     }
 
     #[test]
@@ -4003,6 +4330,15 @@ mod dispatch_tests {
         handle_picker_key(
             &mut app,
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+        );
+        assert!(
+            app.picker.as_ref().unwrap().confirm.is_none(),
+            "Ctrl-Backspace must not delete in Manage"
+        );
+
+        handle_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
         );
         handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.highlight_groups.groups.is_empty());
@@ -6433,7 +6769,7 @@ mod dispatch_tests {
 
     #[test]
     fn bookmark_panel_delete_confirms_and_deletes() {
-        // Delete / Ctrl-Backspace arms a DeleteBookmark confirm; confirming removes it.
+        // Delete / Ctrl-D arms a DeleteBookmark confirm; confirming removes it.
         let mut app = App::new(100);
         let mut input = input::InputBox::default();
         drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
@@ -6917,7 +7253,10 @@ mod dispatch_tests {
             &mut live,
             KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
         );
-        assert!(app.open_file_panel.as_ref().is_some_and(|p| p.from_dashboard));
+        assert!(app
+            .open_file_panel
+            .as_ref()
+            .is_some_and(|p| p.from_dashboard));
         assert!(app.stream_source_panel.is_none());
 
         handle_dashboard_key(
@@ -6926,11 +7265,10 @@ mod dispatch_tests {
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
         );
         assert!(app.open_file_panel.is_none());
-        assert!(
-            app.stream_source_panel
-                .as_ref()
-                .is_some_and(|p| p.from_dashboard)
-        );
+        assert!(app
+            .stream_source_panel
+            .as_ref()
+            .is_some_and(|p| p.from_dashboard));
     }
 
     #[test]

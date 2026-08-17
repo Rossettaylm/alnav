@@ -211,8 +211,8 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         LeaderPresetSave => app.begin_preset_save(),
         LeaderPresetOpen => app.begin_preset_open(),
         LeaderSummary => app.open_summary_panel(),
-        LeaderCancel | BookmarkCancel | LockCancel | TimeCancel | ChipFieldCancel
-        | YankCancel | StripDCancel | VisualCancel => apply_cancel(app, id),
+        LeaderCancel | BookmarkCancel | LockCancel | TimeCancel | ChipFieldCancel | YankCancel
+        | StripDCancel | VisualCancel => apply_cancel(app, id),
         BookmarkAdd => app.bookmark_add_current(),
         BookmarkRemove => app.bookmark_remove_current(),
         BookmarkManage => app.open_picker(PickerKind::Bookmark),
@@ -291,6 +291,12 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         | HelpJumpUp
         | HelpTop
         | HelpBottom
+        | HelpBack
+        | HelpBackAlt
+        | HelpSearch
+        | HelpSearchNext
+        | HelpSearchPrev
+        | HelpSubmit
         | PickerSubmit
         | PickerUp
         | PickerDown

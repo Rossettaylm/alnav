@@ -22,7 +22,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 | [Stream Visible + Live Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest ADB/HDC ring | Active |
 | [FileStore mmap](./file-store.md) | `-f` mmap + lazy parse + bg filter | Active |
 | [Async Vis Scans](./async-scans.md) | Highlight Inc / severe prefetch / LogList loading | Active |
-| [Status Bar + Help](./status-help.md) | English status bar, `?` Help, `FAST_SCROLL_STEP` | Active |
+| [Status Bar + Help](./status-help.md) | English status bar, two-level `?` Help + `/` search, `FAST_SCROLL_STEP` | Active |
 | [TUI UX Boosters](./tui-ux-boosters.md) | Crash detail (`P`), Summary panel (`Leader i`), disconnect icon, wrap toggle (`w`) | Active |
 | [TUI Theme System](./theme-system.md) | Palette-driven themes, `config.toml` `theme`, TUI-only (CLI keeps `logcolor`) | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Forbidden patterns, testing requirements | Active |
@@ -60,7 +60,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 - [ ] Command palette is not a `PickerSession`; empty query lists nothing; idle status has no third `C-p` hint.
 - [ ] Popup shells stay rounded; strips stay divider; confirm uses the same `picker_area` as the picker.
 - [ ] TUI paint goes through `theme::*` tokens (palette-mapped). CLI colored output stays on `alnav::logcolor`.
-- [ ] Status hints / Help copy stay in `help.rs` (`HintEntry`); Help Esc does not resume following; LogList/Help `J`/`K` share `FAST_SCROLL_STEP`.
+- [ ] Status hints / Help copy stay in `help.rs` (`HintEntry`); two-level Help (Home + 7 pages); Esc/`?`/Ctrl+C close without `resume_following`; `h`/Backspace back; LogList/Help `J`/`K` share `FAST_SCROLL_STEP`.
 - [ ] `cargo test -p alnav` green; `cargo fmt -p alnav --check` clean.
 
 ---

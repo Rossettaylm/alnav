@@ -37,7 +37,7 @@ alnav/src/
 ├── theme.rs        # UiTokens + style fns (mapped from Palette; CLI logcolor is separate)
 ├── bookmark.rs     # Bookmark/BookmarkList/JumpResult/label helpers
 ├── preset.rs       # Named Filter/Exclude/Highlight presets (`presets/*.toml`)
-├── help.rs         # HintEntry L1/L2 + Help catalog; FAST_SCROLL_STEP; help_available
+├── help.rs         # HintEntry L1/L2; two-level Help (Home+7 pages, `/` search); FAST_SCROLL_STEP
 ├── export.rs       # H10 yc CLI export (filters + lock + time_bound)
 ├── config.rs       # theme.toml overlay + config.toml (incl. theme =)
 ├── preview.rs      # H1 preview sampling (stream rows or file lazy parse)

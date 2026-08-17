@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/alnav/backend/index.md", "reason": "Quality Check: Help Esc does not resume following; FAST_SCROLL_STEP; cargo test -p alnav"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Help availability, English copy, close semantics vs new back/search"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Forbidden: Color in ui.rs, duplicate Help copy, resume on close_help, Picker reuse"}
+{"file": ".trellis/spec/alnav/backend/theme-system.md", "reason": "Search hit styles must be theme tokens"}
+{"file": ".trellis/spec/alnav/backend/command-palette.md", "reason": "Search prompt must not steal LogList / or reuse PickerSession"}

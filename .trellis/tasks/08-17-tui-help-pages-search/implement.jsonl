@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/alnav/backend/index.md", "reason": "Pre-Development Checklist + Quality Check for TUI Help/status work"}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Current Help open/close/scroll contracts this task replaces"}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "HintEntry-only copy, close_help must not resume following, modal Ctrl+C, no Color in ui.rs"}
+{"file": ".trellis/spec/alnav/backend/directory-structure.md", "reason": "help.rs / keymap vs action ownership; do not reuse Picker for Help search"}
+{"file": ".trellis/spec/alnav/backend/theme-system.md", "reason": "Help paint must go through theme tokens; search highlight wrappers"}
+{"file": ".trellis/spec/alnav/backend/command-palette.md", "reason": "TextField + vim-style prompt vs j/k typing; Help must not become a Picker"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse TextField, HintEntry, render_modal_shell instead of a third modal stack"}
