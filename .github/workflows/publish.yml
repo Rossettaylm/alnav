@@ -1,0 +1,93 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require CARGO_REGISTRY_TOKEN
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::Set repo secret CARGO_REGISTRY_TOKEN (crates.io API token). Do not skip publish."
+            exit 1
+          fi
+
+      - name: Match tag to Cargo.toml + CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash .agents/skills/alnav-publish/scripts/preflight.sh "$VERSION"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Publish crates.io (core then alnav)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          UA="alnav-publish (https://github.com/Rossettaylm/alnav)"
+
+          crate_has_version() {
+            local crate="$1" ver="$2" code
+            code="$(curl -sS -A "$UA" -o /dev/null -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/${crate}/${ver}")"
+            [ "$code" = "200" ]
+          }
+
+          publish_pkg() {
+            local pkg="$1"
+            if crate_has_version "$pkg" "$VERSION"; then
+              echo "$pkg $VERSION already on crates.io, skip"
+              return 0
+            fi
+            cargo publish -p "$pkg" --locked
+          }
+
+          publish_pkg alnav-core
+
+          if crate_has_version alnav "$VERSION"; then
+            echo "alnav $VERSION already on crates.io, skip"
+          else
+            ok=0
+            for i in $(seq 1 12); do
+              if cargo publish -p alnav --locked; then
+                ok=1
+                break
+              fi
+              echo "alnav publish attempt $i failed (index lag?); retry in 30s"
+              sleep 30
+            done
+            [ "$ok" = "1" ]
+          fi
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          NOTES="$(bash .agents/skills/alnav-publish/scripts/changelog-notes.sh "$VERSION")"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists, skip create"
+          else
+            gh release create "$TAG" --title "$TAG" --notes "$NOTES"
+          fi
