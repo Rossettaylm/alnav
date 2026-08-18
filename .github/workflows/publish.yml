@@ -28,7 +28,7 @@ jobs:
       - name: Match tag to Cargo.toml + CHANGELOG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          bash .agents/skills/alnav-publish/scripts/preflight.sh "$VERSION"
+          bash .github/scripts/preflight.sh "$VERSION"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -85,7 +85,7 @@ jobs:
           set -euo pipefail
           TAG="$GITHUB_REF_NAME"
           VERSION="${TAG#v}"
-          NOTES="$(bash .agents/skills/alnav-publish/scripts/changelog-notes.sh "$VERSION")"
+          NOTES="$(bash .github/scripts/changelog-notes.sh "$VERSION")"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "GitHub Release $TAG already exists, skip create"
           else
