@@ -1,6 +1,6 @@
 [package]
 name = "alnav"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "App/Android Log Navigator — interactive TUI (default) and CLI (`alnav grep`)"
 license = "MIT"
@@ -35,7 +35,7 @@ test = false
 bench = false
 
 [dependencies]
-alnav-core = { path = "../alnav-core", version = "0.2.3" }
+alnav-core = { path = "../alnav-core", version = "0.2.4" }
 arboard = "3"
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"

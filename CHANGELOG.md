@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4 — 2026-08-18
+
+- Two-level Help (`?`): Home plus seven zone pages, design contracts, and ignore-case `/` search.
+- Command palette on `C-p` from LogList and Filter / Exclude / Highlight strips.
+- Severe (E/F/crash) tag and message use theme error red; Open File / Stream on `C-f` / `C-g`.
+- Status bar reweighted toward resident follow and device state; remaining chrome copy in English.
+- Live disconnect indicator is a single-cell plug.
+- Pushing a `v*` tag publishes `alnav-core` then `alnav` to crates.io and opens a GitHub Release.
+- loggrep-analyzer skill retargeted at `alnav grep`.
+
 ## 0.2.3 — 2026-08-13
 
 - Dual-language README: English default (`README.md`) with a title link to [中文](README.zh.md).

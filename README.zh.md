@@ -87,7 +87,7 @@ alnav grep -f app.log --crashes
 alnav grep --help
 ```
 
-TUI 内 `yc` 可将当前过滤导出为一行 `alnav grep …`。
+TUI 内 `?` 打开 Help，`C-p` 打开命令面板，`yc` 将当前过滤导出为一行 `alnav grep …`。
 
 ## 为什么不只用 grep
 

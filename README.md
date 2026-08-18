@@ -87,7 +87,7 @@ alnav grep -f app.log --crashes
 alnav grep --help
 ```
 
-In the TUI, `yc` exports the current filter as one `alnav grep …` command.
+In the TUI, `?` opens Help, `C-p` the command palette, and `yc` exports the current filter as one `alnav grep …` command.
 
 ## Why not grep
 
