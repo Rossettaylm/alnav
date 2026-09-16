@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/alnav/backend/index.md", "reason": "Pre-dev checklist; new session-restore spec must be linked here."}
+{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "Exact wire fields to persist: groups/excludes/lock/time_bound/view_focus; Group has no time field."}
+{"file": ".trellis/spec/alnav/backend/file-store.md", "reason": "File mmap + background line index + async filter scan drive the deferred-cursor design."}
+{"file": ".trellis/spec/alnav/backend/directory-structure.md", "reason": "Where session.rs belongs; ActionStore/palette ownership for Clear Session."}
+{"file": ".trellis/spec/alnav/backend/command-palette.md", "reason": "Adding an ActionId requires meta + PALETTE_IDS + toml-key resolver + when/dispatch."}
+{"file": ".trellis/spec/alnav/backend/theme-system.md", "reason": "No Color::* in ui.rs; flash/pill tokens come from theme.rs only."}
+{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "Flash strings stay English and set_flash is overwrite-semantics, not a queue."}
+{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Forbidden patterns, test requirements, no new deps without justification."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Restore spans config load, source binding, App state, AppConfig, and teardown."}
