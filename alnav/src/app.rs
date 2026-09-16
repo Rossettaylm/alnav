@@ -478,6 +478,17 @@ pub struct App {
     hist_restore_key: Option<String>,
     hist_tx: std::sync::mpsc::Sender<HistJobMsg>,
     hist_rx: std::sync::mpsc::Receiver<HistJobMsg>,
+    /// Restored `row_id` awaiting a resolvable visible slot. The File line index
+    /// and the filter scan both grow in the background, so the jump is applied in
+    /// [`Self::poll_file_store`] rather than at restore time.
+    pub pending_restore_cursor: Option<u64>,
+    /// `list_offset` to apply together with `pending_restore_cursor`.
+    pending_restore_offset: usize,
+    /// Suppresses session read **and** write for this process (R5): CLI filter
+    /// flags were passed, or `restore_session = false`.
+    pub session_restore_disabled: bool,
+    /// Set when a restore was actually applied (gates the `RESTORED` flash).
+    pub session_restored: bool,
 }
 
 #[derive(Debug, Default)]
@@ -572,6 +583,10 @@ impl App {
             hist_restore_key: None,
             hist_tx,
             hist_rx,
+            pending_restore_cursor: None,
+            pending_restore_offset: 0,
+            session_restore_disabled: false,
+            session_restored: false,
         }
     }
 
@@ -955,6 +970,10 @@ impl App {
         self.following = true;
         self.status_msg = None;
         self.status_flash_until = None;
+        // Session-scoped `session_restore_disabled` survives; only the transients reset.
+        self.pending_restore_cursor = None;
+        self.pending_restore_offset = 0;
+        self.session_restored = false;
         // Keep: groups / excludes / highlight_groups
     }
 
@@ -964,6 +983,149 @@ impl App {
         self.recent.record(path, limit);
         if let Err(e) = self.recent.save(&self.config_dir) {
             self.set_flash(format!("RECENT SAVE: {e}"));
+        }
+    }
+
+    /// Snapshot the analysis session for `source`.
+    ///
+    /// `None` when sessions are suppressed (R5) or the result is degenerate
+    /// (R6) — a degenerate snapshot must not overwrite a real archive.
+    /// `following` / `collapsed_view` / visual / modal state are never captured.
+    pub fn capture_session(&self, source: &std::path::Path) -> Option<crate::session::SessionFile> {
+        if self.session_restore_disabled {
+            return None;
+        }
+        let key = crate::session::normalize_source(source)?;
+        let mut file = crate::session::SessionFile::new(key);
+        file.filters = self
+            .groups
+            .groups
+            .iter()
+            .filter(|g| !g.chips.is_empty())
+            .map(|g| crate::session::SessionFilterGroup {
+                chips: g.chips.iter().map(crate::session::chip_to_wire).collect(),
+                enabled: g.enabled,
+                same_field_op: crate::session::same_field_op_to_wire(g.same_field_op),
+            })
+            .collect();
+        file.excludes = self
+            .groups
+            .excludes
+            .iter()
+            .map(|e| crate::session::SessionFilterGroup {
+                chips: vec![crate::session::chip_to_wire(&e.chip)],
+                enabled: e.enabled,
+                same_field_op: crate::session::same_field_op_to_wire(
+                    crate::fuzzy::SameFieldOp::And,
+                ),
+            })
+            .collect();
+        file.highlights = self
+            .highlight_groups
+            .groups
+            .iter()
+            .filter(|g| !g.pattern.is_empty())
+            .map(|g| crate::session::SessionHighlight {
+                pattern: g.pattern.clone(),
+                enabled: g.enabled,
+            })
+            .collect();
+        file.active_highlight = self.active_highlight.filter(|i| *i < file.highlights.len());
+        file.lock_pid = self.lock_pid.clone();
+        file.lock_tid = self.lock_tid.clone();
+        if let Some(bound) = &self.time_bound {
+            file.time_since = bound.since.clone();
+            file.time_until = bound.until.clone();
+        }
+        file.view_focus_highlight = self.view_focus.highlight;
+        file.view_focus_severe = self.view_focus.severe;
+        // The stable id, not `self.cursor` (a visible-slot index that shifts
+        // with the filter). File mode: `row_id == line_index + 1`.
+        file.cursor_row_id = self.current_row().map(|r| r.row_id).unwrap_or(0);
+        file.list_offset = self.list_offset;
+        file.bookmarks = self
+            .bookmarks
+            .items
+            .iter()
+            .map(|b| crate::session::SessionBookmark {
+                row_id: b.row_id(),
+                raw: b.row.raw.clone(),
+            })
+            .collect();
+        if file.is_degenerate() {
+            return None;
+        }
+        Some(file)
+    }
+
+    /// Apply a loaded session. Rules / time / lock / focus / pins land now; the
+    /// cursor is deferred to [`Self::poll_file_store`] (R7).
+    pub fn apply_session(&mut self, s: &crate::session::SessionFile) -> Result<(), String> {
+        let (groups, highlights, active) = crate::session::materialize_rules(s)?;
+        self.groups = groups;
+        self.highlight_groups = highlights;
+        self.active_highlight = active;
+        self.lock_pid = s.lock_pid.clone();
+        // pid/tid lock is mutually exclusive; a hand-edited file keeps pid.
+        self.lock_tid = if self.lock_pid.is_some() {
+            None
+        } else {
+            s.lock_tid.clone()
+        };
+        self.time_bound = s.time_bound();
+        self.view_focus = ViewFocus {
+            highlight: s.view_focus_highlight,
+            severe: s.view_focus_severe,
+        };
+        self.bookmarks.clear();
+        self.bookmark_row_ids.clear();
+        for bm in &s.bookmarks {
+            let mut row = EntryRow::from_line_or_raw(&bm.raw);
+            row.row_id = bm.row_id;
+            row.severe = is_severe_row(&row);
+            if self.bookmarks.try_add(Bookmark::from_row(row)).is_ok() {
+                self.bookmark_row_ids.insert(bm.row_id);
+            }
+        }
+        if s.cursor_row_id > 0 {
+            self.pending_restore_cursor = Some(s.cursor_row_id);
+            self.pending_restore_offset = s.list_offset;
+        }
+        self.following = false;
+        self.match_stats_stale = true;
+        Ok(())
+    }
+
+    /// Whether the current file has an archive that `Clear Session` could delete.
+    pub fn has_session_worth_clearing(&self) -> bool {
+        if self.session_restore_disabled {
+            return false;
+        }
+        match &self.export_source {
+            crate::export::ExportSource::File(p) if !p.is_empty() => {
+                crate::session::exists(&self.config_dir, std::path::Path::new(p))
+            }
+            _ => false,
+        }
+    }
+
+    /// Palette `Clear Session`: delete the current file's archive.
+    pub fn clear_session_for_current_file(&mut self) {
+        let crate::export::ExportSource::File(path) = self.export_source.clone() else {
+            return;
+        };
+        if path.is_empty() {
+            self.set_flash("NO SESSION");
+            return;
+        }
+        let path = std::path::PathBuf::from(path);
+        if !crate::session::exists(&self.config_dir, &path) {
+            self.set_flash("NO SESSION");
+            return;
+        }
+        match crate::session::clear(&self.config_dir, &path) {
+            Ok(()) => self.set_flash("SESSION CLEARED"),
+            Err(e) => self.set_flash(format!("SESSION CLEAR FAILED: {e}")),
         }
     }
 
@@ -1932,6 +2094,48 @@ impl App {
                 self.ingest_done = true;
             }
         }
+        self.try_pending_restore_cursor();
+    }
+
+    /// Apply a restored cursor once its `row_id` resolves to a visible slot.
+    ///
+    /// `visible` can be non-empty while the line index still covers only a
+    /// prefix of the file, so "first non-empty" is not a safe trigger: a
+    /// mid-file `row_id` would resolve to `None` and the restore would be lost.
+    /// Consume on success instead, and give up only once both scans have
+    /// settled (the row is genuinely gone — file shrank or rotated, R8).
+    ///
+    /// `index_done` alone is not enough: a restored filter leaves `visible` an
+    /// empty `Subset` until the (much slower) filter scan reports hits, and the
+    /// index almost always finishes first. `ingest_done` is read instead of
+    /// `FileStore::progress().filter_done` because it is set from the drained
+    /// `FilterDone` event, which the FIFO channel guarantees arrives after every
+    /// `FilterBatch` — the raw flag can flip while a final batch is still queued.
+    fn try_pending_restore_cursor(&mut self) {
+        let Some(row_id) = self.pending_restore_cursor else {
+            return;
+        };
+        match self.visible_idx_for_row_id(row_id) {
+            Some(idx) => {
+                self.pending_restore_cursor = None;
+                self.cursor = idx;
+                self.list_offset = self.pending_restore_offset.min(self.cursor);
+                self.pending_restore_offset = 0;
+                self.match_stats_stale = true;
+            }
+            None if self.file_index_done() && self.ingest_done => {
+                self.pending_restore_cursor = None;
+                self.pending_restore_offset = 0;
+                self.cursor = 0;
+                self.list_offset = 0;
+            }
+            None => {}
+        }
+    }
+
+    /// Whether the File line index finished. Always false for Stream.
+    pub fn file_index_done(&self) -> bool {
+        self.store.as_file().is_some_and(|f| f.index_done())
     }
 
     fn try_pending_jump_first(&mut self) {
@@ -6086,5 +6290,291 @@ mod file_store_tests {
         assert_eq!(report.top_tags.len(), 5);
         assert!(report.levels.get(&'I').copied().unwrap_or(0) > 0);
         assert!(report.levels.get(&'E').copied().unwrap_or(0) > 0);
+    }
+
+    // ---- File session restore (09-15-file-session-restore) ----
+
+    fn session_file_app(body: &str) -> (App, tempfile::NamedTempFile, tempfile::TempDir) {
+        let f = write_temp(body);
+        let cfg = tempfile::tempdir().unwrap();
+        let mut app = App::new(100);
+        app.config_dir = cfg.path().to_path_buf();
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        (app, f, cfg)
+    }
+
+    fn five_line_body() -> String {
+        let mut body = String::new();
+        for i in 0..5 {
+            body.push_str(&format!(
+                "04-02 10:00:0{i}.000  100  200 I Tag{i}   : line{i}\n"
+            ));
+        }
+        body
+    }
+
+    fn chip(field: crate::input::ChipField, value: &str) -> crate::input::Chip {
+        crate::input::Chip {
+            field,
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn capture_apply_roundtrip_preserves_every_persisted_field() {
+        let (mut app, f, _cfg) = session_file_app(&five_line_body());
+        let mut disabled = crate::input::build_group_from_chips(
+            vec![chip(crate::input::ChipField::Msg, "line9")],
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        disabled.enabled = false;
+        app.groups.groups.push(
+            crate::input::build_group_from_chips(
+                vec![chip(crate::input::ChipField::Tag, "Tag1")],
+                true,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        app.groups.groups.push(disabled);
+        app.groups
+            .push_exclude(chip(crate::input::ChipField::Tag, "Spam"))
+            .unwrap();
+        app.groups.excludes[0].enabled = false;
+        app.highlight_groups
+            .groups
+            .push(HighlightGroup::from_pattern("boom").unwrap());
+        app.highlight_groups.groups[0].enabled = false;
+        app.active_highlight = Some(0);
+        app.lock_pid = Some("100".into());
+        app.time_bound = Some(TimeBound {
+            since: Some("10:00:01".into()),
+            until: None,
+        });
+        app.view_focus = ViewFocus {
+            highlight: false,
+            severe: true,
+        };
+        app.cursor = 3;
+        app.list_offset = 2;
+        let pinned_id = app.current_row().unwrap().row_id;
+        app.bookmark_add_current();
+
+        let snap = app.capture_session(f.path()).expect("active session");
+        assert_eq!(snap.filters.len(), 2);
+        assert!(snap.filters[0].enabled);
+        assert!(!snap.filters[1].enabled, "disabled group must round-trip");
+        assert_eq!(snap.excludes.len(), 1);
+        assert!(!snap.excludes[0].enabled);
+        assert_eq!(snap.highlights.len(), 1);
+        assert!(!snap.highlights[0].enabled);
+        assert_eq!(snap.active_highlight, Some(0));
+        assert_eq!(snap.lock_pid.as_deref(), Some("100"));
+        assert_eq!(snap.time_since.as_deref(), Some("10:00:01"));
+        assert!(snap.view_focus_severe);
+        assert_eq!(snap.cursor_row_id, pinned_id);
+        assert_eq!(snap.list_offset, 2);
+        assert_eq!(snap.bookmarks.len(), 1);
+
+        let (mut fresh, _f2, _cfg2) = session_file_app(&five_line_body());
+        fresh.apply_session(&snap).unwrap();
+        assert_eq!(fresh.groups.groups.len(), 2);
+        assert!(fresh.groups.groups[0].enabled);
+        assert!(!fresh.groups.groups[1].enabled);
+        assert_eq!(fresh.groups.excludes.len(), 1);
+        assert!(!fresh.groups.excludes[0].enabled);
+        assert_eq!(fresh.highlight_groups.groups.len(), 1);
+        assert!(!fresh.highlight_groups.groups[0].enabled);
+        assert_eq!(fresh.active_highlight, Some(0));
+        assert_eq!(fresh.lock_pid.as_deref(), Some("100"));
+        assert!(fresh.time_bound.as_ref().unwrap().is_active());
+        assert!(fresh.view_focus.severe);
+        assert_eq!(fresh.bookmarks.len(), 1);
+        assert!(fresh.bookmark_row_ids.contains(&pinned_id));
+        assert_eq!(fresh.pending_restore_cursor, Some(pinned_id));
+        assert!(!fresh.following, "restore must not leave following on");
+    }
+
+    #[test]
+    fn capture_returns_none_for_degenerate_and_disabled() {
+        let (mut app, f, _cfg) = session_file_app(&five_line_body());
+        app.cursor = 0;
+        assert!(
+            app.capture_session(f.path()).is_none(),
+            "no rules / no pins / top cursor is degenerate"
+        );
+
+        app.groups.groups.push(
+            crate::input::build_group_from_chips(
+                vec![chip(crate::input::ChipField::Tag, "Tag1")],
+                true,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        assert!(app.capture_session(f.path()).is_some());
+
+        app.session_restore_disabled = true;
+        assert!(
+            app.capture_session(f.path()).is_none(),
+            "R5 suppression blocks writes too"
+        );
+    }
+
+    #[test]
+    fn apply_session_drops_lock_tid_when_pid_also_set() {
+        let (mut app, _f, _cfg) = session_file_app(&five_line_body());
+        let mut snap = crate::session::SessionFile::new("/tmp/a.log".into());
+        snap.lock_pid = Some("100".into());
+        snap.lock_tid = Some("200".into());
+        snap.cursor_row_id = 2;
+        app.apply_session(&snap).unwrap();
+        assert_eq!(app.lock_pid.as_deref(), Some("100"));
+        assert_eq!(app.lock_tid, None, "lock pid/tid are mutually exclusive");
+    }
+
+    #[test]
+    fn apply_session_clamps_out_of_range_active_highlight() {
+        let (mut app, _f, _cfg) = session_file_app(&five_line_body());
+        let mut snap = crate::session::SessionFile::new("/tmp/a.log".into());
+        snap.highlights = vec![crate::session::SessionHighlight {
+            pattern: "boom".into(),
+            enabled: true,
+        }];
+        snap.active_highlight = Some(7);
+        app.apply_session(&snap).unwrap();
+        assert_eq!(app.active_highlight, None);
+    }
+
+    #[test]
+    fn apply_session_caps_bookmarks_and_syncs_row_id_cache() {
+        let (mut app, _f, _cfg) = session_file_app(&five_line_body());
+        let mut snap = crate::session::SessionFile::new("/tmp/a.log".into());
+        snap.bookmarks = (1..=(crate::bookmark::BOOKMARK_SOFT_CAP as u64 + 4))
+            .map(|i| crate::session::SessionBookmark {
+                row_id: i,
+                raw: format!("04-02 10:00:00.000  1  1 I Tag   : line{i}"),
+            })
+            .collect();
+        app.apply_session(&snap).unwrap();
+        assert_eq!(app.bookmarks.len(), crate::bookmark::BOOKMARK_SOFT_CAP);
+        assert_eq!(
+            app.bookmark_row_ids.len(),
+            app.bookmarks.len(),
+            "row_id cache must stay in lockstep"
+        );
+    }
+
+    #[test]
+    fn deferred_cursor_lands_on_restored_row() {
+        let (mut app, _f, _cfg) = session_file_app(&five_line_body());
+        let mut snap = crate::session::SessionFile::new("/tmp/a.log".into());
+        snap.cursor_row_id = 4; // file mode: row_id == line_index + 1
+        snap.list_offset = 2;
+        app.apply_session(&snap).unwrap();
+        assert_eq!(app.pending_restore_cursor, Some(4));
+        app.poll_file_store();
+        assert_eq!(app.pending_restore_cursor, None);
+        assert_eq!(app.cursor, 3);
+        assert_eq!(app.list_offset, 2);
+    }
+
+    #[test]
+    fn deferred_cursor_degrades_to_top_when_row_is_gone() {
+        let (mut app, _f, _cfg) = session_file_app(&five_line_body());
+        let mut snap = crate::session::SessionFile::new("/tmp/a.log".into());
+        snap.cursor_row_id = 9_999; // beyond the 5-line file (R8)
+        snap.list_offset = 3;
+        app.apply_session(&snap).unwrap();
+        assert!(app.file_index_done(), "open_sync completes the index");
+        app.poll_file_store();
+        assert_eq!(app.pending_restore_cursor, None);
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.list_offset, 0);
+    }
+
+    #[test]
+    fn deferred_cursor_waits_for_an_in_flight_filter_scan() {
+        let (mut app, _f, _cfg) = session_file_app(&five_line_body());
+        app.groups.groups.push(
+            crate::input::build_group_from_chips(
+                vec![chip(crate::input::ChipField::Tag, "Tag3")],
+                true,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        assert!(app.filter_active());
+        // Index done (open_sync) but the filter scan has not reported hits yet:
+        // `visible` is legitimately an empty Subset here.
+        app.pending_restore_cursor = Some(4);
+        app.visible = Visible::Subset(Vec::new());
+        app.ingest_done = false;
+        app.poll_file_store();
+        assert_eq!(
+            app.pending_restore_cursor,
+            Some(4),
+            "must not give up while the filter scan is still settling"
+        );
+
+        // Scan settled without the row → only now degrade to the top (R8).
+        app.ingest_done = true;
+        app.poll_file_store();
+        assert_eq!(app.pending_restore_cursor, None);
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn clear_session_flashes_and_removes_archive() {
+        let (mut app, f, _cfg) = session_file_app(&five_line_body());
+        assert!(!app.has_session_worth_clearing());
+        app.clear_session_for_current_file();
+        assert_eq!(app.status_msg.as_deref(), Some("NO SESSION"));
+
+        let mut snap =
+            crate::session::SessionFile::new(crate::session::normalize_source(f.path()).unwrap());
+        snap.cursor_row_id = 3;
+        crate::session::save(&app.config_dir, f.path(), &snap).unwrap();
+        assert!(app.has_session_worth_clearing());
+
+        app.clear_session_for_current_file();
+        assert_eq!(app.status_msg.as_deref(), Some("SESSION CLEARED"));
+        assert!(!app.has_session_worth_clearing());
+    }
+
+    #[test]
+    fn has_session_worth_clearing_is_false_when_suppressed() {
+        let (mut app, f, _cfg) = session_file_app(&five_line_body());
+        let mut snap =
+            crate::session::SessionFile::new(crate::session::normalize_source(f.path()).unwrap());
+        snap.cursor_row_id = 3;
+        crate::session::save(&app.config_dir, f.path(), &snap).unwrap();
+        assert!(app.has_session_worth_clearing());
+        app.session_restore_disabled = true;
+        assert!(!app.has_session_worth_clearing());
+    }
+
+    #[test]
+    fn reset_for_source_switch_keeps_suppression_clears_transients() {
+        let (mut app, _f, _cfg) = session_file_app(&five_line_body());
+        app.session_restore_disabled = true;
+        app.session_restored = true;
+        app.pending_restore_cursor = Some(3);
+        app.reset_for_source_switch();
+        assert!(
+            app.session_restore_disabled,
+            "suppression is process-scoped, not per-source"
+        );
+        assert!(!app.session_restored);
+        assert_eq!(app.pending_restore_cursor, None);
+    }
+
+    #[test]
+    fn stream_store_never_reports_file_index_done() {
+        let app = App::new(100);
+        assert!(!app.file_index_done());
     }
 }

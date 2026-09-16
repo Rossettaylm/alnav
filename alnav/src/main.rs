@@ -22,6 +22,7 @@ mod preset;
 mod preview;
 mod recent;
 mod scan;
+mod session;
 mod source_panel;
 mod store;
 mod text_field;
@@ -297,6 +298,266 @@ mod tests {
     }
 
     #[test]
+    fn cli_filter_args_detected_per_flag() {
+        assert!(!cli_has_filter_args(&cli(&["-f", "a.log"])));
+        assert!(!cli_has_filter_args(&cli(&["-f", "a.log", "-i"])));
+        assert!(!cli_has_filter_args(&cli(&[
+            "-f",
+            "a.log",
+            "--max-lines",
+            "10"
+        ])));
+        for args in [
+            vec!["-f", "a.log", "--tag", "T"],
+            vec!["-f", "a.log", "--msg", "m"],
+            vec!["-f", "a.log", "--level", "E"],
+            vec!["-f", "a.log", "--pkg", "p"],
+            vec!["-f", "a.log", "--pid", "1"],
+            vec!["-f", "a.log", "--tid", "2"],
+            vec!["-f", "a.log", "--since", "10:00:00"],
+            vec!["-f", "a.log", "--until", "11:00:00"],
+        ] {
+            assert!(
+                cli_has_filter_args(&cli(&args)),
+                "expected suppression for {args:?}"
+            );
+        }
+    }
+
+    fn session_test_app(cfg: &std::path::Path, log: &std::path::Path) -> App {
+        let mut app = App::new(100);
+        app.config_dir = cfg.to_path_buf();
+        app.export_source = export::ExportSource::File(log.display().to_string());
+        app
+    }
+
+    fn filtered_snapshot(log: &std::path::Path) -> session::SessionFile {
+        let mut snap = session::SessionFile::new(session::normalize_source(log).unwrap());
+        snap.filters = vec![session::SessionFilterGroup {
+            chips: vec![session::SessionChip {
+                field: "tag".into(),
+                value: "Restored".into(),
+            }],
+            enabled: true,
+            same_field_op: "and".into(),
+        }];
+        snap.cursor_row_id = 3;
+        snap
+    }
+
+    #[test]
+    fn restore_session_applies_saved_rules() {
+        let cfg = tempfile::tempdir().unwrap();
+        let log = cfg.path().join("a.log");
+        std::fs::write(&log, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        let mut app = session_test_app(cfg.path(), &log);
+        session::save(&app.config_dir, &log, &filtered_snapshot(&log)).unwrap();
+
+        assert!(restore_session(&mut app, &log));
+        assert_eq!(app.groups.groups.len(), 1);
+        assert_eq!(app.groups.groups[0].chips[0].value, "Restored");
+        assert!(app.session_restored);
+    }
+
+    #[test]
+    fn restore_and_persist_are_both_skipped_when_disabled() {
+        let cfg = tempfile::tempdir().unwrap();
+        let log = cfg.path().join("a.log");
+        std::fs::write(&log, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        let mut app = session_test_app(cfg.path(), &log);
+        let original = filtered_snapshot(&log);
+        session::save(&app.config_dir, &log, &original).unwrap();
+        app.session_restore_disabled = true;
+
+        assert!(!restore_session(&mut app, &log));
+        assert!(app.groups.groups.is_empty(), "must not read the archive");
+
+        // A write attempt with different rules must leave the archive untouched.
+        app.groups
+            .push_exclude(input::Chip {
+                field: input::ChipField::Tag,
+                value: "Other".into(),
+            })
+            .unwrap();
+        persist_current_file(&app);
+        match session::load(&app.config_dir, &log) {
+            session::SessionLoad::Loaded(back) => assert_eq!(back, original),
+            other => panic!("archive must survive untouched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn degenerate_session_does_not_overwrite_existing_archive() {
+        let cfg = tempfile::tempdir().unwrap();
+        let log = cfg.path().join("a.log");
+        std::fs::write(&log, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        let app = session_test_app(cfg.path(), &log);
+        let original = filtered_snapshot(&log);
+        session::save(&app.config_dir, &log, &original).unwrap();
+
+        // Empty rules, no pins, cursor at top → R6 skips the write.
+        persist_current_file(&app);
+        match session::load(&app.config_dir, &log) {
+            session::SessionLoad::Loaded(back) => assert_eq!(back, original),
+            other => panic!("expected the original archive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn corrupt_archive_flashes_fallback_and_keeps_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let log = cfg.path().join("a.log");
+        std::fs::write(&log, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        let mut app = session_test_app(cfg.path(), &log);
+        let path = session::session_path(cfg.path(), &log);
+        std::fs::create_dir_all(session::sessions_dir(cfg.path())).unwrap();
+        std::fs::write(&path, "version = {{{").unwrap();
+
+        assert!(!restore_session(&mut app, &log));
+        let flash = app.status_msg.clone().unwrap_or_default();
+        assert!(flash.starts_with("SESSION fallback:"), "{flash}");
+        assert!(path.is_file(), "a corrupt archive is kept, not deleted");
+    }
+
+    #[test]
+    fn live_source_never_writes_a_session() {
+        let cfg = tempfile::tempdir().unwrap();
+        let mut app = App::new(100);
+        app.config_dir = cfg.path().to_path_buf();
+        app.export_source = export::ExportSource::Adb { device: None };
+        app.groups
+            .push_exclude(input::Chip {
+                field: input::ChipField::Tag,
+                value: "Spam".into(),
+            })
+            .unwrap();
+        persist_current_file(&app);
+        assert!(
+            !session::sessions_dir(cfg.path()).exists(),
+            "live sessions must not create the sessions dir"
+        );
+    }
+
+    #[test]
+    fn restored_label_summarizes_what_came_back() {
+        let cfg = tempfile::tempdir().unwrap();
+        let log = cfg.path().join("a.log");
+        std::fs::write(&log, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        let mut app = session_test_app(cfg.path(), &log);
+        let mut snap = filtered_snapshot(&log);
+        snap.time_since = Some("10:00:00".into());
+        snap.highlights = vec![session::SessionHighlight {
+            pattern: "boom".into(),
+            enabled: true,
+        }];
+        app.apply_session(&snap).unwrap();
+
+        let label = restored_label(&app);
+        assert!(label.starts_with("RESTORED"), "{label}");
+        assert!(label.contains("1 FILTER"), "{label}");
+        assert!(label.contains("1 HL"), "{label}");
+        assert!(label.contains("TIME"), "{label}");
+    }
+
+    #[test]
+    fn first_bind_restores_and_switch_bind_does_not() {
+        let cfg = tempfile::tempdir().unwrap();
+        let a = cfg.path().join("a.log");
+        let b = cfg.path().join("b.log");
+        std::fs::write(&a, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        std::fs::write(&b, "04-02 10:00:00.000 1 1 I T : y\n").unwrap();
+        let mut app = App::new(100);
+        app.config_dir = cfg.path().to_path_buf();
+        session::save(&app.config_dir, &a, &filtered_snapshot(&a)).unwrap();
+        // b.log gets a *distinct* archive so applying it would be observable.
+        let mut b_snap = session::SessionFile::new(session::normalize_source(&b).unwrap());
+        b_snap.lock_pid = Some("999".into());
+        b_snap.cursor_row_id = 2;
+        session::save(&app.config_dir, &b, &b_snap).unwrap();
+
+        bind_file_source(&mut app, &a.display().to_string(), false).unwrap();
+        assert_eq!(
+            app.groups.groups.len(),
+            1,
+            "first bind of the session restores"
+        );
+        assert!(app.session_restored);
+
+        // `C-f` mid-session must not apply b.log's archive. Note that
+        // `reset_for_source_switch` intentionally carries Filter/Exclude/Highlight
+        // across a switch, so the lock is the signal to assert on here.
+        bind_file_source(&mut app, &b.display().to_string(), true).unwrap();
+        assert_eq!(
+            app.lock_pid, None,
+            "switching binds must not restore the new file's session"
+        );
+        assert!(!app.session_restored);
+        assert_eq!(app.pending_restore_cursor, None);
+    }
+
+    #[test]
+    fn switching_away_persists_the_leaving_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let a = cfg.path().join("a.log");
+        let b = cfg.path().join("b.log");
+        std::fs::write(&a, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        std::fs::write(&b, "04-02 10:00:00.000 1 1 I T : y\n").unwrap();
+        let mut app = App::new(100);
+        app.config_dir = cfg.path().to_path_buf();
+
+        bind_file_source(&mut app, &a.display().to_string(), false).unwrap();
+        app.groups
+            .push_exclude(input::Chip {
+                field: input::ChipField::Tag,
+                value: "Spam".into(),
+            })
+            .unwrap();
+
+        bind_file_source(&mut app, &b.display().to_string(), true).unwrap();
+        match session::load(&app.config_dir, &a) {
+            session::SessionLoad::Loaded(back) => {
+                assert_eq!(back.excludes.len(), 1);
+                assert_eq!(back.excludes[0].chips[0].value, "Spam");
+            }
+            other => panic!("a.log session should have been saved, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                session::load(&app.config_dir, &b),
+                session::SessionLoad::Missing
+            ),
+            "b.log has no archive yet"
+        );
+    }
+
+    #[test]
+    fn switching_from_file_to_live_persists_the_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let a = cfg.path().join("a.log");
+        std::fs::write(&a, "04-02 10:00:00.000 1 1 I T : x\n").unwrap();
+        let mut app = App::new(100);
+        app.config_dir = cfg.path().to_path_buf();
+        bind_file_source(&mut app, &a.display().to_string(), false).unwrap();
+        app.groups
+            .push_exclude(input::Chip {
+                field: input::ChipField::Tag,
+                value: "Spam".into(),
+            })
+            .unwrap();
+
+        // `bind_live_source` spawns a device child, so exercise the persist hook
+        // it runs before `reset_for_source_switch` directly.
+        save_session_or_flash(&mut app);
+        app.reset_for_source_switch();
+        app.export_source = export::ExportSource::Adb { device: None };
+
+        match session::load(&app.config_dir, &a) {
+            session::SessionLoad::Loaded(back) => assert_eq!(back.excludes.len(), 1),
+            other => panic!("file session should persist on live switch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_initial_group_pid_only_label_contains_pid() {
         let c = cli(&["-f", "app.log", "--pid", "1234"]);
         let groups = initial_group(&c).unwrap();
@@ -505,6 +766,107 @@ fn spawn_live_ctl(backend: LiveBackend, device: Option<String>) -> Result<LiveIn
     ))
 }
 
+/// Whether any one-shot CLI filter flag was passed. Such a run is a command-line
+/// intent, not a curated session, so R5 suppresses both session read and write.
+/// `-i` (no-op in the TUI) and `--max-lines` do not count.
+fn cli_has_filter_args(cli: &TuiCli) -> bool {
+    !cli.tag.is_empty()
+        || !cli.msg.is_empty()
+        || !cli.pkg.is_empty()
+        || !cli.pid.is_empty()
+        || !cli.tid.is_empty()
+        || cli.level.is_some()
+        || cli.since.is_some()
+        || cli.until.is_some()
+}
+
+/// Persist the currently bound file's session. Silent: callers on the teardown
+/// path have no visible status bar.
+fn persist_current_file(app: &App) {
+    if app.session_restore_disabled {
+        return;
+    }
+    let export::ExportSource::File(path) = &app.export_source else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let path = std::path::PathBuf::from(path);
+    if let Some(file) = app.capture_session(&path) {
+        let _ = session::save(&app.config_dir, &path, &file);
+    }
+}
+
+/// Like [`persist_current_file`], but surfaces write failures (source-switch path,
+/// where the user is still looking at the status bar).
+fn save_session_or_flash(app: &mut App) {
+    if app.session_restore_disabled {
+        return;
+    }
+    let export::ExportSource::File(path) = app.export_source.clone() else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let path = std::path::PathBuf::from(path);
+    if let Some(file) = app.capture_session(&path) {
+        if let Err(e) = session::save(&app.config_dir, &path, &file) {
+            app.set_flash(format!("SESSION SAVE: {e}"));
+        }
+    }
+}
+
+/// Load and apply `path`'s session. Returns whether a non-degenerate session
+/// was restored (gates the `RESTORED` flash).
+fn restore_session(app: &mut App, path: &std::path::Path) -> bool {
+    if app.session_restore_disabled {
+        return false;
+    }
+    match session::load(&app.config_dir, path) {
+        session::SessionLoad::Missing => false,
+        session::SessionLoad::Invalid(reason) => {
+            app.set_flash(format!("SESSION fallback: {reason}"));
+            false
+        }
+        session::SessionLoad::Loaded(s) => match app.apply_session(&s) {
+            Ok(()) => {
+                app.session_restored = s.is_active();
+                app.session_restored
+            }
+            Err(e) => {
+                app.set_flash(format!("SESSION fallback: {e}"));
+                false
+            }
+        },
+    }
+}
+
+/// Short `RESTORED …` summary for the Dashboard-path flash (R10).
+fn restored_label(app: &App) -> String {
+    let mut parts = vec!["RESTORED".to_string()];
+    let filters = app.groups.groups.len();
+    if filters > 0 {
+        parts.push(format!("{filters} FILTER"));
+    }
+    let excludes = app.groups.excludes.len();
+    if excludes > 0 {
+        parts.push(format!("{excludes} EXCLUDE"));
+    }
+    let highlights = app.highlight_groups.groups.len();
+    if highlights > 0 {
+        parts.push(format!("{highlights} HL"));
+    }
+    if app.time_bound.as_ref().is_some_and(|t| t.is_active()) {
+        parts.push("TIME".into());
+    }
+    if !app.bookmarks.is_empty() {
+        parts.push(format!("\u{2605}{}", app.bookmarks.len()));
+    }
+    parts.join(" ")
+}
+
 /// Bind a file source. When `switching`, resets non-F/E/H state after open succeeds.
 fn bind_file_source(app: &mut App, path: &str, switching: bool) -> Result<(), String> {
     let path_buf = std::path::PathBuf::from(path);
@@ -515,16 +877,24 @@ fn bind_file_source(app: &mut App, path: &str, switching: bool) -> Result<(), St
         return Err(format!("not a file: {path}"));
     }
     let file_store = store::FileStore::open(&path_buf).map_err(|e| e.to_string())?;
+    let from_dashboard = app.dashboard.is_some();
     if switching {
+        // The old file is still bound here — capture it before the reset.
+        save_session_or_flash(app);
         app.reset_for_source_switch();
     }
     app.set_file_store(file_store);
     app.export_source = export::ExportSource::File(path_buf.display().to_string());
     app.dashboard = None;
     app.close_source_panels();
+    // R2: only the first bind of this session restores; `C-f` mid-session does not.
+    let restored = !switching && restore_session(app, &path_buf);
     app.record_recent_file(&path_buf);
     if app.filter_active() {
         app.rebuild_visible();
+    }
+    if restored && from_dashboard {
+        app.set_flash(restored_label(app));
     }
     Ok(())
 }
@@ -538,6 +908,8 @@ fn bind_live_source(
 ) -> Result<(), String> {
     let ctl = spawn_live_ctl(backend, None)?;
     if switching {
+        // Leaving a file for a live source still persists that file's session.
+        save_session_or_flash(app);
         *live = None;
         app.reset_for_source_switch();
     }
@@ -661,6 +1033,9 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
     );
     app.groups = groups;
     app.time_bound = time_bound;
+    // R5: one rule gates both read and write, so a one-shot `--tag` run can
+    // neither consume nor clobber the curated session.
+    app.session_restore_disabled = !app.config.restore_session || cli_has_filter_args(&cli);
     if let Some(hint) = theme_status.status_hint() {
         app.set_flash(hint);
     }
@@ -749,6 +1124,9 @@ fn run_tui(cli: TuiCli) -> Result<(), String> {
         event::DisableMouseCapture
     )
     .map_err(|e| e.to_string());
+    // R3: covers `q`, Ctrl+C and Dashboard Quit alike — they all leave `run()`.
+    // A panic unwinds past this point, which is the intent (no save on panic).
+    persist_current_file(&app);
     // `live` drops here, killing the child if not already killed
     disable_result.and(leave_result)?;
 

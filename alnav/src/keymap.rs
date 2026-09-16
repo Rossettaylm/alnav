@@ -474,6 +474,7 @@ pub enum ActionId {
     LogListWrapToggle,
     LeaderManage,
     ClearAllRules,
+    ClearSession,
     LeaderPresetSave,
     LeaderPresetOpen,
     LeaderSummary,
@@ -672,6 +673,7 @@ impl ActionId {
         Self::LogListWrapToggle,
         Self::LeaderManage,
         Self::ClearAllRules,
+        Self::ClearSession,
         Self::LeaderPresetSave,
         Self::LeaderPresetOpen,
         Self::LeaderSummary,
@@ -1338,6 +1340,20 @@ impl ActionId {
                 palette_icon: "",
             }
             .with_palette("Clear All Rules", theme::GLYPH_TITLE_EXCLUDE),
+            Self::ClearSession => ActionMeta {
+                id: Self::ClearSession,
+                context: KeyContext::Global,
+                toml_key: "clear_session",
+                default: Binding::unbound(),
+                kind: ActionKind::Leaf,
+                capabilities: &[Capability::FileOnly],
+                label: "clear session",
+                detail: "delete the saved session for the current file",
+                in_palette: false,
+                palette_title: "",
+                palette_icon: "",
+            }
+            .with_palette("Clear Session", theme::GLYPH_TITLE_DASHBOARD),
             Self::LeaderPresetSave => ActionMeta {
                 id: Self::LeaderPresetSave,
                 context: KeyContext::Global,
@@ -2896,6 +2912,7 @@ fn action_by_toml(ctx: KeyContext, key: &str) -> Option<ActionId> {
         (KeyContext::Global, "preset_open") => Some(ActionId::LeaderPresetOpen),
         (KeyContext::Global, "open_file") => Some(ActionId::OpenFile),
         (KeyContext::Global, "open_stream") => Some(ActionId::OpenStream),
+        (KeyContext::Global, "clear_session") => Some(ActionId::ClearSession),
         (KeyContext::LogList, "move_down") => Some(ActionId::LogListMoveDown),
         (KeyContext::LogList, "move_up") => Some(ActionId::LogListMoveUp),
         (KeyContext::LogList, "jump_down") => Some(ActionId::LogListJumpDown),
@@ -3360,7 +3377,13 @@ pub fn serialize_default_config_toml() -> String {
      #\n\
      # log_extensions: case-insensitive suffix filter for corpus files.\n\
      # Empty / omitted → default [\".log\", \".txt\"].\n\
-     log_extensions = [\".log\", \".txt\"]\n"
+     log_extensions = [\".log\", \".txt\"]\n\
+     #\n\
+     # restore_session: remember the last Filter / Exclude / Highlight / lock /\n\
+     # time-window / cursor / bookmark state per file, and bring it back the next\n\
+     # time that file is opened. Sessions are skipped entirely when filter flags are\n\
+     # passed on the command line. Set false to disable. Default true.\n\
+     restore_session = true\n"
         .to_string()
 }
 
@@ -3541,6 +3564,29 @@ move_down = "k"
         assert!(text.contains("search_next = \"n\""));
         assert!(text.contains("search_prev = \"S-n\""));
         assert!(text.contains("submit = \"Enter\""));
+    }
+
+    #[test]
+    fn default_config_toml_documents_restore_session() {
+        let text = serialize_default_config_toml();
+        assert!(text.contains("restore_session = true"));
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["restore_session"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn clear_session_meta_is_unbound_file_only_palette_command() {
+        let meta = ActionId::ClearSession.meta();
+        assert_eq!(meta.context, KeyContext::Global);
+        assert_eq!(meta.toml_key, "clear_session");
+        assert!(meta.default.strokes.is_empty());
+        assert_eq!(meta.capabilities, &[Capability::FileOnly]);
+        assert!(meta.in_palette);
+        assert_eq!(meta.palette_title, "Clear Session");
+        assert_eq!(
+            action_by_toml(KeyContext::Global, "clear_session"),
+            Some(ActionId::ClearSession)
+        );
     }
 
     #[test]

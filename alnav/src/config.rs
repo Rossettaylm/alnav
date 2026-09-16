@@ -65,6 +65,8 @@ pub struct AppConfig {
     pub log_extensions: Vec<String>,
     /// Named palette from `config.toml` (folding happens in `palette_by_name`).
     pub theme: String,
+    /// When false, per-file analysis sessions are never read or written.
+    pub restore_session: bool,
 }
 
 impl AppConfig {
@@ -76,6 +78,7 @@ impl AppConfig {
             log_dirs: Vec::new(),
             log_extensions: default_log_extensions(),
             theme: "default".into(),
+            restore_session: true,
         }
     }
 
@@ -113,6 +116,7 @@ struct ConfigToml {
     log_dirs: Option<Vec<String>>,
     log_extensions: Option<Vec<String>>,
     theme: Option<String>,
+    restore_session: Option<bool>,
 }
 
 /// Normalize configured extensions: trim, ensure leading `.`, lowercase.
@@ -172,6 +176,9 @@ pub fn load_config(config_dir: &Path) -> (AppConfig, ConfigLoadStatus) {
                 }
                 cfg.log_dirs = normalize_log_dirs(t.log_dirs);
                 cfg.log_extensions = normalize_log_extensions(t.log_extensions);
+                if let Some(v) = t.restore_session {
+                    cfg.restore_session = v;
+                }
                 if let Some(name) = t.theme {
                     let name = name.trim().to_string();
                     if !name.is_empty() {
@@ -398,6 +405,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, _) = load_config(dir.path());
         assert_eq!(cfg.theme, "default");
+    }
+
+    #[test]
+    fn load_config_defaults_restore_session_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, _) = load_config(dir.path());
+        assert!(cfg.restore_session);
+    }
+
+    #[test]
+    fn load_config_reads_restore_session_false() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "restore_session = false\n").unwrap();
+        let (cfg, st) = load_config(dir.path());
+        assert!(matches!(st, ConfigLoadStatus::Loaded(_)));
+        assert!(!cfg.restore_session);
     }
 
     #[test]

@@ -18,6 +18,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 | [Directory Structure](./directory-structure.md) | Module layout + picker/compare tray/time_panel/ActionStore ownership | Active |
 | [Command Palette + ActionStore](./command-palette.md) | `C-p` palette, `when`/`catalog`/`dispatch` | Active |
 | [Session Filters](./session-filters.md) | Lock + global `App.time_bound` contracts | Active |
+| [File Session Restore](./session-restore.md) | Per-file `sessions/*.toml` save/restore, R5 suppression, deferred cursor | Active |
 | [TUI Fuzzy Matching](./fuzzy-matching.md) | nucleo-matcher contracts for Picker/Filter/Highlight | Active |
 | [Stream Visible + Live Ingest](./stream-visible-ingest.md) | `Visible::All` / `Subset` + drop-oldest ADB/HDC ring | Active |
 | [FileStore mmap](./file-store.md) | `-f` mmap + lazy parse + bg filter | Active |
@@ -35,6 +36,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 ## Pre-Development Checklist
 
 - [ ] Read [session-filters.md](./session-filters.md) before changing filter/lock/time matching or `yc` export.
+- [ ] Read [session-restore.md](./session-restore.md) before changing `session.rs`, file bind/teardown persist hooks, `restore_session`, or the deferred restore cursor.
 - [ ] Read [fuzzy-matching.md](./fuzzy-matching.md) before changing TUI text match, Highlight paint, Filter chip evaluation, or **candidate panel / vocab / Picker list** paths (Candidate panel SLOs).
 - [ ] Read [stream-visible-ingest.md](./stream-visible-ingest.md) before changing `visible`, `push_row` eviction, or live ingest.
 - [ ] Read [file-store.md](./file-store.md) before changing `-f` ingest, `RowStore`, or file filter scanning.
@@ -52,6 +54,7 @@ behavior from CLAUDE.md when implementing filters, pickers, or modals.
 ## Quality Check
 
 - [ ] `Group` has no `time` field; time is on `App.time_bound`.
+- [ ] Session archives are never read or written when a CLI filter flag was passed or `restore_session = false`; a degenerate scene does not overwrite an existing archive.
 - [ ] Interactive time keys gated on `is_file_mode()`.
 - [ ] Stream `visible` is `Visible::All` (no identity `Vec` + per-row index shift).
 - [ ] File filter hits use `Visible::Subset` (line numbers); no full-file owned `EntryRow` / `matched`.

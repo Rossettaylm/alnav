@@ -31,3 +31,9 @@ log_dirs = []
 
 # 语料文件后缀过滤（忽略大小写）。省略或空列表 → 默认 .log / .txt。
 log_extensions = [".log", ".txt"]
+
+# 逐文件记住上次的分析现场（Filter / Exclude / Highlight / lock / 时间窗 /
+# 光标 / 书签），下次打开同一个日志文件时自动恢复。默认 true。
+# 命令行带了任一过滤参数（--tag/--msg/--level/--pkg/--pid/--tid/--since/--until）
+# 时本次运行既不读也不写现场。设为 false 可整体关闭。
+restore_session = true

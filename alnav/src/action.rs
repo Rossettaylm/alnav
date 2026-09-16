@@ -37,6 +37,7 @@ pub const PALETTE_IDS: &[ActionId] = &[
     ActionId::LogListResumeFollow,
     ActionId::LeaderManage,
     ActionId::ClearAllRules,
+    ActionId::ClearSession,
     ActionId::LeaderPresetSave,
     ActionId::LeaderPresetOpen,
     ActionId::LeaderSummary,
@@ -83,6 +84,7 @@ pub fn when(app: &App, id: ActionId) -> bool {
         ActionId::LockClear => app.lock_pid.is_some() || app.lock_tid.is_some(),
         ActionId::StripDDelete | ActionId::StripDDisable => app.focused_strip_has_selection(),
         ActionId::ClearAllRules => app.has_rules(),
+        ActionId::ClearSession => file_mode && app.has_session_worth_clearing(),
         _ => true,
     }
 }
@@ -136,6 +138,11 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         GlobalFocusLog => app.focus = Focus::LogList,
         GlobalFocusInput | LeaderManage => app.open_unified_picker(),
         ClearAllRules => app.request_clear_all_rules(),
+        ClearSession => {
+            if app.is_file_mode() {
+                app.clear_session_for_current_file();
+            }
+        }
         GlobalFilterNew => app.open_picker_new(PickerKind::Filter),
         GlobalHighlightNew => app.open_highlight_finder(),
         GlobalHighlightAdd => app.open_picker_new(PickerKind::Highlight),
@@ -511,6 +518,11 @@ mod tests {
                 theme::GLYPH_TITLE_EXCLUDE,
             ),
             (
+                ActionId::ClearSession,
+                "Clear Session",
+                theme::GLYPH_TITLE_DASHBOARD,
+            ),
+            (
                 ActionId::LeaderPresetSave,
                 "Save Preset",
                 theme::GLYPH_MODE_NEW,
@@ -724,6 +736,34 @@ mod tests {
             crate::highlight_model::HighlightGroup::from_pattern("h").unwrap(),
         );
         assert!(when(&app, ActionId::ClearAllRules));
+    }
+
+    #[test]
+    fn clear_session_hidden_without_an_archive() {
+        let mut app = idle_app();
+        let cfg = tempfile::tempdir().unwrap();
+        let log = cfg.path().join("a.log");
+        std::fs::write(&log, "x").unwrap();
+        app.config_dir = cfg.path().to_path_buf();
+        app.export_source = crate::export::ExportSource::File(log.display().to_string());
+        assert!(!when(&app, ActionId::ClearSession));
+
+        let mut snap =
+            crate::session::SessionFile::new(crate::session::normalize_source(&log).unwrap());
+        snap.cursor_row_id = 4;
+        crate::session::save(&app.config_dir, &log, &snap).unwrap();
+        assert!(when(&app, ActionId::ClearSession));
+
+        dispatch(&mut app, ActionId::ClearSession);
+        assert_eq!(app.status_msg.as_deref(), Some("SESSION CLEARED"));
+        assert!(!when(&app, ActionId::ClearSession));
+    }
+
+    #[test]
+    fn clear_session_hidden_on_live_sources() {
+        let mut app = idle_app();
+        app.export_source = crate::export::ExportSource::Hdc { device: None };
+        assert!(!when(&app, ActionId::ClearSession));
     }
 
     #[test]
