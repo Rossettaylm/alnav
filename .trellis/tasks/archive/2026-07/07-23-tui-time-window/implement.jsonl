@@ -1,5 +1,0 @@
-{"file": ".trellis/spec/aloggrep-tui/backend/index.md", "reason": "TUI package pre-development checklist entry"}
-{"file": ".trellis/spec/guides/index.md", "reason": "Shared thinking guides before implementation"}
-{"file": ".trellis/tasks/07-23-tui-time-window/prd.md", "reason": "Requirements and acceptance criteria"}
-{"file": ".trellis/tasks/07-23-tui-time-window/design.md", "reason": "Architecture and file touch list"}
-{"file": ".trellis/tasks/07-23-tui-time-window/implement.md", "reason": "Execution order and validation"}

@@ -1,7 +1,0 @@
-{"file": ".trellis/spec/alnav/backend/index.md", "reason": "Quality Check gates: file mode Subset, no new deps, cargo test/fmt."}
-{"file": ".trellis/spec/alnav/backend/session-filters.md", "reason": "Verify every persisted field round-trips and lock stays mutually exclusive."}
-{"file": ".trellis/spec/alnav/backend/file-store.md", "reason": "Deferred cursor must not break line-index growth or the async filter scan."}
-{"file": ".trellis/spec/alnav/backend/quality-guidelines.md", "reason": "Forbidden patterns; atomic write; no Color::* outside theme.rs."}
-{"file": ".trellis/spec/alnav/backend/status-help.md", "reason": "RESTORED / SESSION fallback copy is English and must not clobber startup hints."}
-{"file": ".trellis/spec/alnav/backend/command-palette.md", "reason": "Clear Session must appear in the catalog and only when a session exists."}
-{"file": ".trellis/spec/alnav/backend/directory-structure.md", "reason": "session.rs placement and ownership boundaries."}
