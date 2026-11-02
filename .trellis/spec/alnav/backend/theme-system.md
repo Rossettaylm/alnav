@@ -188,8 +188,10 @@ Do **not** paint the whole `ListItem` red, and do **not** hard-code `Color::Red`
 in `ui.rs`.
 
 Compare-tray Δt / untimed `—` uses `theme::compare_delta_style()` (`muted` + DIM).
-Stale origin mark `☆` uses `theme::bookmark_stale_style()`. Do not inline those
-colors in `ui.rs`.
+Stale origin mark `☆` uses `theme::bookmark_stale_style()` and means **evicted**,
+not merely filtered. LogList pins use `theme::bookmark_mark_style()` (lock + DIM)
+in the lineno gutter and an optional `bookmark_row_style()` wash. Priority:
+`visual > cursor-selection > bookmark wash`. Do not inline those colors in `ui.rs`.
 
 ### Mix (named themes with RGB `background` only)
 
@@ -197,8 +199,8 @@ colors in `ui.rs`.
 |-------|-----|
 | `log_selection_bg` | `mix(bg, accent, 22)` |
 | `log_visual_bg` | `mix(bg, blue, 26)` |
-| `bookmark_row_bg` | `mix(bg, yellow, 12)` |
-| `bookmark_strip_bg` | `mix(bg, yellow, 8)` |
+| `bookmark_row_bg` | `mix(bg, magenta/lock, 8)` |
+| `bookmark_strip_bg` | `mix(bg, magenta/lock, 6)` |
 | `preview_highlight_bg` | `mix(bg, accent, 28)` |
 | `candidate_selected_bg` | `mix(bg, foreground, 16)` |
 
@@ -215,7 +217,7 @@ When `background` is `Reset`, skip mix and keep current values:
 | `log_visual_bg` | `Rgb(30, 60, 70)` |
 | `preview_highlight_bg` | `DarkGray` |
 | `bookmark_strip_bg` | `DarkGray` |
-| `bookmark_row_bg` | `Rgb(54, 46, 0)` |
+| `bookmark_row_bg` | `Rgb(36, 24, 40)` |
 | `candidate_selected_bg` | `DarkGray` |
 
 `default` chromatic tokens stay named ANSI (`Cyan`, `Green`, `Yellow`,

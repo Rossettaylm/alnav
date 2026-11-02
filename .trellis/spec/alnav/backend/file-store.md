@@ -42,8 +42,8 @@ pub enum FileEvent {
 |-------|------|
 | Memory | Never materialise all lines as owned `EntryRow`; mmap + `LineSpan` index only |
 | Cap | File mode: no `max_lines` eviction; full-file browse |
-| Visible | inactive → `Visible::All { len }`; filter → `Visible::Subset(line indices)` |
-| Filter | Background, cancellable (`gen`); incremental `FilterBatch`; UI must not O(n) `row_at` on each batch |
+| Visible | inactive → `Visible::All { len }`; filter → `Visible::Subset` of **sorted unique** line indices (hits **plus** alive bookmark line indices) |
+| Filter | Background, cancellable (`gen`); incremental `FilterBatch` **merge-insert** (do not `extend` after pins exist); UI must not O(n) `row_at` on each batch |
 | Unparseable | `from_line_or_raw` — show raw line (delta vs stream drop) |
 | `--max-lines` | live stream (`--hdc` / `--adb`) only |
 | Vocab | Sampled + hard cap after IndexDone; not full-file parse on UI |

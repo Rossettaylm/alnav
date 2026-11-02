@@ -33,7 +33,7 @@ pub fn source_idx_for_visible(&self, vis_i: usize) -> Option<usize>;
 | State | `view_source` | `visible` |
 |-------|---------------|-----------|
 | filter inactive | `rows` | `All { len: rows.len() }` |
-| filter active | `matched` | `All { len: matched.len() }` |
+| filter active | `matched` (hits **plus** alive bookmarked rows still in `rows`) | `All { len: matched.len() }` |
 
 - Never materialise identity as `Vec<usize>` of `0..n`.
 - Front eviction (`max_lines` / `matched_cap`): only after real `pop_front().is_some()`; adjust `cursor` / `list_offset` / `visual_anchor` in **O(1)**; `All.len` unchanged across pop+push.

@@ -812,6 +812,7 @@ fn render_entry_lines(
         area_width,
         Some((lineno, lineno_width)),
         false,
+        false,
     )
 }
 
@@ -820,7 +821,7 @@ fn render_compare_entry_lines(
     patterns: &[PaintPattern<'_>],
     area_width: usize,
 ) -> Vec<Line<'static>> {
-    render_entry_lines_ex(row, patterns, area_width, None, true)
+    render_entry_lines_ex(row, patterns, area_width, None, true, false)
 }
 
 /// Renders one log entry as one or more physical `Line`s: a header
@@ -832,8 +833,10 @@ fn render_entry_lines_ex(
     area_width: usize,
     lineno: Option<(usize, usize)>,
     show_pid_tid: bool,
+    pinned: bool,
 ) -> Vec<Line<'static>> {
     let lineno_s = match lineno {
+        Some((n, w)) if pinned => format!("{n:>w$}{}", theme::GLYPH_BOOKMARK_PIN),
         Some((n, w)) => format!("{n:>w$} "),
         None => String::new(),
     };
@@ -881,11 +884,22 @@ fn render_entry_lines_ex(
         .map(|(i, range)| {
             let mut spans = Vec::new();
             if i == 0 {
-                if !lineno_s.is_empty() {
+                if let Some((n, w)) = lineno {
                     spans.push(Span::styled(
-                        lineno_s.clone(),
+                        format!("{n:>w$}"),
                         theme::muted().add_modifier(Modifier::DIM),
                     ));
+                    if pinned {
+                        spans.push(Span::styled(
+                            theme::GLYPH_BOOKMARK_PIN.to_string(),
+                            theme::bookmark_mark_style(),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            " ",
+                            theme::muted().add_modifier(Modifier::DIM),
+                        ));
+                    }
                 }
                 spans.push(Span::styled(ts.clone(), theme::muted()));
                 if !pid_s.is_empty() {
@@ -985,8 +999,13 @@ fn render_entry_line_collapsed(
     area_width: usize,
     lineno: usize,
     lineno_width: usize,
+    pinned: bool,
 ) -> Line<'static> {
-    let lineno_s = format!("{lineno:>lineno_width$} ");
+    let lineno_s = if pinned {
+        format!("{lineno:>lineno_width$}{}", theme::GLYPH_BOOKMARK_PIN)
+    } else {
+        format!("{lineno:>lineno_width$} ")
+    };
     let ts = format!("{} ", row.timestamp);
     let level_badge = format!(" {} ", row.level.as_char());
     let prefix_without_tag =
@@ -1001,9 +1020,20 @@ fn render_entry_line_collapsed(
 
     let mut spans = Vec::new();
     spans.push(Span::styled(
-        lineno_s,
+        format!("{lineno:>lineno_width$}"),
         theme::muted().add_modifier(Modifier::DIM),
     ));
+    if pinned {
+        spans.push(Span::styled(
+            theme::GLYPH_BOOKMARK_PIN.to_string(),
+            theme::bookmark_mark_style(),
+        ));
+    } else {
+        spans.push(Span::styled(
+            " ",
+            theme::muted().add_modifier(Modifier::DIM),
+        ));
+    }
     spans.push(Span::styled(ts, theme::muted()));
     spans.push(Span::styled(
         level_badge,
@@ -1282,6 +1312,7 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
         (window_start..window_end)
             .filter_map(|abs_i| {
                 let row = app.row_at(abs_i)?;
+                let pinned = app.is_bookmark_row(row.row_id);
                 let lines = if app.collapsed_view {
                     vec![render_entry_line_collapsed(
                         &row,
@@ -1289,21 +1320,29 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
                         inner_width,
                         abs_i + 1,
                         lineno_width,
+                        pinned,
                     )]
                 } else {
-                    render_entry_lines(&row, &patterns, inner_width, abs_i + 1, lineno_width)
+                    render_entry_lines_ex(
+                        &row,
+                        &patterns,
+                        inner_width,
+                        Some((abs_i + 1, lineno_width)),
+                        false,
+                        pinned,
+                    )
                 };
                 let mut item = ListItem::new(lines);
                 if let Some((lo, hi)) = selection {
                     if abs_i >= lo && abs_i <= hi {
                         item = item.style(theme::log_visual_style());
-                    } else if app.is_bookmark_row(row.row_id) {
+                    } else if pinned {
                         item = item.style(theme::bookmark_row_style());
                     }
-                } else if app.is_bookmark_row(row.row_id) {
-                    item = item.style(theme::bookmark_row_style());
                 } else if active && abs_i == app.cursor {
                     item = item.style(theme::log_selection_style());
+                } else if pinned {
+                    item = item.style(theme::bookmark_row_style());
                 }
                 Some(item)
             })
@@ -3705,8 +3744,7 @@ pub fn render_compare_panel(app: &mut App, frame: &mut Frame, area: Rect) {
     for (display_i, &storage) in sorted.iter().enumerate() {
         let row = app.bookmarks.items[storage].row.clone();
         let row_id = row.row_id;
-        let jumpable = app.visible_idx_for_row_id(row_id).is_some();
-        let stale = !jumpable;
+        let stale = !app.bookmark_alive(row_id);
         let mark = if stale {
             theme::GLYPH_BOOKMARK_STALE_MARK
         } else {
@@ -4821,9 +4859,8 @@ mod tests {
     }
     #[test]
     fn test_render_log_list_bookmark_row_bg_priority() {
-        // AC1: bookmarked rows get a faint-yellow bg; an active visual selection
-        // overrides it; the cursor-selection gray only applies when neither
-        // visual nor bookmark bg is present. Priority: visual > bookmark-bg > cursor.
+        // Bookmarked non-cursor rows get a faint lock wash; cursor and visual
+        // override that wash. Priority: visual > cursor-selection > bookmark-wash.
         // The whole buffer is scanned (bookmark strip shifts list content, so
         // fixed row coords are unreliable).
         let mut app = App::new(100);
@@ -4890,6 +4927,21 @@ mod tests {
             "focused cursor row must get the selection bg"
         );
 
+        // Case 1b: cursor on a bookmarked row uses selection wash (glyph stays).
+        app.cursor = 0;
+        terminal
+            .draw(|frame| render_log_list(&mut app, frame, frame.area()))
+            .unwrap();
+        assert!(
+            scan_bg_in_rows(
+                &terminal,
+                sel_bg,
+                0,
+                terminal.backend().buffer().area.height
+            ),
+            "cursor on a bookmark must use selection bg"
+        );
+
         // Case 2: enter visual-line on row 0, extend cursor to row 1. Both
         // bookmarked rows are inside the visual range → visual overrides bookmark.
         // The bookmark strip occupies the top rows (1 border + 2 strip rows),
@@ -4913,6 +4965,24 @@ mod tests {
             !scan_bg_in_rows(&terminal, bm_bg, 3, terminal.backend().buffer().area.height),
             "bookmark bg must yield to visual selection on list rows"
         );
+    }
+
+    #[test]
+    fn pinned_lineno_uses_bookmark_glyph() {
+        let row =
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : msg").unwrap();
+        let lines = render_entry_lines_ex(&row, &[], 200, Some((1, 1)), false, true);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains(theme::GLYPH_BOOKMARK_PIN),
+            "pinned lineno must include pin glyph: {text:?}"
+        );
+        let mark = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == theme::GLYPH_BOOKMARK_PIN)
+            .expect("pin glyph span");
+        assert_eq!(mark.style.fg, theme::bookmark_mark_style().fg);
     }
 
     #[test]
@@ -5229,7 +5299,7 @@ mod tests {
         let long = "word ".repeat(40);
         let line = format!("04-02 10:00:00.000  1  1 I Tag     : {long}");
         let row = EntryRow::from_line(&line).unwrap();
-        let rendered = render_entry_line_collapsed(&row, &[], 60, 12, 3);
+        let rendered = render_entry_line_collapsed(&row, &[], 60, 12, 3, false);
         let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains('…'), "collapsed line must ellipsize: {text}");
         assert!(
@@ -5249,7 +5319,7 @@ mod tests {
     #[test]
     fn test_render_entry_line_collapsed_keeps_short_msg_untouched() {
         let row = EntryRow::from_line("04-02 10:00:00.000  1  1 I MyTag   : hello").unwrap();
-        let rendered = render_entry_line_collapsed(&row, &[], 200, 1, 1);
+        let rendered = render_entry_line_collapsed(&row, &[], 200, 1, 1, false);
         let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains('…'), "short msg must not be truncated");
         assert!(text.contains("MyTag"));
@@ -5261,7 +5331,7 @@ mod tests {
         let row =
             EntryRow::from_line("04-02 10:00:00.000  1  1 I Tag     : an error occurred").unwrap();
         let patterns = [("error", 0usize, true)];
-        let rendered = render_entry_line_collapsed(&row, &patterns, 200, 1, 1);
+        let rendered = render_entry_line_collapsed(&row, &patterns, 200, 1, 1, false);
         let matched = rendered
             .spans
             .iter()

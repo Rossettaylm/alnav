@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -104,6 +105,54 @@ impl Visible {
 impl Default for Visible {
     fn default() -> Self {
         Visible::All { len: 0 }
+    }
+}
+
+/// Merge `incoming` into a sorted unique `dest` (File `Visible::Subset`).
+fn merge_sorted_unique(dest: &mut Vec<usize>, incoming: &[usize]) {
+    if incoming.is_empty() {
+        return;
+    }
+    if dest.is_empty() {
+        dest.extend_from_slice(incoming);
+        dest.sort_unstable();
+        dest.dedup();
+        return;
+    }
+    let mut src = incoming.to_vec();
+    src.sort_unstable();
+    src.dedup();
+    let mut out = Vec::with_capacity(dest.len() + src.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < dest.len() && j < src.len() {
+        match dest[i].cmp(&src[j]) {
+            Ordering::Less => {
+                out.push(dest[i]);
+                i += 1;
+            }
+            Ordering::Greater => {
+                out.push(src[j]);
+                j += 1;
+            }
+            Ordering::Equal => {
+                out.push(dest[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&dest[i..]);
+    out.extend_from_slice(&src[j..]);
+    *dest = out;
+}
+
+fn row_time_order(a: &EntryRow, b: &EntryRow) -> Ordering {
+    match (a.as_log_entry().time_full(), b.as_log_entry().time_full()) {
+        (Some(ta), Some(tb)) => ta.cmp(tb).then_with(|| a.row_id.cmp(&b.row_id)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.row_id.cmp(&b.row_id),
     }
 }
 
@@ -2035,10 +2084,7 @@ impl App {
             if let Some(dom) = &self.highlight_domain {
                 dom.extend_subset(&hits);
             }
-            match &mut self.visible {
-                Visible::Subset(v) => v.extend(hits),
-                _ => self.visible = Visible::Subset(hits),
-            }
+            self.merge_file_filter_hits(&hits);
             filter_grew = true;
             // Never O(visible) parse here — highlight Inc follows Subset growth.
         }
@@ -2047,9 +2093,9 @@ impl App {
         }
         if let Some(gen) = filter_done_gen {
             if gen == self.file_filter_gen {
-                // ensure Subset even if zero hits
-                if !matches!(self.visible, Visible::Subset(_)) && self.filter_active() {
-                    self.visible = Visible::Subset(Vec::new());
+                // ensure Subset even if zero hits; re-merge pins after index growth
+                if self.filter_active() {
+                    self.merge_file_filter_hits(&[]);
                 }
                 if let Some(dom) = &self.highlight_domain {
                     dom.seal();
@@ -2272,23 +2318,45 @@ impl App {
 
         let mut evict_rows = false;
         let mut evict_matched = false;
+        let mut evicted_row: Option<EntryRow> = None;
+        let mut mid_matched_evict: Option<usize> = None;
+        let pin_ids = self.bookmark_row_ids.clone();
         {
             let stream = self.stream_mut();
             stream.max_lines = max_lines;
             stream.matched_cap = matched_cap;
-            if stream.rows.len() >= stream.max_lines && stream.rows.pop_front().is_some() && !active
-            {
-                evict_rows = true;
+            if stream.rows.len() >= stream.max_lines {
+                evicted_row = stream.rows.pop_front();
+                if evicted_row.is_some() && !active {
+                    evict_rows = true;
+                }
             }
-            if matches
-                && stream.matched.len() >= stream.matched_cap
-                && stream.matched.pop_front().is_some()
-            {
-                evict_matched = true;
+            if matches && stream.matched.len() >= stream.matched_cap {
+                if let Some(idx) = stream
+                    .matched
+                    .iter()
+                    .position(|r| !pin_ids.contains(&r.row_id))
+                {
+                    stream.matched.remove(idx);
+                    if idx == 0 {
+                        evict_matched = true;
+                    } else {
+                        mid_matched_evict = Some(idx);
+                    }
+                }
             }
         }
         if evict_rows || evict_matched {
             self.adjust_after_identity_front_evict();
+        }
+        if let Some(idx) = mid_matched_evict {
+            self.adjust_after_mid_visible_evict(idx);
+        }
+        if let Some(evicted) = evicted_row {
+            if active && self.is_bookmark_row(evicted.row_id) && !self.row_passes_filters(&evicted)
+            {
+                self.remove_matched_row_id(evicted.row_id);
+            }
         }
 
         let stream = self.stream_mut();
@@ -2332,6 +2400,131 @@ impl App {
         }
     }
 
+    fn adjust_after_mid_visible_evict(&mut self, idx: usize) {
+        if self.cursor > idx {
+            self.cursor -= 1;
+        }
+        if self.list_offset > idx {
+            self.list_offset -= 1;
+        }
+        match self.visual_anchor {
+            Some(a) if a == idx => self.visual_anchor = None,
+            Some(a) if a > idx => self.visual_anchor = Some(a - 1),
+            _ => {}
+        }
+        if self.cursor >= self.visible.len() {
+            self.cursor = self.visible.len().saturating_sub(1);
+        }
+        self.match_stats_stale = true;
+    }
+
+    fn alive_bookmark_file_line_indices(&self) -> Vec<usize> {
+        let mut idxs: Vec<usize> = self
+            .bookmarks
+            .items
+            .iter()
+            .filter_map(|bm| {
+                let id = bm.row_id();
+                if !self.row_alive(id) || id == 0 {
+                    return None;
+                }
+                Some((id - 1) as usize)
+            })
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        idxs
+    }
+
+    fn merge_file_filter_hits(&mut self, hits: &[usize]) {
+        let pins = self.alive_bookmark_file_line_indices();
+        match &mut self.visible {
+            Visible::Subset(v) => {
+                merge_sorted_unique(v, hits);
+                merge_sorted_unique(v, &pins);
+            }
+            _ => {
+                let mut v = hits.to_vec();
+                merge_sorted_unique(&mut v, &pins);
+                self.visible = Visible::Subset(v);
+            }
+        }
+    }
+
+    fn rebuild_stream_matched_with_pins(&mut self) {
+        let mut passing: Vec<EntryRow> = self
+            .rows()
+            .iter()
+            .filter(|r| self.row_passes_filters(r))
+            .cloned()
+            .collect();
+        let have: HashSet<u64> = passing.iter().map(|r| r.row_id).collect();
+        let pin_rows: Vec<EntryRow> = self
+            .bookmarks
+            .items
+            .iter()
+            .filter_map(|bm| {
+                let id = bm.row_id();
+                if have.contains(&id) {
+                    return None;
+                }
+                self.rows().iter().find(|r| r.row_id == id).cloned()
+            })
+            .collect();
+        passing.extend(pin_rows);
+        passing.sort_by(row_time_order);
+        let stream = self.stream_mut();
+        stream.matched.clear();
+        stream.matched.extend(passing);
+        self.visible = Visible::All {
+            len: stream.matched.len(),
+        };
+    }
+
+    fn remove_matched_row_id(&mut self, row_id: u64) {
+        let Some(idx) = self.matched().iter().position(|r| r.row_id == row_id) else {
+            return;
+        };
+        self.stream_mut().matched.remove(idx);
+        self.visible = Visible::All {
+            len: self.matched().len(),
+        };
+        self.adjust_after_mid_visible_evict(idx);
+    }
+
+    /// Drop a pin from the visible set when it no longer passes rules.
+    fn unpin_from_visible(&mut self, row_id: u64) {
+        if !self.filter_active() {
+            return;
+        }
+        if self.store.is_file() {
+            let Some(src) = self.store.find_row_id(row_id, false) else {
+                return;
+            };
+            if self
+                .row_by_id(row_id)
+                .is_some_and(|row| self.row_passes_filters(&row))
+            {
+                return;
+            }
+            if let Visible::Subset(v) = &mut self.visible {
+                if let Ok(i) = v.binary_search(&src) {
+                    v.remove(i);
+                    self.adjust_after_mid_visible_evict(i);
+                }
+            }
+        } else {
+            let Some(row) = self.matched().iter().find(|r| r.row_id == row_id).cloned() else {
+                return;
+            };
+            if self.row_passes_filters(&row) {
+                return;
+            }
+            self.remove_matched_row_id(row_id);
+        }
+        self.match_stats_stale = true;
+    }
+
     /// Full rescan, used when the filter groups or session lock change.
     /// Stream: rebuilds `matched` from `rows`. File: starts a cancellable
     /// background filter scan into [`Visible::Subset`] (or All when inactive).
@@ -2348,7 +2541,7 @@ impl App {
                     self.ingest_done = done;
                 }
             } else {
-                self.visible = Visible::Subset(Vec::new());
+                self.visible = Visible::Subset(self.alive_bookmark_file_line_indices());
                 self.ingest_done = false;
                 let groups = self.groups.clone();
                 let lock_pid = self.lock_pid.clone();
@@ -2376,17 +2569,7 @@ impl App {
                 self.file_filter_gen = gen;
             }
         } else if active {
-            let rows: Vec<EntryRow> = self.stream_mut().rows.iter().cloned().collect();
-            let passing: Vec<EntryRow> = rows
-                .into_iter()
-                .filter(|r| self.row_passes_filters(r))
-                .collect();
-            let stream = self.stream_mut();
-            stream.matched.clear();
-            stream.matched.extend(passing);
-            self.visible = Visible::All {
-                len: stream.matched.len(),
-            };
+            self.rebuild_stream_matched_with_pins();
         } else {
             let stream = self.stream_mut();
             stream.matched.clear();
@@ -2758,6 +2941,7 @@ impl App {
         if self.bookmarks.contains_id(row_id) {
             self.bookmarks.remove_id(row_id);
             self.bookmark_row_ids.remove(&row_id);
+            self.unpin_from_visible(row_id);
             self.set_flash("REMOVED");
             if self.bookmarks.is_empty() {
                 self.close_compare_panel();
@@ -2875,6 +3059,7 @@ impl App {
         let row_id = row.row_id;
         if self.bookmarks.remove_id(row_id) {
             self.bookmark_row_ids.remove(&row_id);
+            self.unpin_from_visible(row_id);
             self.set_flash("REMOVED");
         } else {
             self.set_flash("NOT BOOKMARKED");
@@ -3912,6 +4097,7 @@ impl App {
         }
         if let Some(rid) = row_id {
             self.bookmark_row_ids.remove(&rid);
+            self.unpin_from_visible(rid);
         }
         true
     }
@@ -5703,19 +5889,140 @@ mod flash_tests {
         app.rebuild_visible();
         app.open_compare_panel();
         app.compare_jump_selected();
-        assert!(app.compare.is_some());
-        assert_eq!(app.status_msg.as_deref(), Some("BOOKMARK NOT VISIBLE"));
+        assert!(
+            app.compare.is_none(),
+            "alive filtered pin must jump and close"
+        );
+        assert_eq!(app.focus, Focus::LogList);
+        assert_eq!(app.current_row().unwrap().tag, "Drop");
 
         let mut gone = crate::model::EntryRow::from_line_or_raw("gone");
         gone.row_id = 999_999;
         app.bookmarks.try_add(Bookmark::from_row(gone)).unwrap();
         app.bookmark_row_ids.insert(999_999);
+        app.open_compare_panel();
         if let Some(panel) = app.compare.as_mut() {
             panel.cursor = 1;
         }
         app.compare_jump_selected();
         assert!(app.compare.is_some());
         assert_eq!(app.status_msg.as_deref(), Some("BOOKMARK EVICTED"));
+    }
+
+    #[test]
+    fn stream_pin_survives_filter_in_time_order() {
+        use crate::fuzzy::SameFieldOp;
+        use crate::input::{Chip, ChipField};
+
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Keep    : a").unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I Drop    : b").unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:02.000  1  1 I Keep    : c").unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 1;
+        app.bookmark_add_current();
+        app.groups.groups.push(crate::filter_model::Group {
+            label: "keep".into(),
+            chips: vec![Chip {
+                field: ChipField::Tag,
+                value: "Keep".into(),
+            }],
+            enabled: true,
+            same_field_op: SameFieldOp::And,
+        });
+        app.rebuild_visible();
+        assert_eq!(app.visible_len(), 3);
+        assert_eq!(app.row_at(0).unwrap().tag, "Keep");
+        assert_eq!(app.row_at(1).unwrap().tag, "Drop");
+        assert_eq!(app.row_at(2).unwrap().tag, "Keep");
+        let pin_id = app.bookmarks.items[0].row_id();
+        assert!(app.visible_idx_for_row_id(pin_id).is_some());
+
+        app.cursor = app.visible_idx_for_row_id(pin_id).unwrap();
+        app.bookmark_remove_current();
+        assert_eq!(app.visible_len(), 2);
+        assert_eq!(app.row_at(0).unwrap().tag, "Keep");
+        assert_eq!(app.row_at(1).unwrap().tag, "Keep");
+    }
+
+    #[test]
+    fn stream_pin_survives_lock() {
+        let mut app = App::new(100);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I TagA    : a").unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:01.000  2  2 I TagB    : b").unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        app.cursor = 0;
+        app.bookmark_add_current();
+        app.lock_pid = Some("2".into());
+        app.rebuild_visible();
+        assert_eq!(app.visible_len(), 2);
+        assert_eq!(app.row_at(0).unwrap().pid, "1");
+        assert_eq!(app.row_at(1).unwrap().pid, "2");
+    }
+
+    #[test]
+    fn stream_evicted_pin_not_reinjected() {
+        let mut app = App::new(2);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I Old     : a").unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:01.000  1  1 I Mid     : b").unwrap(),
+        )
+        .unwrap();
+        app.drain(&rx);
+        app.cursor = 0;
+        app.bookmark_add_current();
+        let pinned_id = app.bookmarks.items[0].row_id();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:02.000  1  1 I Keep    : c").unwrap(),
+        )
+        .unwrap();
+        tx.send(
+            crate::model::EntryRow::from_line("04-02 10:00:03.000  1  1 I Keep    : d").unwrap(),
+        )
+        .unwrap();
+        drop(tx);
+        app.drain(&rx);
+        assert!(!app.bookmark_alive(pinned_id));
+
+        use crate::fuzzy::SameFieldOp;
+        use crate::input::{Chip, ChipField};
+        app.groups.groups.push(crate::filter_model::Group {
+            label: "keep".into(),
+            chips: vec![Chip {
+                field: ChipField::Tag,
+                value: "Keep".into(),
+            }],
+            enabled: true,
+            same_field_op: SameFieldOp::And,
+        });
+        app.rebuild_visible();
+        assert!(app.visible_idx_for_row_id(pinned_id).is_none());
+        for i in 0..app.visible_len() {
+            assert_ne!(app.row_at(i).unwrap().tag, "Old");
+        }
     }
 
     #[test]
@@ -5960,6 +6267,53 @@ mod file_store_tests {
         assert!(matches!(app.visible, Visible::Subset(_)));
         assert_eq!(app.visible_len(), 2);
         assert!(app.matched().is_empty());
+        assert_eq!(app.row_at(0).unwrap().tag, "Keep");
+        assert_eq!(app.row_at(1).unwrap().tag, "Keep");
+    }
+
+    fn wait_file_filter(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.ingest_done {
+            if Instant::now() > deadline {
+                panic!("filter timed out");
+            }
+            app.poll_file_store();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn file_pin_survives_filter_in_line_order() {
+        let f = write_temp(
+            "04-02 10:00:00.000  1  1 I Keep   : a\n\
+             04-02 10:00:01.000  1  1 I Drop   : b\n\
+             04-02 10:00:02.000  1  1 I Keep   : c\n",
+        );
+        let mut app = App::new(100);
+        app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
+        app.set_file_store(FileStore::open_sync(f.path()).unwrap());
+        app.cursor = 1;
+        app.bookmark_add_current();
+        app.groups.groups.push(Group {
+            label: "tag~Keep".into(),
+            chips: vec![crate::input::Chip {
+                field: crate::input::ChipField::Tag,
+                value: "Keep".into(),
+            }],
+            enabled: true,
+            same_field_op: crate::fuzzy::SameFieldOp::And,
+        });
+        app.rebuild_visible();
+        wait_file_filter(&mut app);
+        assert!(matches!(app.visible, Visible::Subset(_)));
+        assert_eq!(app.visible_len(), 3);
+        assert_eq!(app.row_at(0).unwrap().tag, "Keep");
+        assert_eq!(app.row_at(1).unwrap().tag, "Drop");
+        assert_eq!(app.row_at(2).unwrap().tag, "Keep");
+        let pin_id = app.bookmarks.items[0].row_id();
+        app.cursor = app.visible_idx_for_row_id(pin_id).unwrap();
+        app.bookmark_remove_current();
+        assert_eq!(app.visible_len(), 2);
         assert_eq!(app.row_at(0).unwrap().tag, "Keep");
         assert_eq!(app.row_at(1).unwrap().tag, "Keep");
     }

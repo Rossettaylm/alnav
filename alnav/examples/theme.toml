@@ -28,7 +28,7 @@
 # candidate_match_fg = "cyan"
 # candidate_prefix = "▌ "
 # bookmark_strip_bg = "darkgray"
-# bookmark_row_bg = "#362e00"
+# bookmark_row_bg = "#241828"
 
 # highlight = [
 #   "#e0af68",

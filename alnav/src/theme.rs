@@ -122,7 +122,7 @@ pub struct UiTokens {
     /// Prefix drawn before the selected candidate row (e.g. `"▌ "`).
     pub candidate_prefix: String,
     pub bookmark_strip_bg: Color,
-    /// Bookmark row background in LogList (faint yellow, distinct from selection).
+    /// Bookmark row wash in LogList (faint lock-family, never overrides cursor/visual).
     pub bookmark_row_bg: Color,
     pub canvas_bg: Color,
     pub canvas_fg: Color,
@@ -224,8 +224,8 @@ pub fn map_to_tokens_for(p: &Palette, canonical: &str) -> UiTokens {
         },
         candidate_match_fg: accent,
         candidate_prefix: "▌ ".to_string(),
-        bookmark_strip_bg: mix_or(p.yellow, 8, Color::DarkGray),
-        bookmark_row_bg: mix_or(p.yellow, 12, Color::Rgb(54, 46, 0)),
+        bookmark_strip_bg: mix_or(p.magenta, 6, Color::DarkGray),
+        bookmark_row_bg: mix_or(p.magenta, 8, Color::Rgb(36, 24, 40)),
         canvas_bg: p.background,
         canvas_fg: p.foreground,
         muted: p.bright_black,
@@ -926,16 +926,21 @@ pub fn bookmark_strip_style() -> Style {
 pub fn bookmark_label_style() -> Style {
     Style::default().fg(warning()).add_modifier(Modifier::BOLD)
 }
-/// LogList row background for bookmarked rows (faint yellow). Priority:
-/// `visual > bookmark-bg > cursor-selection` (see `ui::render_log_list`).
+/// LogList row wash for bookmarked rows (faint lock). Priority:
+/// `visual > cursor-selection > bookmark-wash` (see `ui::render_log_list`).
 pub fn bookmark_row_style() -> Style {
     Style::default().bg(t().bookmark_row_bg)
 }
 
-/// Foreground color for the minimap Bookmark mark (F5). Same color family as
-/// the bookmark row bg so the rail mark reads as related to the row wash.
+/// Lineno-gutter pin glyph on bookmarked LogList rows.
+pub fn bookmark_mark_style() -> Style {
+    Style::default().fg(lock()).add_modifier(Modifier::DIM)
+}
+
+/// Foreground color for the minimap Bookmark mark (F5). Lock family, same
+/// as the gutter pin, not the row wash.
 pub fn bookmark_minimap_color() -> Color {
-    t().bookmark_row_bg
+    lock()
 }
 
 /// M2 stale bookmark (evicted from ring buffer).
@@ -1305,7 +1310,7 @@ mod tests {
         assert_eq!(t.accent, Color::Cyan);
         assert_eq!(t.canvas_bg, Color::Reset);
         assert_eq!(t.log_selection_bg, Color::DarkGray);
-        assert_eq!(t.bookmark_row_bg, Color::Rgb(54, 46, 0));
+        assert_eq!(t.bookmark_row_bg, Color::Rgb(36, 24, 40));
         assert_eq!(t.pkg, Color::LightYellow);
         assert_eq!(t.highlight[0], Color::Yellow);
         assert!(t.logo.iter().all(|c| *c == Color::Cyan));

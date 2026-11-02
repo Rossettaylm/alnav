@@ -896,7 +896,7 @@ pub fn page_blurb(page: HelpPage) -> &'static [&'static str] {
             "Lock PID and lock TID are mutually exclusive and AND after chips.",
             "The global time window is file-only and orthogonal to Filter groups.",
             "`th` opens a time histogram over the current visible rows; Enter jumps, s sets the window, J/K/g/G move, Tab cycles 10s/1m/5m.",
-            "Bookmarks are session-only snapshot pins with a compare panel (`mm`).",
+            "Bookmarks are session-only snapshot pins: alive origins stay on the LogList when rules hide them; evicted live rows stay tray-only. `mm` opens the compare panel.",
             "Follow and device/file state live in the status bar, not in a chip group.",
         ],
         HelpPage::Picker => &[

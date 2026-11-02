@@ -18,7 +18,7 @@ aspirations.
 
 ```rust
 // DON'T — inline Color in ui.rs / main.rs
-item.style(Style::default().bg(Color::Rgb(54, 46, 0)))
+item.style(Style::default().bg(Color::Rgb(36, 24, 40)))
 ```
 
 **Why**: breaks theme.toml / config.toml `theme` overrides. TUI colors

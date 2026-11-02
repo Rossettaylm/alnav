@@ -146,6 +146,12 @@ for O(1) LogList bg lookup. It is mutated in lockstep with every
 Any new mutation site on `BookmarkList` MUST sync this set —
 `render_log_list` reads it every frame.
 
+Alive pins are merged into the LogList visible set while `filter_active`
+(File: extra sorted line indices in `Subset`; Stream: extra rows in
+`matched` taken from `rows` only). Unpin (`ma`/`md`/`dd`) drops a
+rule-missing pin from visible without restarting a File scan. Evicted
+Stream origins are not re-injected.
+
 ---
 
 ## Naming Conventions
