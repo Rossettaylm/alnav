@@ -724,8 +724,8 @@ impl LiveIngestCtl {
     ///
     /// Reachability uses [`alnav::adb::device_reachable`] /
     /// [`alnav::hdc::device_reachable`], **not** [`now_marker`]: a failed clock
-    /// query only disables history filtering (CLI/TUI history fallback) and must
-    /// not be reported as "device unreachable".
+    /// query only disables ADB history filtering and must not be reported as
+    /// "device unreachable". HDC clears the in-memory ring inside `spawn_hilog`.
     fn spawn_for_reconnect(
         backend: LiveBackend,
         device: Option<&str>,

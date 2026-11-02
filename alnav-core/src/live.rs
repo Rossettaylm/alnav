@@ -55,11 +55,34 @@ pub(crate) fn query_marker(mut command: Command) -> Option<String> {
 }
 
 pub(crate) fn spawn_session(
-    mut command: Command,
+    command: Command,
     start_marker: Option<String>,
     missing_tool_message: &str,
 ) -> Result<LiveSession, String> {
     let used_history_fallback = start_marker.is_none();
+    spawn_session_inner(
+        command,
+        start_marker,
+        used_history_fallback,
+        missing_tool_message,
+    )
+}
+
+/// Follow a capture that already starts at the live tail. No marker filter and
+/// no buffered-history warning.
+pub(crate) fn spawn_live_tail(
+    command: Command,
+    missing_tool_message: &str,
+) -> Result<LiveSession, String> {
+    spawn_session_inner(command, None, false, missing_tool_message)
+}
+
+fn spawn_session_inner(
+    mut command: Command,
+    start_marker: Option<String>,
+    used_history_fallback: bool,
+    missing_tool_message: &str,
+) -> Result<LiveSession, String> {
     command.stdout(Stdio::piped());
     // Discard stderr: a piped-but-unread stderr fills (~64KiB) and can
     // deadlock the capture child so stdout never EOFs / never yields lines.

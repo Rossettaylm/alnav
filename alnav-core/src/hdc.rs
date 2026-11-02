@@ -1,6 +1,7 @@
+use std::io;
 use std::process::Command;
 
-use crate::live::{query_marker, spawn_session};
+use crate::live::{query_marker, spawn_live_tail};
 
 pub use crate::live::{
     LiveFilter as HdcLiveFilter, LiveLines as HdcLines, LiveSession as HdcSession,
@@ -28,13 +29,58 @@ fn ping_command(device: Option<&str>) -> Command {
     command
 }
 
-fn capture_command(device: Option<&str>) -> Command {
+/// Types the default `hilog` follow reads. Cleared before follow so the reader
+/// starts on an empty ring instead of replaying hilogd history.
+const CLEAR_TYPES: &str = "app,core,init,only_prerelease";
+
+fn hdc_command(device: Option<&str>) -> Command {
     let mut command = Command::new("hdc");
     if let Some(serial) = device {
         command.arg("-t").arg(serial);
     }
-    command.arg("hilog").arg("--no-block");
     command
+}
+
+fn capture_command(device: Option<&str>) -> Command {
+    let mut command = hdc_command(device);
+    command.arg("shell").arg("hilog");
+    command
+}
+
+fn clear_command(device: Option<&str>) -> Command {
+    let mut command = hdc_command(device);
+    command
+        .arg("shell")
+        .arg("hilog")
+        .arg("-r")
+        .arg("-t")
+        .arg(CLEAR_TYPES);
+    command
+}
+
+fn clear_hilog_buffer(device: Option<&str>) -> Result<(), String> {
+    let output = clear_command(device).output().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            "hdc not found, please install HDC tools".to_string()
+        } else {
+            format!("failed to clear hilog buffer: {error}")
+        }
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    let detail = if detail.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        detail.to_string()
+    };
+    if detail.is_empty() {
+        Err("failed to clear hilog buffer".to_string())
+    } else {
+        Err(format!("failed to clear hilog buffer: {detail}"))
+    }
 }
 
 /// True when a trivial `hdc shell echo ok` succeeds.
@@ -48,21 +94,23 @@ pub fn device_reachable(device: Option<&str>) -> bool {
 }
 
 /// Query the device's current time as `MM-DD HH:MM:SS`, matching the prefix
-/// `LogEntry::time_full()` extracts from hilog lines. Used by `--hdc` to skip
-/// hilogd's buffered history and start from "now". Returns `None` if the
-/// query fails, in which case `--hdc` falls back to showing whatever hilog
-/// dumps on start.
+/// `LogEntry::time_full()` extracts from hilog lines. Not used to start
+/// `--hdc`: that path clears the in-memory ring and follows from empty.
 pub fn now_marker(device: Option<&str>) -> Option<String> {
     query_marker(clock_command(device))
 }
 
-/// Spawn `hdc [-t SERIAL] hilog --no-block` and wrap its stdout so only lines
-/// at or after "now" are yielded (see `HdcLiveFilter`).
+/// Clear hilogd's in-memory rings, then follow `hdc shell hilog`.
+///
+/// `hdc hilog` ignores every argument except `h` and always replays the
+/// buffer. `hilog -r` drops app/core/init/only_prerelease in RAM (persisted
+/// files under `/data/log/hilog` stay). The follow then blocks on an empty
+/// ring, so startup does not transfer history. Lines between clear and follow
+/// are dropped. Reconnect uses this same entry.
 pub fn spawn_hilog(device: Option<&str>) -> Result<HdcSession, String> {
-    let start_marker = now_marker(device);
-    spawn_session(
+    clear_hilog_buffer(device)?;
+    spawn_live_tail(
         capture_command(device),
-        start_marker,
         "hdc not found, please install HDC tools",
     )
 }
@@ -132,11 +180,27 @@ mod tests {
         );
         assert_eq!(
             capture.get_args().collect::<Vec<_>>(),
-            ["-t", "SERIAL", "hilog", "--no-block"]
+            ["-t", "SERIAL", "shell", "hilog"]
+        );
+        assert_eq!(
+            clear_command(Some("SERIAL")).get_args().collect::<Vec<_>>(),
+            [
+                "-t",
+                "SERIAL",
+                "shell",
+                "hilog",
+                "-r",
+                "-t",
+                "app,core,init,only_prerelease"
+            ]
         );
         assert_eq!(
             ping.get_args().collect::<Vec<_>>(),
             ["-t", "SERIAL", "shell", "echo", "ok"]
+        );
+        assert_eq!(
+            capture_command(None).get_args().collect::<Vec<_>>(),
+            ["shell", "hilog"]
         );
     }
 }
