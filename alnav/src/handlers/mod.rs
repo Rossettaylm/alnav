@@ -1,6 +1,7 @@
 //! Key/mouse handlers shared by the event loop, with per-surface submodules.
 
 use crate::app::App;
+use crate::app::Pending;
 use crate::handlers::normal::handle_normal_key;
 use crate::{app, help, input, keymap, ui};
 use crossterm::event::{self, KeyCode};
@@ -55,21 +56,12 @@ fn apply_yank(app: &mut App, text: String) {
 pub(crate) fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     use app::Mode;
 
-    if app.pending_m {
-        app.cancel_bookmark_op();
-        return;
-    }
-    if app.pending_chip || app.pending_exclude {
-        app.cancel_chip_from_cursor();
-        return;
-    }
-    if app.pending_lock {
-        app.cancel_lock_pending();
-        return;
-    }
-    if app.pending_time {
-        app.cancel_time_pending();
-        return;
+    match app.pending {
+        Pending::Mark => return app.cancel_bookmark_op(),
+        Pending::Chip | Pending::Exclude => return app.cancel_chip_from_cursor(),
+        Pending::Lock => return app.cancel_lock_pending(),
+        Pending::Time => return app.cancel_time_pending(),
+        _ => {}
     }
 
     match app.mode {

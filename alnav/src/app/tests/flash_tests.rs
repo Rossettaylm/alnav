@@ -1,6 +1,7 @@
 //! Flash toast and related flow tests.
 
 use super::*;
+use crate::app::Pending;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -36,7 +37,7 @@ fn cancel_pending_does_not_clear_flash() {
     app.begin_bookmark_op();
     app.cancel_bookmark_op();
     assert_eq!(app.status_msg.as_deref(), Some("YANKED"));
-    assert!(!app.pending_m);
+    assert_ne!(app.pending, Pending::Mark);
 }
 
 fn sample_tag_group(tag: &str) -> Group {

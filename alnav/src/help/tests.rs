@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::app::Focus;
+use crate::app::Pending;
 use ratatui::text::Line;
 
 fn app_with_focus(focus: Focus) -> App {
@@ -114,7 +115,7 @@ fn context_confirm_overrides_picker() {
 #[test]
 fn context_pending_leader_is_l2() {
     let mut app = app_with_focus(Focus::LogList);
-    app.pending_leader = true;
+    app.pending = Pending::Leader;
     assert_eq!(context_kind(&app), ContextKind::Leader);
 }
 
@@ -128,33 +129,28 @@ fn context_detail_overrides_focus() {
 #[test]
 fn context_pending_ops_are_l2() {
     let mut app = app_with_focus(Focus::LogList);
-    app.pending_m = true;
+    app.pending = Pending::Mark;
     assert_eq!(context_kind(&app), ContextKind::Bookmark);
-    app.pending_m = false;
-    app.pending_lock = true;
+    app.pending = Pending::Lock;
     assert_eq!(context_kind(&app), ContextKind::Lock);
-    app.pending_lock = false;
-    app.pending_time = true;
+    app.pending = Pending::Time;
     assert_eq!(context_kind(&app), ContextKind::Time);
-    app.pending_time = false;
-    app.pending_chip = true;
+    app.pending = Pending::Chip;
     assert_eq!(context_kind(&app), ContextKind::ChipField);
-    app.pending_chip = false;
-    app.pending_exclude = true;
+    app.pending = Pending::Exclude;
     assert_eq!(context_kind(&app), ContextKind::ChipField);
-    app.pending_exclude = false;
-    app.pending_yank = true;
+    app.pending = Pending::Yank;
     assert_eq!(context_kind(&app), ContextKind::Yank);
-    app.pending_yank = false;
+    app.pending.cancel(Pending::Yank);
     app.focus = Focus::ChipStrip;
-    app.pending_d = true;
+    app.pending = Pending::StripD;
     assert_eq!(context_kind(&app), ContextKind::StripD);
 }
 
 #[test]
 fn context_modal_beats_pending() {
     let mut app = app_with_focus(Focus::LogList);
-    app.pending_m = true;
+    app.pending = Pending::Mark;
     app.highlight_box.editing = true;
     assert_eq!(context_kind(&app), ContextKind::HighlightModal);
 }
@@ -209,7 +205,7 @@ fn status_idle_strip_is_help_and_del() {
 #[test]
 fn status_pending_chip_lists_fields() {
     let mut app = app_with_focus(Focus::LogList);
-    app.pending_chip = true;
+    app.pending = Pending::Chip;
     let spans = context_hint_spans(&app, 200).expect("wide enough");
     let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(text.contains("tag"), "{text:?}");
@@ -230,10 +226,10 @@ fn status_pending_and_modal_keep_full_context_entries() {
     };
 
     let mut app = app_with_focus(Focus::LogList);
-    app.pending_chip = true;
+    app.pending = Pending::Chip;
     assert_eq!(labels(&app), full(&app), "pending must not use idle 1–2");
 
-    app.pending_chip = false;
+    app.pending.cancel(Pending::Chip);
     app.detail = crate::app::DetailView::Fields;
     assert_eq!(labels(&app), full(&app), "Detail must expand full set");
     assert!(
@@ -283,9 +279,9 @@ fn help_body_still_lists_move_cursor() {
 fn help_available_on_strips_not_when_pending() {
     let mut app = app_with_focus(Focus::ChipStrip);
     assert!(help_available(&app));
-    app.pending_d = true;
+    app.pending = Pending::StripD;
     assert!(!help_available(&app));
-    app.pending_d = false;
+    app.pending.cancel(Pending::StripD);
     app.open_picker(crate::picker::PickerKind::Filter);
     assert!(!help_available(&app));
 }
@@ -494,7 +490,7 @@ fn compare_panel_blocks_help_and_uses_compare_context() {
 #[test]
 fn pending_m_says_compare_not_manage() {
     let mut app = app_with_focus(Focus::LogList);
-    app.pending_m = true;
+    app.pending = Pending::Mark;
     let labels: Vec<&str> = context_entries(&app).iter().map(|e| e.label).collect();
     assert!(labels.contains(&"compare"), "{labels:?}");
     assert!(!labels.contains(&"manage"), "{labels:?}");

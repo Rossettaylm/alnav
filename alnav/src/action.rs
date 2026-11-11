@@ -4,6 +4,7 @@
 //! module owns what an action *does* and which intent commands appear in the
 //! command palette.
 
+use crate::app::Pending;
 use crate::app::{App, Focus, LockKind, StripKind, ViewFocusKind, YankField};
 use crate::help::FAST_SCROLL_STEP;
 use crate::input::ChipField;
@@ -205,7 +206,7 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         LogListLeader => {
             app.clear_visual();
             app.clear_pending_all();
-            app.pending_leader = true;
+            app.pending = Pending::Leader;
         }
         LogListBookmark => app.begin_bookmark_op(),
         LogListChip => app.begin_chip_from_cursor(),
@@ -213,7 +214,7 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         LogListYank => {
             app.clear_visual();
             app.clear_pending_all();
-            app.pending_yank = true;
+            app.pending = Pending::Yank;
         }
         LogListLock => app.begin_lock_from_cursor(),
         LogListTime => {
@@ -255,13 +256,13 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         ChipFieldTid => apply_chip_field(app, ChipField::Tid),
         ChipFieldLevel => apply_chip_field(app, ChipField::Level),
         YankCli => {
-            app.pending_yank = false;
+            app.pending.cancel(Pending::Yank);
             let cmd = app.export_cli_command();
             app.apply_yank(cmd);
         }
         YankTag => yank_field(app, YankField::Tag),
         YankMsg => {
-            app.pending_yank = false;
+            app.pending.cancel(Pending::Yank);
             app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Yank);
         }
         YankPkg => yank_field(app, YankField::Pkg),
@@ -274,17 +275,16 @@ pub fn dispatch(app: &mut App, id: ActionId) {
             if let Some(kind) = focused_strip(app) {
                 app.delete_focused_strip_group(kind);
             }
-            app.pending_d = false;
+            app.pending.cancel(Pending::StripD);
         }
         StripDDisable => {
             if let Some(kind) = focused_strip(app) {
                 app.toggle_disable_focused(kind);
             }
-            app.pending_d = false;
+            app.pending.cancel(Pending::StripD);
         }
         StripPendingD => {
-            app.pending_leader = false;
-            app.pending_d = true;
+            app.pending = Pending::StripD;
         }
         StripPrevGroup => {
             if let Some(kind) = focused_strip(app) {
@@ -375,13 +375,13 @@ fn apply_esc_resume(app: &mut App) {
 
 fn apply_cancel(app: &mut App, id: ActionId) {
     match id {
-        ActionId::LeaderCancel => app.pending_leader = false,
+        ActionId::LeaderCancel => app.pending.cancel(Pending::Leader),
         ActionId::BookmarkCancel => app.cancel_bookmark_op(),
         ActionId::LockCancel => app.cancel_lock_pending(),
         ActionId::TimeCancel => app.cancel_time_pending(),
         ActionId::ChipFieldCancel => app.cancel_chip_from_cursor(),
-        ActionId::YankCancel => app.pending_yank = false,
-        ActionId::StripDCancel => app.pending_d = false,
+        ActionId::YankCancel => app.pending.cancel(Pending::Yank),
+        ActionId::StripDCancel => app.pending.cancel(Pending::StripD),
         ActionId::VisualCancel => {
             app.clear_visual();
             app.focus = Focus::LogList;
@@ -392,9 +392,8 @@ fn apply_cancel(app: &mut App, id: ActionId) {
 }
 
 fn apply_chip_field(app: &mut App, field: ChipField) {
-    let exclude = app.pending_exclude;
-    app.pending_chip = false;
-    app.pending_exclude = false;
+    let exclude = app.pending == Pending::Exclude;
+    app.pending.cancel_any(&[Pending::Chip, Pending::Exclude]);
     match field {
         ChipField::Msg => {
             app.begin_msg_token_picker(crate::picker::MsgChipPurpose::Chip { exclude });
@@ -410,7 +409,7 @@ fn apply_chip_field(app: &mut App, field: ChipField) {
 }
 
 fn yank_field(app: &mut App, field: YankField) {
-    app.pending_yank = false;
+    app.pending.cancel(Pending::Yank);
     if let Some(text) = app.yank_field(field) {
         app.apply_yank(text);
     }

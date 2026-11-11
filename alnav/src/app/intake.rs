@@ -1,5 +1,6 @@
 //! Row intake: ingest drain, FileStore polling, push/evict bookkeeping, and highlight scan restarts.
 
+use super::Pending;
 use super::{App, Visible, DRAIN_BUDGET_PER_FRAME};
 use crate::model::{is_severe_row, EntryRow};
 use crate::scan::HighlightDomain;
@@ -528,14 +529,7 @@ impl App {
         self.visible.clear();
         self.clear_bookmarks();
         self.clear_visual();
-        self.pending_d = false;
-        self.pending_yank = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending = Pending::None;
         self.cursor = 0;
         self.list_offset = 0;
         self.match_stats_stale = true;

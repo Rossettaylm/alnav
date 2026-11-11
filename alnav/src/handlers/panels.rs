@@ -1,6 +1,7 @@
 //! Overlay panel keys: highlight box, preset name, compare, help, summary, histogram, time, palette.
 
 use crate::app::App;
+use crate::app::Pending;
 use crate::handlers::picker::submit::apply_text_field_key;
 use crate::handlers::{focus_loglist, km_code, km_event, FAST_SCROLL_STEP};
 use crate::{app, keymap, time_panel};
@@ -271,8 +272,8 @@ pub(crate) fn handle_summary_key(app: &mut App, key: event::KeyEvent) {
         app.close_summary_panel();
         return;
     }
-    if app.pending_leader {
-        app.pending_leader = false;
+    if app.pending == Pending::Leader {
+        app.pending.cancel(Pending::Leader);
         if km_code(app, ActionId::LeaderSummary, key.code) {
             app.close_summary_panel();
         }
@@ -283,7 +284,7 @@ pub(crate) fn handle_summary_key(app: &mut App, key: event::KeyEvent) {
         return;
     }
     if km_code(app, ActionId::LogListLeader, key.code) {
-        app.pending_leader = true;
+        app.pending = Pending::Leader;
         return;
     }
     match key.code {

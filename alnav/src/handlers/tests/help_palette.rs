@@ -1,6 +1,7 @@
 //! Help panel, command palette and summary panel key tests.
 
 use crate::app::App;
+use crate::app::Pending;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::panels::{handle_help_key, handle_palette_key, handle_summary_key};
 use crate::handlers::{handle_normal_event, FAST_SCROLL_STEP};
@@ -335,7 +336,7 @@ fn help_search_no_match_flashes() {
 fn question_ignored_while_operator_pending() {
     let mut app = App::new(100);
     let mut input = input::InputBox::default();
-    app.pending_yank = true;
+    app.pending = Pending::Yank;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
     assert!(!app.help_open);
 }
@@ -373,14 +374,14 @@ fn pending_chip_then_ctrl_p_opens_palette() {
     let mut app = App::new(100);
     let mut input = input::InputBox::default();
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    assert!(app.pending_chip);
+    assert_eq!(app.pending, Pending::Chip);
     handle_normal_event(
         &mut app,
         &mut input,
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
     );
     assert!(app.command_palette.is_some());
-    assert!(!app.pending_chip);
+    assert_ne!(app.pending, Pending::Chip);
     assert!(app.command_palette.as_ref().unwrap().query.is_empty());
 }
 
@@ -479,9 +480,9 @@ fn space_i_opens_summary_panel_and_esc_closes_without_follow() {
     let mut input = input::InputBox::default();
     app.following = false;
     handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    assert!(app.pending_leader);
+    assert_eq!(app.pending, Pending::Leader);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
-    assert!(!app.pending_leader);
+    assert_ne!(app.pending, Pending::Leader);
     assert!(app.summary_open());
 
     handle_summary_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -501,12 +502,12 @@ fn space_i_while_open_toggles_close() {
         &mut app,
         KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
     );
-    assert!(app.pending_leader);
+    assert_eq!(app.pending, Pending::Leader);
     handle_summary_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
     );
-    assert!(!app.pending_leader);
+    assert_ne!(app.pending, Pending::Leader);
     assert!(!app.summary_open(), "Leader i while open re-toggles closed");
 }
 

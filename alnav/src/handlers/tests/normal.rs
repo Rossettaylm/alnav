@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::app::App;
+use crate::app::Pending;
 use crate::filter_model::Group;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::picker::keys::handle_picker_key;
@@ -140,9 +141,12 @@ fn test_dd_chord_requires_two_consecutive_d_presses() {
     });
     app.focus = app::Focus::ChipStrip;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
-    assert!(app.pending_d);
+    assert_eq!(app.pending, Pending::StripD);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('j')); // unrelated key in between
-    assert!(!app.pending_d, "pending_d should clear on a non-d key");
+    assert!(
+        app.pending != Pending::StripD,
+        "pending_d should clear on a non-d key"
+    );
     assert_eq!(app.groups.groups.len(), 1, "group should NOT be deleted");
 }
 
@@ -296,9 +300,9 @@ fn test_yy_yanks_raw_and_clears_pending() {
     let line = "04-02 10:00:00.000  1  1 I Tag     : hello";
     drain_lines(&mut app, &[line]);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
-    assert!(app.pending_yank);
+    assert_eq!(app.pending, Pending::Yank);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
-    assert!(!app.pending_yank);
+    assert_ne!(app.pending, Pending::Yank);
     assert_eq!(app.last_yanked.as_deref(), Some(line));
 }
 
@@ -347,7 +351,7 @@ fn test_capital_y_yanks_msg() {
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : onlymsg"]);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('Y'));
     assert_eq!(app.last_yanked.as_deref(), Some("onlymsg"));
-    assert!(!app.pending_yank);
+    assert_ne!(app.pending, Pending::Yank);
 }
 
 #[test]
@@ -357,7 +361,7 @@ fn test_yank_pending_esc_cancels() {
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
     handle_normal_key(&mut app, &mut input, KeyCode::Esc);
-    assert!(!app.pending_yank);
+    assert_ne!(app.pending, Pending::Yank);
     assert!(app.last_yanked.is_none());
 }
 
@@ -490,9 +494,9 @@ fn test_ct_pushes_tag_chip_and_narrows_visible() {
     app.following = true;
     app.cursor = 0;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    assert!(app.pending_chip);
+    assert_eq!(app.pending, Pending::Chip);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    assert!(!app.pending_chip);
+    assert_ne!(app.pending, Pending::Chip);
     assert_eq!(app.groups.groups.len(), 1);
     assert_eq!(app.groups.groups[0].chips[0].value, "Keep");
     assert_eq!(app.visible.len(), 2);
@@ -571,9 +575,9 @@ fn test_chip_pending_esc_does_not_resume_following() {
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
     app.following = false;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    assert!(app.pending_chip);
+    assert_eq!(app.pending, Pending::Chip);
     handle_normal_key(&mut app, &mut input, KeyCode::Esc);
-    assert!(!app.pending_chip);
+    assert_ne!(app.pending, Pending::Chip);
     assert!(
         !app.following,
         "Esc while pending_c must not resume following"
@@ -657,7 +661,7 @@ fn test_fp_locks_pid_and_ft_clears_pid_lock() {
     app.following = true;
     app.cursor = 0;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
-    assert!(app.pending_lock);
+    assert_eq!(app.pending, Pending::Lock);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
     assert_eq!(app.lock_pid.as_deref(), Some("111"));
     assert!(app.lock_tid.is_none());
@@ -736,7 +740,7 @@ fn test_lock_pending_esc_does_not_resume_or_clear_lock() {
     app.lock_pid = Some("111".into());
     handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
     handle_normal_key(&mut app, &mut input, KeyCode::Esc);
-    assert!(!app.pending_lock);
+    assert_ne!(app.pending, Pending::Lock);
     assert!(!app.following);
     assert_eq!(app.lock_pid.as_deref(), Some("111"));
 }
@@ -756,7 +760,7 @@ fn test_ct_exclude_hides_tag_and_dd_clears() {
     app.following = false;
     app.cursor = 1; // Spam
     handle_normal_key(&mut app, &mut input, KeyCode::Char('C'));
-    assert!(app.pending_exclude);
+    assert_eq!(app.pending, Pending::Exclude);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
     assert_eq!(app.groups.excludes.len(), 1);
     assert!(app.groups.excludes[0]
@@ -986,9 +990,9 @@ fn test_yc_yanks_cli_command() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('y'));
-    assert!(app.pending_yank);
+    assert_eq!(app.pending, Pending::Yank);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    assert!(!app.pending_yank);
+    assert_ne!(app.pending, Pending::Yank);
     let cmd = app.last_yanked.as_deref().unwrap();
     assert!(cmd.starts_with("alnav grep -f 'demo.log' -i -e "));
     assert!(cmd.contains(r#"tag ~ "MyTag""#), "{cmd}");

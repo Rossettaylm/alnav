@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::app::App;
+use crate::app::Pending;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::picker::keys::handle_picker_key;
 use crate::handlers::picker::render_data::{picker_render_data, unified_picker_items};
@@ -15,9 +16,9 @@ fn space_f_no_longer_opens_filter_picker() {
     let mut app = App::new(100);
     let mut input = input::InputBox::default();
     handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    assert!(app.pending_leader);
+    assert_eq!(app.pending, Pending::Leader);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
-    assert!(!app.pending_leader);
+    assert_ne!(app.pending, Pending::Leader);
     assert!(app.picker.is_none());
 }
 
@@ -28,9 +29,9 @@ fn space_space_opens_unified_manage() {
     let mut app = App::new(100);
     let mut input = input::InputBox::default();
     handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    assert!(app.pending_leader);
+    assert_eq!(app.pending, Pending::Leader);
     handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    assert!(!app.pending_leader);
+    assert_ne!(app.pending, Pending::Leader);
     let picker = app.picker.as_ref().expect("unified picker");
     assert_eq!(picker.kind, PickerKind::Unified);
     assert_eq!(picker.mode, PickerMode::Manage);
@@ -80,9 +81,9 @@ fn bare_keys_open_unified_or_new() {
     app.close_picker();
 
     handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    assert!(app.pending_m);
+    assert_eq!(app.pending, Pending::Mark);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    assert!(!app.pending_m);
+    assert_ne!(app.pending, Pending::Mark);
     assert!(app.picker.is_none(), "mm must not open the Bookmark picker");
     assert!(app.compare.is_none());
     assert_eq!(app.status_msg.as_deref(), Some("NO BOOKMARKS"));

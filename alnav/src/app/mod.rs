@@ -89,6 +89,50 @@ pub enum Mode {
     Insert,
 }
 
+/// Operator / chord prefix armed by its first key; the next key completes or
+/// cancels it. A single slot makes "at most one pending chord" structural.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pending {
+    #[default]
+    None,
+    /// `Space` leader.
+    Leader,
+    /// `y` yank field.
+    Yank,
+    /// `c` chip-from-cursor (H7).
+    Chip,
+    /// `C` exclude-from-cursor (H9).
+    Exclude,
+    /// `f` session lock / view focus (H8).
+    Lock,
+    /// `t` global time window (file mode).
+    Time,
+    /// `m` bookmark.
+    Mark,
+    /// First `d` on a chip strip (`dd` delete / `di` disable).
+    StripD,
+}
+
+impl Pending {
+    pub fn is_armed(self) -> bool {
+        self != Pending::None
+    }
+
+    /// Disarm only when `kind` is the armed chord.
+    pub fn cancel(&mut self, kind: Pending) {
+        if *self == kind {
+            *self = Pending::None;
+        }
+    }
+
+    /// Disarm when the armed chord is any of `kinds`.
+    pub fn cancel_any(&mut self, kinds: &[Pending]) {
+        if kinds.contains(self) {
+            *self = Pending::None;
+        }
+    }
+}
+
 /// Which chip strip the shared `h`/`l`/`dd`/`di` ops target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripKind {
@@ -202,21 +246,8 @@ pub struct App {
     pub group_cursor: usize,
     pub exclude_cursor: usize,
     pub highlight_cursor: usize,
-    /// Armed by first `d` on a chip strip; second `d` deletes, `i` toggles disable.
-    pub pending_d: bool,
-    pub pending_yank: bool,
-    /// Armed by `c` on LogList; second key picks a field (H7).
-    pub pending_chip: bool,
-    /// Armed by `C` on LogList; second key picks a field to exclude (H9).
-    pub pending_exclude: bool,
-    /// Armed by `f` on LogList; second key locks pid/tid or clears (H8).
-    pub pending_lock: bool,
-    /// Armed by `t` on LogList (file mode); second key opens/clears time window.
-    pub pending_time: bool,
-    /// Armed by `m` on LogList; second key is `a`/`d` (M2).
-    pub pending_m: bool,
-    /// Armed by leader key (`Space`); second key opens fzf-style picker (Task 5).
-    pub pending_leader: bool,
+    /// Armed operator / chord prefix awaiting its second key (`d`, `y`, `c`, `C`, `f`, `t`, `m`, leader).
+    pub pending: Pending,
     /// One-shot startup Dashboard (unbound source). `None` after first bind.
     pub dashboard: Option<crate::dashboard::DashboardState>,
     /// Persisted recent files (config dir).
@@ -362,14 +393,7 @@ impl App {
             group_cursor: 0,
             exclude_cursor: 0,
             highlight_cursor: 0,
-            pending_d: false,
-            pending_yank: false,
-            pending_chip: false,
-            pending_exclude: false,
-            pending_lock: false,
-            pending_time: false,
-            pending_m: false,
-            pending_leader: false,
+            pending: Pending::None,
             dashboard: None,
             recent: crate::recent::RecentFiles::default(),
             log_corpus: crate::log_corpus::LogCorpus::new(),

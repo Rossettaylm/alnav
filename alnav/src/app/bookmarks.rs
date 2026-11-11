@@ -1,5 +1,6 @@
 //! Session bookmarks and the compare tray.
 
+use super::Pending;
 use super::{App, Focus};
 use crate::bookmark::{AddError, Bookmark, ComparePanel, JumpResult};
 
@@ -7,26 +8,16 @@ impl App {
     /// Arm `m` operator-pending (M2 bookmarks).
     pub fn begin_bookmark_op(&mut self) {
         self.clear_visual();
-        self.pending_yank = false;
-        self.pending_d = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_m = false;
-        self.pending_leader = false;
-        self.pending_m = true;
+        self.pending = Pending::Mark;
     }
 
     pub fn cancel_bookmark_op(&mut self) {
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Mark, Pending::Leader]);
     }
 
     /// `ma`: toggle pin on the current LogList row (snapshot copy).
     pub fn bookmark_add_current(&mut self) {
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Mark, Pending::Leader]);
         let Some(row) = self.current_row() else {
             self.set_flash("NO ROW");
             return;
@@ -57,8 +48,7 @@ impl App {
 
     /// `mm`: open the compare panel, or flash `NO BOOKMARKS` when the tray is empty.
     pub fn open_compare_panel(&mut self) {
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Mark, Pending::Leader]);
         if self.bookmarks.is_empty() {
             self.set_flash("NO BOOKMARKS");
             return;
@@ -144,8 +134,7 @@ impl App {
 
     /// `md`: remove bookmark for current row.
     pub fn bookmark_remove_current(&mut self) {
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Mark, Pending::Leader]);
         let Some(row) = self.current_row() else {
             self.set_flash("NO ROW");
             return;

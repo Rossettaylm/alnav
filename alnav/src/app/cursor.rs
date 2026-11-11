@@ -1,5 +1,6 @@
 //! LogList cursor motion, follow mode, visual selection, and severe/highlight match jumps.
 
+use super::Pending;
 use super::{App, FindJumpResult};
 
 /// Max synchronous `row_at` parses per `find_severe` keypress in File mode
@@ -83,13 +84,9 @@ impl App {
         if self.visible.is_empty() {
             return;
         }
-        self.pending_yank = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_m = false;
-        self.pending_leader = false;
+        if self.pending != Pending::StripD {
+            self.pending = Pending::None;
+        }
         self.following = false;
         self.visual_anchor = Some(self.cursor);
     }

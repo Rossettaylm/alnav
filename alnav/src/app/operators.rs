@@ -1,5 +1,6 @@
 //! LogList operators: chip/exclude from cursor, msg token picker, lock, time window, view focus, and yank.
 
+use super::Pending;
 use super::{App, LockKind, ViewFocusKind, YankField};
 use crate::filter_model::TimeBound;
 use crate::highlight_model::HighlightGroup;
@@ -10,14 +11,7 @@ use crate::time_panel::TimePanel;
 impl App {
     /// Clear every operator-pending flag (leader / yank / chip / lock / …).
     pub fn clear_pending_all(&mut self) {
-        self.pending_d = false;
-        self.pending_yank = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending = Pending::None;
     }
 
     pub(super) fn sample_rows_for_dates(&self) -> Vec<EntryRow> {
@@ -84,32 +78,19 @@ impl App {
     /// Arm `c` operator-pending (clear other pendings; stay on LogList).
     pub fn begin_chip_from_cursor(&mut self) {
         self.clear_visual();
-        self.pending_yank = false;
-        self.pending_d = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_exclude = false;
-        self.pending_leader = false;
-        self.pending_chip = true;
+        self.pending = Pending::Chip;
     }
 
     /// Arm `C` operator-pending for exclude-from-cursor (H9).
     pub fn begin_exclude_from_cursor(&mut self) {
         self.clear_visual();
-        self.pending_yank = false;
-        self.pending_d = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_chip = false;
-        self.pending_leader = false;
-        self.pending_exclude = true;
+        self.pending = Pending::Exclude;
     }
 
     /// Cancel `c`/`C` pending / msg picker without touching `following`.
     pub fn cancel_chip_from_cursor(&mut self) {
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_leader = false;
+        self.pending
+            .cancel_any(&[Pending::Chip, Pending::Exclude, Pending::Leader]);
         if self
             .picker
             .as_ref()
@@ -122,38 +103,23 @@ impl App {
     /// Arm `f` operator-pending (H8 session lock).
     pub fn begin_lock_from_cursor(&mut self) {
         self.clear_visual();
-        self.pending_yank = false;
-        self.pending_d = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_time = false;
-        self.pending_leader = false;
-        self.pending_lock = true;
+        self.pending = Pending::Lock;
     }
 
     /// Cancel `f` pending without clearing lock or touching `following`.
     pub fn cancel_lock_pending(&mut self) {
-        self.pending_lock = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Lock, Pending::Leader]);
     }
 
     /// Arm `t` operator-pending (global time window; file mode only).
     pub fn begin_time_op(&mut self) {
         self.clear_visual();
-        self.pending_yank = false;
-        self.pending_d = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_m = false;
-        self.pending_leader = false;
-        self.pending_time = true;
+        self.pending = Pending::Time;
     }
 
     /// Cancel `t` pending without touching the bound or `following`.
     pub fn cancel_time_pending(&mut self) {
-        self.pending_time = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Time, Pending::Leader]);
     }
 
     /// Toggle one session view-focus bit (`fh` / `fe`). Same key again clears that
@@ -161,8 +127,7 @@ impl App {
     /// flash `NO HIGHLIGHT` and leave state. Sets `following=false` and rebuilds
     /// on a successful change.
     pub fn toggle_view_focus(&mut self, kind: ViewFocusKind) {
-        self.pending_lock = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Lock, Pending::Leader]);
         if kind == ViewFocusKind::Highlight
             && !self.view_focus.highlight
             && !self.highlight_groups.groups.iter().any(|g| g.enabled)
@@ -192,7 +157,7 @@ impl App {
     /// `tt`: open time panel from current rows / file sample. Returns false
     /// when refused (empty date candidates). Sets `following=false` on success.
     pub fn open_time_panel(&mut self) -> bool {
-        self.pending_time = false;
+        self.pending.cancel(Pending::Time);
         let catalog_rows = self.sample_rows_for_dates();
         match TimePanel::open_from_iter(catalog_rows.iter(), self.time_bound.as_ref()) {
             Some(panel) => {
@@ -210,13 +175,13 @@ impl App {
     /// Close time panel without applying (Esc). Does not resume following.
     pub fn close_time_panel(&mut self) {
         self.time_panel = None;
-        self.pending_time = false;
+        self.pending.cancel(Pending::Time);
     }
 
     /// Apply a submitted bound from the panel.
     pub fn apply_time_bound(&mut self, bound: TimeBound) {
         self.time_panel = None;
-        self.pending_time = false;
+        self.pending.cancel(Pending::Time);
         self.following = false;
         self.time_bound = Some(bound);
         self.rebuild_visible();
@@ -225,7 +190,7 @@ impl App {
 
     /// `tu`: clear global time window and rebuild.
     pub fn clear_time_bound(&mut self) {
-        self.pending_time = false;
+        self.pending.cancel(Pending::Time);
         self.time_panel = None;
         self.following = false;
         let had = self.time_bound.as_ref().is_some_and(|t| t.is_active());
@@ -254,8 +219,7 @@ impl App {
 
     /// `f` `u`: clear session lock and rebuild.
     pub fn clear_session_lock(&mut self) {
-        self.pending_lock = false;
-        self.pending_leader = false;
+        self.pending.cancel_any(&[Pending::Lock, Pending::Leader]);
         let had = self.lock_pid.is_some() || self.lock_tid.is_some();
         self.lock_pid = None;
         self.lock_tid = None;
@@ -354,16 +318,20 @@ impl App {
         };
         let tokens = crate::input::msg_token_candidates(&row.msg);
         if tokens.is_empty() {
-            self.pending_chip = false;
-            self.pending_exclude = false;
-            self.pending_yank = false;
-            self.pending_leader = false;
+            self.pending.cancel_any(&[
+                Pending::Chip,
+                Pending::Exclude,
+                Pending::Yank,
+                Pending::Leader,
+            ]);
             self.set_flash("NO TOKENS");
         } else {
-            self.pending_chip = false;
-            self.pending_exclude = false;
-            self.pending_yank = false;
-            self.pending_leader = false;
+            self.pending.cancel_any(&[
+                Pending::Chip,
+                Pending::Exclude,
+                Pending::Yank,
+                Pending::Leader,
+            ]);
             self.open_picker(crate::picker::PickerKind::MsgChip { purpose });
             let picker = self.picker.as_mut().expect("picker just opened");
             picker.enter_new();

@@ -1,6 +1,7 @@
 //! Status bar rendering tests.
 
 use super::*;
+use crate::app::Pending;
 use crate::app::{App, Focus};
 use crate::highlight_model::HighlightGroup;
 use crate::theme;
@@ -207,7 +208,7 @@ fn test_render_status_bar_pending_chip_has_fields_not_prefix() {
     let mut app = App::new(100);
     app.following = false;
     app.focus = Focus::LogList;
-    app.pending_chip = true;
+    app.pending = Pending::Chip;
 
     let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -230,7 +231,7 @@ fn test_render_status_bar_flash_pill_with_pending_l2() {
     let mut app = App::new(100);
     app.following = false;
     app.focus = Focus::LogList;
-    app.pending_chip = true;
+    app.pending = Pending::Chip;
     app.set_flash("EXISTS");
 
     let backend = TestBackend::new(100, 1);

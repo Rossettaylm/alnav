@@ -1,5 +1,6 @@
 //! Picker, command palette, source panels, confirm dialog, detail overlay, and flash toasts.
 
+use super::Pending;
 use super::{App, DetailView, Focus, Mode};
 use std::time::{Duration, Instant};
 
@@ -77,14 +78,7 @@ impl App {
     fn open_picker_with(&mut self, kind: crate::picker::PickerKind, prefer_new: bool) {
         use crate::picker::PickerSession;
 
-        self.pending_d = false;
-        self.pending_yank = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending = Pending::None;
         let mut session = PickerSession::open(kind);
         if prefer_new {
             session.enter_new();
@@ -147,7 +141,7 @@ impl App {
     pub fn close_picker(&mut self) {
         self.picker = None;
         self.confirm = None;
-        self.pending_leader = false;
+        self.pending.cancel(Pending::Leader);
         self.focus = Focus::LogList;
         self.vocab_match.clear();
     }

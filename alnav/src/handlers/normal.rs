@@ -1,13 +1,13 @@
 //! Normal-mode key handling: focus/strip/loglist keys, leader and strip `d` chords, chip helpers.
 
-use crate::app::App;
+use crate::app::{App, Pending};
 use crate::handlers::km_code;
-use crate::{app, input, keymap};
+use crate::keymap::ActionId;
+use crate::{app, input};
 use crossterm::event::KeyCode;
 
 fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> bool {
     use app::StripKind;
-    use keymap::ActionId;
     if !matches!(
         (kind, app.focus),
         (StripKind::Filter, app::Focus::ChipStrip)
@@ -16,7 +16,7 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
     ) {
         return false;
     }
-    if app.pending_d {
+    if app.pending == Pending::StripD {
         if km_code(app, ActionId::StripDDelete, code) {
             crate::action::dispatch(app, ActionId::StripDDelete);
             return true;
@@ -25,7 +25,7 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
             crate::action::dispatch(app, ActionId::StripDDisable);
             return true;
         }
-        app.pending_d = false;
+        app.pending.cancel(Pending::StripD);
         return false;
     }
     if km_code(app, ActionId::StripPendingD, code) {
@@ -36,9 +36,8 @@ fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> b
 }
 
 fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
-    use keymap::ActionId;
-    if app.pending_leader {
-        app.pending_leader = false;
+    if app.pending == Pending::Leader {
+        app.pending.cancel(Pending::Leader);
         if km_code(app, ActionId::LeaderManage, code) {
             crate::action::dispatch(app, ActionId::LeaderManage);
         } else if km_code(app, ActionId::LeaderSummary, code) {
@@ -60,36 +59,11 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
 
 pub(super) fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
     use app::{Focus, StripKind};
-    use keymap::ActionId;
 
     // Visual-line: handle selection motions / yank before anything else.
     if app.visual_anchor.is_some() && app.focus == Focus::LogList {
-        if km_code(app, ActionId::VisualMoveDown, code) {
-            crate::action::dispatch(app, ActionId::VisualMoveDown);
-            return;
-        }
-        if km_code(app, ActionId::VisualMoveUp, code) {
-            crate::action::dispatch(app, ActionId::VisualMoveUp);
-            return;
-        }
-        if km_code(app, ActionId::VisualJumpDown, code) {
-            crate::action::dispatch(app, ActionId::VisualJumpDown);
-            return;
-        }
-        if km_code(app, ActionId::VisualJumpUp, code) {
-            crate::action::dispatch(app, ActionId::VisualJumpUp);
-            return;
-        }
-        if km_code(app, ActionId::VisualYankRaw, code) {
-            crate::action::dispatch(app, ActionId::VisualYankRaw);
-            return;
-        }
-        if km_code(app, ActionId::VisualYankMsg, code) {
-            crate::action::dispatch(app, ActionId::VisualYankMsg);
-            return;
-        }
-        if km_code(app, ActionId::VisualCancel, code) {
-            crate::action::dispatch(app, ActionId::VisualCancel);
+        if let Some(id) = bound_action(app, VISUAL_KEYS, code) {
+            crate::action::dispatch(app, id);
             return;
         }
         app.clear_visual();
@@ -100,144 +74,27 @@ pub(super) fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, cod
         return;
     }
 
-    // Yank operator pending: consume the second key (or Esc) and return.
-    if app.pending_yank {
-        if app.focus == Focus::LogList {
-            let yank_id = if km_code(app, ActionId::YankCancel, code) {
-                Some(ActionId::YankCancel)
-            } else if km_code(app, ActionId::YankCli, code) {
-                Some(ActionId::YankCli)
-            } else if km_code(app, ActionId::YankMsg, code) {
-                Some(ActionId::YankMsg)
-            } else if km_code(app, ActionId::YankTag, code) {
-                Some(ActionId::YankTag)
-            } else if km_code(app, ActionId::YankPkg, code) {
-                Some(ActionId::YankPkg)
-            } else if km_code(app, ActionId::YankPid, code) {
-                Some(ActionId::YankPid)
-            } else if km_code(app, ActionId::YankTid, code) {
-                Some(ActionId::YankTid)
-            } else if km_code(app, ActionId::YankLevel, code) {
-                Some(ActionId::YankLevel)
-            } else if km_code(app, ActionId::YankRaw, code)
-                || km_code(app, ActionId::YankLine, code)
-            {
-                Some(ActionId::YankRaw)
-            } else if km_code(app, ActionId::YankTime, code) {
-                Some(ActionId::YankTime)
-            } else {
-                None
+    match app.pending {
+        Pending::Yank | Pending::Chip | Pending::Exclude => {
+            handle_field_operator(app, code);
+            return;
+        }
+        Pending::Lock | Pending::Time | Pending::Mark => {
+            let ids: &[ActionId] = match app.pending {
+                Pending::Lock => LOCK_CHORD,
+                Pending::Time => TIME_CHORD,
+                _ => MARK_CHORD,
             };
-            if let Some(id) = yank_id {
-                crate::action::dispatch(app, id);
-            } else {
-                app.pending_yank = false;
+            app.pending = Pending::None;
+            if app.focus == Focus::LogList {
+                match bound_action(app, ids, code) {
+                    Some(id) => crate::action::dispatch(app, id),
+                    None => app.set_flash("UNKNOWN"),
+                }
             }
-        } else {
-            app.pending_yank = false;
+            return;
         }
-        return;
-    }
-
-    // Chip-from-cursor operator pending.
-    if app.pending_chip {
-        if app.focus == Focus::LogList {
-            if km_code(app, ActionId::ChipFieldCancel, code) {
-                crate::action::dispatch(app, ActionId::ChipFieldCancel);
-            } else if let Some(id) = chip_action_from_keymap(app, code) {
-                crate::action::dispatch(app, id);
-            } else if chip_field_unsupported_key(app, code) {
-                app.pending_chip = false;
-                app.set_flash("NO RAW/TIMESTAMP");
-            } else {
-                app.pending_chip = false;
-                app.set_flash("UNKNOWN FIELD");
-            }
-        } else {
-            app.pending_chip = false;
-        }
-        return;
-    }
-
-    // Exclude-from-cursor operator pending.
-    if app.pending_exclude {
-        if app.focus == Focus::LogList {
-            if km_code(app, ActionId::ChipFieldCancel, code) {
-                crate::action::dispatch(app, ActionId::ChipFieldCancel);
-            } else if let Some(id) = chip_action_from_keymap(app, code) {
-                crate::action::dispatch(app, id);
-            } else if chip_field_unsupported_key(app, code) {
-                app.pending_exclude = false;
-                app.set_flash("NO RAW/TIMESTAMP");
-            } else {
-                app.pending_exclude = false;
-                app.set_flash("UNKNOWN FIELD");
-            }
-        } else {
-            app.pending_exclude = false;
-        }
-        return;
-    }
-
-    // Session lock / view-focus operator pending.
-    if app.pending_lock {
-        app.pending_lock = false;
-        if app.focus == Focus::LogList {
-            if km_code(app, ActionId::LockCancel, code) {
-                crate::action::dispatch(app, ActionId::LockCancel);
-            } else if km_code(app, ActionId::LockPid, code) {
-                crate::action::dispatch(app, ActionId::LockPid);
-            } else if km_code(app, ActionId::LockTid, code) {
-                crate::action::dispatch(app, ActionId::LockTid);
-            } else if km_code(app, ActionId::LockClear, code) {
-                crate::action::dispatch(app, ActionId::LockClear);
-            } else if km_code(app, ActionId::LockViewHighlight, code) {
-                crate::action::dispatch(app, ActionId::LockViewHighlight);
-            } else if km_code(app, ActionId::LockViewSevere, code) {
-                crate::action::dispatch(app, ActionId::LockViewSevere);
-            } else {
-                app.set_flash("UNKNOWN");
-            }
-        }
-        return;
-    }
-
-    // Global time-window operator pending (file mode).
-    if app.pending_time {
-        app.pending_time = false;
-        if app.focus == Focus::LogList {
-            if km_code(app, ActionId::TimeCancel, code) {
-                crate::action::dispatch(app, ActionId::TimeCancel);
-            } else if km_code(app, ActionId::TimeSet, code) {
-                crate::action::dispatch(app, ActionId::TimeSet);
-            } else if km_code(app, ActionId::TimeClear, code) {
-                crate::action::dispatch(app, ActionId::TimeClear);
-            } else if km_code(app, ActionId::TimeHistogram, code) {
-                crate::action::dispatch(app, ActionId::TimeHistogram);
-            } else {
-                app.set_flash("UNKNOWN");
-            }
-        }
-        return;
-    }
-
-    // Bookmark operator pending.
-    if app.pending_m {
-        app.pending_m = false;
-        if app.focus == Focus::LogList {
-            if km_code(app, ActionId::BookmarkCancel, code) {
-                crate::action::dispatch(app, ActionId::BookmarkCancel);
-            } else if km_code(app, ActionId::BookmarkAdd, code) {
-                crate::action::dispatch(app, ActionId::BookmarkAdd);
-            } else if km_code(app, ActionId::BookmarkRemove, code) {
-                crate::action::dispatch(app, ActionId::BookmarkRemove);
-            } else if km_code(app, ActionId::BookmarkManage, code) {
-                crate::action::dispatch(app, ActionId::BookmarkManage);
-            } else {
-                app.set_flash("UNKNOWN");
-            }
-        }
-        return;
+        Pending::None | Pending::Leader | Pending::StripD => {}
     }
 
     // Filter / Exclude / Highlight strip: dd delete, di toggle disable.
@@ -251,7 +108,7 @@ pub(super) fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, cod
         return;
     }
     if !km_code(app, ActionId::StripPendingD, code) {
-        app.pending_d = false;
+        app.pending.cancel(Pending::StripD);
     }
 
     if km_code(app, ActionId::GlobalQuit, code) {
@@ -361,28 +218,93 @@ pub(super) fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, cod
     }
 }
 
-fn chip_action_from_keymap(app: &App, code: KeyCode) -> Option<keymap::ActionId> {
-    use keymap::ActionId;
-    if km_code(app, ActionId::ChipFieldTag, code) {
-        Some(ActionId::ChipFieldTag)
-    } else if km_code(app, ActionId::ChipFieldMsg, code) {
-        Some(ActionId::ChipFieldMsg)
-    } else if km_code(app, ActionId::ChipFieldPkg, code) {
-        Some(ActionId::ChipFieldPkg)
-    } else if km_code(app, ActionId::ChipFieldPid, code) {
-        Some(ActionId::ChipFieldPid)
-    } else if km_code(app, ActionId::ChipFieldTid, code) {
-        Some(ActionId::ChipFieldTid)
-    } else if km_code(app, ActionId::ChipFieldLevel, code) {
-        Some(ActionId::ChipFieldLevel)
-    } else {
-        None
+const VISUAL_KEYS: &[ActionId] = &[
+    ActionId::VisualMoveDown,
+    ActionId::VisualMoveUp,
+    ActionId::VisualJumpDown,
+    ActionId::VisualJumpUp,
+    ActionId::VisualYankRaw,
+    ActionId::VisualYankMsg,
+    ActionId::VisualCancel,
+];
+
+const YANK_CHORD: &[ActionId] = &[
+    ActionId::YankCancel,
+    ActionId::YankCli,
+    ActionId::YankMsg,
+    ActionId::YankTag,
+    ActionId::YankPkg,
+    ActionId::YankPid,
+    ActionId::YankTid,
+    ActionId::YankLevel,
+    ActionId::YankRaw,
+    ActionId::YankLine,
+    ActionId::YankTime,
+];
+
+const CHIP_CHORD: &[ActionId] = &[
+    ActionId::ChipFieldCancel,
+    ActionId::ChipFieldTag,
+    ActionId::ChipFieldMsg,
+    ActionId::ChipFieldPkg,
+    ActionId::ChipFieldPid,
+    ActionId::ChipFieldTid,
+    ActionId::ChipFieldLevel,
+];
+
+const LOCK_CHORD: &[ActionId] = &[
+    ActionId::LockCancel,
+    ActionId::LockPid,
+    ActionId::LockTid,
+    ActionId::LockClear,
+    ActionId::LockViewHighlight,
+    ActionId::LockViewSevere,
+];
+
+const TIME_CHORD: &[ActionId] = &[
+    ActionId::TimeCancel,
+    ActionId::TimeSet,
+    ActionId::TimeClear,
+    ActionId::TimeHistogram,
+];
+
+const MARK_CHORD: &[ActionId] = &[
+    ActionId::BookmarkCancel,
+    ActionId::BookmarkAdd,
+    ActionId::BookmarkRemove,
+    ActionId::BookmarkManage,
+];
+
+/// First action in `ids` (priority order) whose binding matches `code`.
+fn bound_action(app: &App, ids: &[ActionId], code: KeyCode) -> Option<ActionId> {
+    ids.iter().copied().find(|&id| km_code(app, id, code))
+}
+
+/// Second key of `y` / `c` / `C`. The dispatched action disarms the chord;
+/// an unmatched key disarms here (with a flash for chip fields).
+fn handle_field_operator(app: &mut App, code: KeyCode) {
+    let yank = app.pending == Pending::Yank;
+    if app.focus != app::Focus::LogList {
+        app.pending = Pending::None;
+        return;
+    }
+    let ids = if yank { YANK_CHORD } else { CHIP_CHORD };
+    if let Some(id) = bound_action(app, ids, code) {
+        crate::action::dispatch(app, id);
+        return;
+    }
+    app.pending = Pending::None;
+    if !yank {
+        app.set_flash(if chip_field_unsupported_key(app, code) {
+            "NO RAW/TIMESTAMP"
+        } else {
+            "UNKNOWN FIELD"
+        });
     }
 }
 
 /// Keys that are valid yank fields but not chip fields (`r`/`y`/`s` by default).
 fn chip_field_unsupported_key(app: &App, code: KeyCode) -> bool {
-    use keymap::ActionId;
     km_code(app, ActionId::YankRaw, code)
         || km_code(app, ActionId::YankLine, code)
         || km_code(app, ActionId::YankTime, code)

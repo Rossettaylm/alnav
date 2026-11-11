@@ -1,5 +1,6 @@
 //! Session capture/restore, source switching, and recent-file tracking.
 
+use super::Pending;
 use super::{App, DetailView, Focus, Mode, SummaryView, ViewFocus, Visible};
 use crate::bookmark::Bookmark;
 use crate::help::HelpView;
@@ -42,14 +43,7 @@ impl App {
         self.highlight_domain = None;
         self.vocab = Vocab::default();
         self.vocab_match.clear();
-        self.pending_d = false;
-        self.pending_yank = false;
-        self.pending_chip = false;
-        self.pending_exclude = false;
-        self.pending_lock = false;
-        self.pending_time = false;
-        self.pending_m = false;
-        self.pending_leader = false;
+        self.pending = Pending::None;
         self.close_source_panels();
         self.picker = None;
         self.preset_name = None;

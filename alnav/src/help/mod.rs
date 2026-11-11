@@ -40,15 +40,7 @@ pub fn help_available(app: &App) -> bool {
     {
         return false;
     }
-    if app.pending_leader
-        || app.pending_m
-        || app.pending_lock
-        || app.pending_time
-        || app.pending_chip
-        || app.pending_exclude
-        || app.pending_yank
-        || app.pending_d
-    {
+    if app.pending.is_armed() {
         return false;
     }
     matches!(

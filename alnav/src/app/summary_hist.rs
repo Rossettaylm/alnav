@@ -1,6 +1,7 @@
 //! Summary and histogram panels with their background report jobs.
 
 use super::bg_job::JobTicket;
+use super::Pending;
 use super::{App, SummaryReport, SummaryView, Visible};
 use crate::hist_panel;
 use crate::hist_panel::{HistReport, HistView};
@@ -213,7 +214,7 @@ impl App {
 
     /// `th`: open the time histogram over current `visible`. File export only.
     pub fn open_hist_panel(&mut self) -> bool {
-        self.pending_time = false;
+        self.pending.cancel(Pending::Time);
         if !self.is_file_mode() {
             return false;
         }

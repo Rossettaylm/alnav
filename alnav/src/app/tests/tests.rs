@@ -1,6 +1,7 @@
 //! Core `App` behaviour tests (filters, intake, panels, sessions).
 
 use super::*;
+use crate::app::Pending;
 use crate::filter_model::Group;
 use std::sync::mpsc;
 
@@ -505,8 +506,7 @@ fn clear_buffered_logs_drops_buffers_keeps_filters_and_resumes() {
     app.following = false;
     app.cursor = 0;
     app.list_offset = 0;
-    app.pending_yank = true;
-    app.pending_chip = true;
+    app.pending = Pending::Chip;
     app.visual_anchor = Some(0);
 
     app.clear_buffered_logs();
@@ -522,8 +522,8 @@ fn clear_buffered_logs_drops_buffers_keeps_filters_and_resumes() {
     assert!(app.following);
     assert_eq!(app.cursor, 0);
     assert_eq!(app.list_offset, 0);
-    assert!(!app.pending_yank);
-    assert!(!app.pending_chip);
+    assert_ne!(app.pending, Pending::Yank);
+    assert_ne!(app.pending, Pending::Chip);
     assert!(app.visual_anchor.is_none());
     assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
 }

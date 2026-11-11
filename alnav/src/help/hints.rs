@@ -1,6 +1,7 @@
 //! Status-bar / Help Active hint entries: `HintEntry`, `ContextKind`, L1 sets, `context_hint_spans`.
 
 use super::MIN_HELP_WIDTH;
+use crate::app::Pending;
 use crate::app::{App, Focus};
 use crate::keymap::ActionId;
 use crate::theme;
@@ -172,26 +173,15 @@ pub fn context_kind(app: &App) -> ContextKind {
     if app.detail_open() {
         return ContextKind::Detail;
     }
-    if app.pending_leader {
-        return ContextKind::Leader;
-    }
-    if app.pending_m {
-        return ContextKind::Bookmark;
-    }
-    if app.pending_lock {
-        return ContextKind::Lock;
-    }
-    if app.pending_time {
-        return ContextKind::Time;
-    }
-    if app.pending_chip || app.pending_exclude {
-        return ContextKind::ChipField;
-    }
-    if app.pending_yank {
-        return ContextKind::Yank;
-    }
-    if app.pending_d {
-        return ContextKind::StripD;
+    match app.pending {
+        Pending::Leader => return ContextKind::Leader,
+        Pending::Mark => return ContextKind::Bookmark,
+        Pending::Lock => return ContextKind::Lock,
+        Pending::Time => return ContextKind::Time,
+        Pending::Chip | Pending::Exclude => return ContextKind::ChipField,
+        Pending::Yank => return ContextKind::Yank,
+        Pending::StripD => return ContextKind::StripD,
+        Pending::None => {}
     }
     match app.focus {
         Focus::Input => ContextKind::Input,

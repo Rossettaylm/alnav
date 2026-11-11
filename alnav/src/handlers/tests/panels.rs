@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::app::App;
+use crate::app::Pending;
 use crate::handlers::handle_normal_event;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::panels::{
@@ -200,11 +201,11 @@ fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
     );
     app.following = true;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    assert!(app.pending_time);
+    assert_eq!(app.pending, Pending::Time);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
     assert!(app.time_panel.is_some());
     assert!(!app.following, "tt opens with following=false");
-    assert!(!app.pending_time);
+    assert_ne!(app.pending, Pending::Time);
 
     // Submit a one-sided since window via panel API (key path covered above).
     app.apply_time_bound(crate::filter_model::TimeBound {
@@ -384,12 +385,12 @@ fn test_tt_empty_candidates_flashes_and_live_modes_hide_t() {
     app.status_msg = None;
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : a"]);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    assert!(!app.pending_time);
+    assert_ne!(app.pending, Pending::Time);
     assert!(app.time_panel.is_none());
 
     app.export_source = export::ExportSource::Adb { device: None };
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    assert!(!app.pending_time);
+    assert_ne!(app.pending, Pending::Time);
     assert!(app.time_panel.is_none());
 }
 
@@ -429,7 +430,7 @@ fn test_ma_toggles_and_mm_opens_compare_not_picker() {
     app.following = false;
     app.cursor = 0;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    assert!(app.pending_m);
+    assert_eq!(app.pending, Pending::Mark);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
     assert_eq!(app.bookmarks.len(), 1);
     assert_eq!(app.status_msg.as_deref(), Some("BOOKMARKED"));
