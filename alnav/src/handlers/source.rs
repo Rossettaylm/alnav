@@ -37,7 +37,7 @@ pub(crate) fn handle_dashboard_key(
             }
         }
         Some(dashboard::DashboardAction::OpenFilePicker) => {
-            app.open_file_source_panel(true);
+            app.open_file_source_panel();
         }
         Some(dashboard::DashboardAction::OpenRecent(path)) => {
             *live = None;

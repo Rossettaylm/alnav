@@ -7,8 +7,8 @@ use super::strips::{
 };
 use super::text::spans_display_width;
 use super::{
-    centered_modal_rect, clear_to_canvas, detail_field_lines, editable_text_spans, modal_width,
-    picker_frame_rect, picker_left_stack, render_candidate_list, render_modal_shell, rounded_block,
+    centered_modal_rect, clear_to_canvas, editable_text_spans, modal_width, picker_frame_rect,
+    picker_left_stack, render_candidate_list, render_modal_shell, rounded_block,
     split_picker_lr_gapped, ActionKind, PICKER_SEARCH_HEIGHT,
 };
 use crate::input::ChipField;
@@ -386,25 +386,6 @@ pub fn render_preset_name_dialog(
             .saturating_add(prefix_w.saturating_add(caret_col).min(inner.width)),
         y: inner.y,
     })
-}
-
-/// Bookmark picker right pane: same Fields shell/content as LogList `p`.
-pub fn render_picker_detail(row: Option<&crate::model::EntryRow>, frame: &mut Frame, area: Rect) {
-    if area.height == 0 {
-        return;
-    }
-    let inner = render_modal_shell("Detail", frame, area);
-    let lines = if row.is_some() {
-        detail_field_lines(row, inner.width)
-    } else {
-        vec![Line::from(Span::styled(
-            "row gone".to_string(),
-            theme::preview_placeholder_style(),
-        ))]
-    };
-    let max_rows = inner.height as usize;
-    let shown: Vec<Line<'static>> = lines.into_iter().take(max_rows).collect();
-    frame.render_widget(Paragraph::new(shown), inner);
 }
 
 /// Destructive confirm, overlaid at the frame center.

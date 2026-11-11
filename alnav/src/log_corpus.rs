@@ -86,14 +86,17 @@ impl LogCorpus {
         &self.entries
     }
 
+    #[cfg(test)]
     pub fn phase(&self) -> CorpusPhase {
         self.phase
     }
 
+    #[cfg(test)]
     pub fn found_count(&self) -> usize {
         self.entries.len()
     }
 
+    #[cfg(test)]
     pub fn is_scanning(&self) -> bool {
         self.phase == CorpusPhase::Scanning
     }

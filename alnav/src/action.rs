@@ -236,8 +236,8 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         LockViewHighlight => app.toggle_view_focus(ViewFocusKind::Highlight),
         LockViewSevere => app.toggle_view_focus(ViewFocusKind::Severe),
         LockClear => app.clear_session_lock(),
-        OpenFile => app.open_file_source_panel(app.dashboard.is_some()),
-        OpenStream => app.open_stream_source_panel(app.dashboard.is_some()),
+        OpenFile => app.open_file_source_panel(),
+        OpenStream => app.open_stream_source_panel(),
         TimeSet => {
             if app.is_file_mode() {
                 let _ = app.open_time_panel();
@@ -433,16 +433,6 @@ fn focused_strip(app: &App) -> Option<StripKind> {
     }
 }
 
-/// Palette titles/icons from [`ActionId::meta`] (design.md table).
-pub fn palette_spec(id: ActionId) -> Option<(&'static str, &'static str)> {
-    let m = id.meta();
-    if m.in_palette {
-        Some((m.palette_title, m.palette_icon))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,7 +596,9 @@ mod tests {
             );
         }
         for (id, title, icon) in expected {
-            assert_eq!(palette_spec(id), Some((title, icon)), "{id:?}");
+            let m = id.meta();
+            assert!(m.in_palette, "{id:?}");
+            assert_eq!((m.palette_title, m.palette_icon), (title, icon), "{id:?}");
         }
         assert!(!ActionId::GlobalCommandPalette.meta().in_palette);
         for &id in &[

@@ -71,7 +71,7 @@ impl App {
         self.picker = Some(session);
     }
 
-    pub fn open_file_source_panel(&mut self, from_dashboard: bool) {
+    pub fn open_file_source_panel(&mut self) {
         self.clear_pending_all();
         self.stream_source_panel = None;
         self.picker = None;
@@ -86,19 +86,17 @@ impl App {
         self.open_file_panel = Some(crate::source_panel::OpenFilePanel::open(
             &self.recent,
             &self.log_corpus,
-            from_dashboard,
         ));
     }
 
-    pub fn open_stream_source_panel(&mut self, from_dashboard: bool) {
+    pub fn open_stream_source_panel(&mut self) {
         self.clear_pending_all();
         if self.open_file_panel.is_some() {
             self.log_corpus.cancel_inflight();
         }
         self.open_file_panel = None;
         self.picker = None;
-        self.stream_source_panel =
-            Some(crate::source_panel::StreamSourcePanel::new(from_dashboard));
+        self.stream_source_panel = Some(crate::source_panel::StreamSourcePanel::new());
     }
 
     pub fn close_open_file_panel(&mut self) {

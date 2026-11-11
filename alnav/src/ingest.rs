@@ -1,7 +1,11 @@
 use std::collections::VecDeque;
+#[cfg(test)]
 use std::fs::File;
+#[cfg(test)]
 use std::io::{self, BufRead, BufReader};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -50,17 +54,15 @@ impl TryRecvRow for Arc<DropOldestRing> {
 
 /// Owned ingest handle for the main event loop.
 ///
-/// `-f` now uses [`crate::store::FileStore`] (no row channel). `Channel` remains
-/// for unit tests and any transitional callers; live sources use [`Self::Ring`].
+/// `-f` uses [`crate::store::FileStore`] (no row channel); live sources use
+/// [`Self::Ring`].
 pub enum IngestHandle {
-    Channel(Receiver<EntryRow>),
     Ring(Arc<DropOldestRing>),
 }
 
 impl TryRecvRow for IngestHandle {
     fn try_recv_row(&self) -> Result<EntryRow, TryRecvKind> {
         match self {
-            IngestHandle::Channel(rx) => rx.try_recv_row(),
             IngestHandle::Ring(ring) => ring.try_recv_row(),
         }
     }
@@ -125,25 +127,29 @@ impl DropOldestRing {
         }
     }
 
-    /// Current buffered length (tests / diagnostics).
+    /// Current buffered length (tests).
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.inner.lock().expect("ingest ring mutex").buf.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    #[cfg(test)]
     pub fn capacity(&self) -> usize {
         self.cap
     }
 }
 
-/// Legacy line→`EntryRow` channel ingest (unit tests). Production `-f` uses
-/// [`crate::store::FileStore::open`] instead.
+/// Legacy line→`EntryRow` channel ingest (unit tests only). Production `-f`
+/// uses [`crate::store::FileStore::open`] instead.
 ///
 /// The file is opened before spawning the thread so a missing/unreadable
 /// path surfaces as an immediate `Err` to the caller.
+#[cfg(test)]
 pub fn spawn_file_ingest(path: String) -> io::Result<Receiver<EntryRow>> {
     let file = File::open(&path)?;
     let (tx, rx) = mpsc::channel();

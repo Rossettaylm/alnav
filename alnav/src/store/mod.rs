@@ -65,13 +65,6 @@ impl RowStore {
         matches!(self, RowStore::File(_))
     }
 
-    pub fn as_stream(&self) -> Option<&StreamStore> {
-        match self {
-            RowStore::Stream(s) => Some(s),
-            RowStore::File(_) => None,
-        }
-    }
-
     pub fn as_stream_mut(&mut self) -> Option<&mut StreamStore> {
         match self {
             RowStore::Stream(s) => Some(s),
@@ -90,13 +83,6 @@ impl RowStore {
         match self {
             RowStore::File(f) => Some(f),
             RowStore::Stream(_) => None,
-        }
-    }
-
-    pub fn source_len(&self, filter_active: bool) -> usize {
-        match self {
-            RowStore::Stream(s) => s.view_source(filter_active).len(),
-            RowStore::File(f) => f.line_count(),
         }
     }
 

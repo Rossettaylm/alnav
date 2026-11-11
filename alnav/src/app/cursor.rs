@@ -284,14 +284,6 @@ impl App {
         false
     }
 
-    /// Jump to the first visible row matching the newest search group.
-    pub fn jump_first_match(&mut self) -> bool {
-        let Some(group_idx) = self.highlight_groups.groups.len().checked_sub(1) else {
-            return false;
-        };
-        self.jump_first_match_of(group_idx)
-    }
-
     /// Search hit position among visible rows for the globally active group.
     /// Recomputes lazily when the stale flag is set OR the cursor moved since
     /// the last computation (handles direct `cursor` field writes in tests).

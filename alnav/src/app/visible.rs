@@ -37,11 +37,6 @@ impl App {
         self.index.row_at(vis_i, self.filter_active())
     }
 
-    /// Whether the session still has no bound source (Dashboard active).
-    pub fn is_unbound(&self) -> bool {
-        self.dashboard.is_some()
-    }
-
     /// File-mode sessions may interactively edit the global time window.
     pub fn is_file_mode(&self) -> bool {
         self.export_source.is_file()
@@ -121,11 +116,6 @@ impl App {
     #[cfg(test)]
     pub fn view_source(&self) -> &VecDeque<EntryRow> {
         self.index.view_source(self.filter_active())
-    }
-
-    /// Number of currently visible rows.
-    pub fn visible_len(&self) -> usize {
-        self.index.visible.len()
     }
 
     /// Source index for visible slot `vis_i`.
@@ -294,15 +284,6 @@ impl App {
         if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
-    }
-
-    /// Collect currently visible rows (owned clones; prefer [`Self::row_at`]
-    /// for hot paths).
-    pub fn visible_rows(&self) -> Vec<EntryRow> {
-        let len = self.index.visible.len();
-        (0..len)
-            .filter_map(|i| self.row_at(i).map(|r| r.into_owned()))
-            .collect()
     }
 
     pub fn current_row(&self) -> Option<RowRef<'_>> {

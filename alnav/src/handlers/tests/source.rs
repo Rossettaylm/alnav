@@ -1,9 +1,9 @@
 //! Dashboard / source-panel / Ctrl-L / source-chord dispatch tests.
 
 use crate::app::App;
+use crate::handlers::handle_normal_event;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::source::handle_dashboard_key;
-use crate::handlers::{handle_normal_event, try_handle_ctrl_l};
 use crate::{app, dashboard, input, model, recent};
 use crossterm::event::KeyCode;
 use crossterm::event::{KeyEvent, KeyModifiers};
@@ -74,7 +74,7 @@ fn ctrl_l_clears_buffers_in_hdc_loglist() {
     app.drain(&rx);
     assert_eq!(app.rows().len(), 1);
 
-    try_handle_ctrl_l(&mut app);
+    crate::action::dispatch(&mut app, crate::keymap::ActionId::LogListClearLive);
     assert!(app.rows().is_empty());
     assert!(app.following);
     assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
@@ -93,7 +93,7 @@ fn ctrl_l_clears_buffers_in_adb_loglist() {
     drop(tx);
     app.drain(&rx);
 
-    try_handle_ctrl_l(&mut app);
+    crate::action::dispatch(&mut app, crate::keymap::ActionId::LogListClearLive);
     assert!(app.rows().is_empty());
     assert_eq!(app.status_msg.as_deref(), Some("CLEARED"));
 }
@@ -110,7 +110,7 @@ fn ctrl_l_noop_in_file_mode() {
         .unwrap();
     drop(tx);
     app.drain(&rx);
-    try_handle_ctrl_l(&mut app);
+    crate::action::dispatch(&mut app, crate::keymap::ActionId::LogListClearLive);
     assert_eq!(app.rows().len(), 1);
     assert_ne!(app.status_msg.as_deref(), Some("CLEARED"));
 }
@@ -130,7 +130,7 @@ fn ctrl_l_noop_when_detail_open() {
     app.toggle_detail_fields();
     assert!(app.detail_open());
 
-    try_handle_ctrl_l(&mut app);
+    crate::action::dispatch(&mut app, crate::keymap::ActionId::LogListClearLive);
     assert_eq!(app.rows().len(), 1);
     assert_ne!(app.status_msg.as_deref(), Some("CLEARED"));
 }
@@ -180,10 +180,7 @@ fn dashboard_ctrl_f_opens_file_and_ctrl_g_opens_stream() {
         &mut live,
         KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
     );
-    assert!(app
-        .open_file_panel
-        .as_ref()
-        .is_some_and(|p| p.from_dashboard));
+    assert!(app.open_file_panel.as_ref().is_some());
     assert!(app.stream_source_panel.is_none());
 
     handle_dashboard_key(
@@ -192,10 +189,7 @@ fn dashboard_ctrl_f_opens_file_and_ctrl_g_opens_stream() {
         KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
     );
     assert!(app.open_file_panel.is_none());
-    assert!(app
-        .stream_source_panel
-        .as_ref()
-        .is_some_and(|p| p.from_dashboard));
+    assert!(app.stream_source_panel.as_ref().is_some());
 }
 
 #[test]

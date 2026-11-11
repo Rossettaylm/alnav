@@ -88,6 +88,7 @@ impl InputBox {
         }
     }
 
+    #[cfg(test)]
     pub fn set_field(&mut self, field: ChipField) {
         self.draft_field = Some(field);
         self.field_selected = 0;

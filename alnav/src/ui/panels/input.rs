@@ -6,9 +6,9 @@ use crate::input::InputBox;
 use crate::theme;
 use crate::ui::strips::committed_chip_spans;
 use crate::ui::text::spans_display_width;
-use crate::ui::{
-    clear_to_canvas, divider_block, editable_text_spans, render_modal_shell, PILL_GAP,
-};
+#[cfg(test)]
+use crate::ui::{clear_to_canvas, divider_block};
+use crate::ui::{editable_text_spans, render_modal_shell, PILL_GAP};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -70,6 +70,7 @@ pub fn render_input_modal(
 }
 
 /// Legacy single-row Input render kept for unit tests that draw into a fixed area.
+#[cfg(test)]
 pub fn render_input_box(
     input: &InputBox,
     mode: Mode,

@@ -96,12 +96,6 @@ impl TextField {
         std::mem::take(&mut self.text)
     }
 
-    /// Split at the caret: `(before, after)`.
-    pub fn split_at_cursor(&self) -> (&str, &str) {
-        let byte = self.byte_index(self.cursor);
-        (&self.text[..byte], &self.text[byte..])
-    }
-
     pub fn insert(&mut self, c: char) {
         let byte = self.byte_index(self.cursor);
         self.text.insert(byte, c);
@@ -309,14 +303,6 @@ mod tests {
         f.move_right();
         assert!(f.backspace());
         assert_eq!(f.as_str(), "aXb");
-    }
-
-    #[test]
-    fn split_at_cursor() {
-        let mut f = TextField::from_text("ab");
-        f.move_left();
-        let (a, b) = f.split_at_cursor();
-        assert_eq!((a, b), ("a", "b"));
     }
 
     #[test]

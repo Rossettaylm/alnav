@@ -298,6 +298,8 @@ fn entry_text_styles(row: &EntryRow) -> (Style, Style) {
     (base.add_modifier(Modifier::BOLD), base)
 }
 
+/// Numbered LogList-shaped render (tests pin wrap / paint / lineno layout).
+#[cfg(test)]
 pub(super) fn render_entry_lines(
     row: &EntryRow,
     patterns: &[PaintPattern<'_>],

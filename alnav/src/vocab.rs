@@ -47,22 +47,6 @@ impl Vocab {
         }
     }
 
-    pub fn tag_candidates(&self, query: &str) -> Vec<String> {
-        self.candidates(CandidateScope::Tag, query)
-    }
-
-    pub fn pkg_candidates(&self, query: &str) -> Vec<String> {
-        self.candidates(CandidateScope::Pkg, query)
-    }
-
-    pub fn msg_candidates(&self, query: &str) -> Vec<String> {
-        self.candidates(CandidateScope::Msg, query)
-    }
-
-    pub fn all_candidates(&self, query: &str) -> Vec<String> {
-        self.candidates(CandidateScope::All, query)
-    }
-
     /// Sync filter for a scope (tests + empty-query fast path).
     pub fn candidates(&self, scope: CandidateScope, query: &str) -> Vec<String> {
         let entries = self.snapshot(scope);
@@ -189,7 +173,7 @@ mod tests {
         let mut v = Vocab::default();
         v.feed("MyTag", "com.example", &[]);
         v.feed("MyTag", "com.example", &[]);
-        let cands = v.tag_candidates("");
+        let cands = v.candidates(CandidateScope::Tag, "");
         assert_eq!(cands.first().map(|s| s.as_str()), Some("MyTag"));
     }
 
@@ -200,7 +184,7 @@ mod tests {
         v.feed("Common", "", &[]);
         v.feed("Common", "", &[]);
         v.feed("Common", "", &[]);
-        let cands = v.tag_candidates("");
+        let cands = v.candidates(CandidateScope::Tag, "");
         assert_eq!(cands[0], "Common");
         assert_eq!(cands[1], "Rare");
     }
@@ -210,7 +194,7 @@ mod tests {
         let mut v = Vocab::default();
         v.feed("MyApp", "", &[]);
         v.feed("OtherTag", "", &[]);
-        let cands = v.tag_candidates("app");
+        let cands = v.candidates(CandidateScope::Tag, "app");
         assert_eq!(cands, vec!["MyApp".to_string()]);
     }
 
@@ -219,9 +203,9 @@ mod tests {
         let mut v = Vocab::default();
         v.feed("GuildFeedListViewModel", "", &[]);
         v.feed("OtherThing", "", &[]);
-        let cands = v.tag_candidates("guild viewmodel");
+        let cands = v.candidates(CandidateScope::Tag, "guild viewmodel");
         assert_eq!(cands, vec!["GuildFeedListViewModel".to_string()]);
-        let all = v.all_candidates("guild viewmodel");
+        let all = v.candidates(CandidateScope::All, "guild viewmodel");
         assert_eq!(all, vec!["GuildFeedListViewModel".to_string()]);
     }
 
@@ -241,7 +225,7 @@ mod tests {
         let mut v = Vocab::default();
         v.feed("", "", &["hello".into(), "world".into()]);
         v.feed("hello", "", &[]);
-        let cands = v.all_candidates("hello");
+        let cands = v.candidates(CandidateScope::All, "hello");
         let count = cands.iter().filter(|s| s.to_lowercase() == "hello").count();
         assert_eq!(count, 1, "dedup failed: {:?}", cands);
     }
@@ -251,7 +235,7 @@ mod tests {
         let mut v = Vocab::default();
         v.feed("", "com.tencent.mobileqq", &[]);
         v.feed("", "com.example.other", &[]);
-        let cands = v.pkg_candidates("qq");
+        let cands = v.candidates(CandidateScope::Pkg, "qq");
         assert_eq!(cands, vec!["com.tencent.mobileqq".to_string()]);
     }
 

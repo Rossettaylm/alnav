@@ -75,16 +75,6 @@ pub(crate) fn handle_ctrl_c(app: &mut App, input: &mut input::InputBox) {
     }
 }
 
-/// Live-mode Ctrl-L: clear buffered logs when no detail overlay is open.
-/// File mode and detail-open are silent no-ops. Caller must already gate on
-/// Normal + LogList (and Picker / HighlightBox are handled earlier in the loop).
-fn try_handle_ctrl_l(app: &mut App) {
-    if !app.export_source.is_live() || app.detail_open() {
-        return;
-    }
-    app.clear_buffered_logs();
-}
-
 /// Return keyboard focus to the log list without changing cursor / offset /
 /// following. Used when leaving ChipStrip/HighlightStrip/Input/HighlightBox.
 fn focus_loglist(app: &mut App) {

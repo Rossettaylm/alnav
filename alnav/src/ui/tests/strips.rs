@@ -8,17 +8,17 @@ use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 #[test]
-fn test_chip_pill_and_highlight_pill_styles() {
-    let (text, body) = theme::chip_pill_style(crate::input::ChipField::Tag, "MyTag", false);
-    assert!(text.contains("MyTag"));
-    assert_eq!(body.bg, Some(theme::accent()));
-    let (_, disabled) = theme::chip_pill_style(crate::input::ChipField::Msg, "x", true);
-    assert_eq!(disabled, theme::disabled_chip_style());
-    let (_, search) = theme::highlight_pill_style("error", 0, false, false);
-    assert_eq!(search, theme::highlight_style(0));
-    let (_, active) = theme::highlight_pill_style("error", 0, false, true);
-    assert_eq!(active, theme::highlight_style_active(0));
-    assert!(active.add_modifier.contains(Modifier::UNDERLINED));
+fn test_chip_pill_and_highlight_pill_spans() {
+    let tag = theme::chip_pill_spans(crate::input::ChipField::Tag, "MyTag", false);
+    assert!(tag[0].content.contains("MyTag"));
+    assert_eq!(tag[0].style.bg, Some(theme::accent()));
+    let disabled = theme::chip_pill_spans(crate::input::ChipField::Msg, "x", true);
+    assert_eq!(disabled[0].style, theme::disabled_chip_style());
+    let search = theme::highlight_pill_spans("error", 0, false, false);
+    assert_eq!(search[0].style, theme::highlight_style(0));
+    let active = theme::highlight_pill_spans("error", 0, false, true);
+    assert_eq!(active[0].style, theme::highlight_style_active(0));
+    assert!(active[0].style.add_modifier.contains(Modifier::UNDERLINED));
 }
 
 #[test]

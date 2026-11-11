@@ -60,7 +60,7 @@ fn update_and_clear_highlight_groups() {
     app.push_or_find_highlight_group(g);
     assert!(app.update_search_group(0, "bar"));
     assert!(app.highlight_groups.groups[0].same_pattern_as("bar"));
-    app.clear_highlight_groups();
+    app.clear_all_rules();
     assert!(app.highlight_groups.groups.is_empty());
     assert!(app.active_highlight.is_none());
 }
@@ -81,7 +81,7 @@ fn update_and_clear_filter_groups() {
     let g2 = sample_tag_group("B");
     assert!(app.update_filter_group(0, g2));
     assert!(app.groups.groups[0].same_as(&sample_tag_group("B")));
-    app.clear_filter_groups();
+    app.clear_all_rules();
     assert!(app.groups.groups.is_empty());
 }
 
@@ -288,7 +288,7 @@ fn stream_pin_survives_filter_in_time_order() {
         same_field_op: SameFieldOp::And,
     });
     app.rebuild_visible();
-    assert_eq!(app.visible_len(), 3);
+    assert_eq!(app.index.visible.len(), 3);
     assert_eq!(app.row_at(0).unwrap().tag, "Keep");
     assert_eq!(app.row_at(1).unwrap().tag, "Drop");
     assert_eq!(app.row_at(2).unwrap().tag, "Keep");
@@ -297,7 +297,7 @@ fn stream_pin_survives_filter_in_time_order() {
 
     app.cursor = app.visible_idx_for_row_id(pin_id).unwrap();
     app.bookmark_remove_current();
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(app.row_at(0).unwrap().tag, "Keep");
     assert_eq!(app.row_at(1).unwrap().tag, "Keep");
 }
@@ -316,7 +316,7 @@ fn stream_pin_survives_lock() {
     app.bookmark_add_current();
     app.lock_pid = Some("2".into());
     app.rebuild_visible();
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(app.row_at(0).unwrap().pid, "1");
     assert_eq!(app.row_at(1).unwrap().pid, "2");
 }
@@ -354,7 +354,7 @@ fn stream_evicted_pin_not_reinjected() {
     });
     app.rebuild_visible();
     assert!(app.visible_idx_for_row_id(pinned_id).is_none());
-    for i in 0..app.visible_len() {
+    for i in 0..app.index.visible.len() {
         assert_ne!(app.row_at(i).unwrap().tag, "Old");
     }
 }

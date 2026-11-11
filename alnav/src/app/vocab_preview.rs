@@ -127,6 +127,7 @@ impl App {
     }
 
     /// Block until the in-flight vocab match completes (tests).
+    #[cfg(test)]
     pub fn flush_vocab_match(&mut self) {
         self.ensure_vocab_candidates();
         self.vocab_match.flush(std::time::Duration::from_secs(5));

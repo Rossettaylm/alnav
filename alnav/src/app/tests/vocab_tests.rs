@@ -9,7 +9,9 @@ fn push_row_feeds_vocab() {
         "01-01 00:00:00.000  1234  1234 I VocabTag: hello world test123",
     );
     app.push_row(row.unwrap());
-    let cands = app.vocab.tag_candidates("Vocab");
+    let cands = app
+        .vocab
+        .candidates(crate::vocab::CandidateScope::Tag, "Vocab");
     assert!(
         !cands.is_empty(),
         "VocabTag should appear in tag candidates"

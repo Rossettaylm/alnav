@@ -164,10 +164,6 @@ impl App {
         *self.strip_cursor_mut(kind) = new;
     }
 
-    pub fn move_group_cursor(&mut self, delta: isize) {
-        self.move_strip_cursor(StripKind::Filter, delta);
-    }
-
     /// Delete the focused group on `kind`. Empty filter strip returns focus
     /// to LogList and rebuilds visible; empty search strip only clamps cursor.
     pub fn delete_focused_strip_group(&mut self, kind: StripKind) {
@@ -223,10 +219,6 @@ impl App {
         } else {
             None
         }
-    }
-
-    pub fn delete_focused_group(&mut self) {
-        self.delete_focused_strip_group(StripKind::Filter);
     }
 
     /// Toggle `enabled` on the focused group (`di`). Does not change focus
@@ -287,12 +279,6 @@ impl App {
         true
     }
 
-    pub fn clear_filter_groups(&mut self) {
-        self.groups.groups.clear();
-        self.group_cursor = 0;
-        self.rebuild_visible();
-    }
-
     pub fn delete_filter_group_at(&mut self, index: usize) -> bool {
         if index >= self.groups.groups.len() {
             return false;
@@ -326,12 +312,6 @@ impl App {
         self.groups.excludes[index] = entry;
         self.rebuild_visible();
         true
-    }
-
-    pub fn clear_exclude_groups(&mut self) {
-        self.groups.excludes.clear();
-        self.exclude_cursor = 0;
-        self.rebuild_visible();
     }
 
     pub fn delete_exclude_group_at(&mut self, index: usize) -> bool {
@@ -369,16 +349,6 @@ impl App {
             self.restart_highlight_scan();
         }
         true
-    }
-
-    pub fn clear_highlight_groups(&mut self) {
-        self.highlight_groups.groups.clear();
-        self.active_highlight = None;
-        self.highlight_cursor = 0;
-        self.match_stats_stale = true;
-        if self.index.store.is_file() {
-            self.restart_highlight_scan();
-        }
     }
 
     pub fn delete_highlight_group_at(&mut self, index: usize) -> bool {

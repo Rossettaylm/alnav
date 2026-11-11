@@ -20,14 +20,6 @@ impl HintEntry {
     pub(super) fn new(key: String, label: &'static str, detail: &'static str) -> Self {
         Self { key, label, detail }
     }
-
-    fn short(key: String, label: &'static str) -> Self {
-        Self {
-            key,
-            label,
-            detail: label,
-        }
-    }
 }
 
 /// Which situational hint set is active (drives L1/L2 + Help Active).

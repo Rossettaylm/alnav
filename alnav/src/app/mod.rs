@@ -156,48 +156,6 @@ pub enum YankField {
     Timestamp,
 }
 
-impl YankField {
-    pub fn from_char(c: char) -> Option<Self> {
-        match c {
-            'y' | 'r' => Some(Self::Raw),
-            't' => Some(Self::Tag),
-            'm' => Some(Self::Msg),
-            'p' => Some(Self::Pid),
-            'T' => Some(Self::Tid),
-            'l' => Some(Self::Level),
-            'g' => Some(Self::Pkg),
-            's' => Some(Self::Timestamp),
-            _ => None,
-        }
-    }
-}
-
-/// Result of mapping a second key after operator `c` (H7 field alphabet).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChipFieldKey {
-    Field(crate::input::ChipField),
-    /// `r`/`y` (raw) or `s` (timestamp) — not valid for filter chips.
-    Unsupported,
-    Unknown,
-}
-
-impl ChipFieldKey {
-    /// Same letters as [`YankField::from_char`], minus raw/timestamp.
-    pub fn from_char(c: char) -> Self {
-        use crate::input::ChipField;
-        match c {
-            't' => Self::Field(ChipField::Tag),
-            'm' => Self::Field(ChipField::Msg),
-            'g' => Self::Field(ChipField::Pkg),
-            'p' => Self::Field(ChipField::Pid),
-            'T' => Self::Field(ChipField::Tid),
-            'l' => Self::Field(ChipField::Level),
-            'r' | 'y' | 's' => Self::Unsupported,
-            _ => Self::Unknown,
-        }
-    }
-}
-
 /// Second key for operator `f` (H8 session lock).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockKind {

@@ -57,12 +57,3 @@ fn test_selection_range_orders_anchor_and_cursor() {
     app.cursor = 0;
     assert_eq!(app.selection_range(), Some((0, 1)));
 }
-
-#[test]
-fn test_yank_field_from_char_mapping() {
-    assert_eq!(YankField::from_char('y'), Some(YankField::Raw));
-    assert_eq!(YankField::from_char('t'), Some(YankField::Tag));
-    assert_eq!(YankField::from_char('m'), Some(YankField::Msg));
-    assert_eq!(YankField::from_char('T'), Some(YankField::Tid));
-    assert_eq!(YankField::from_char('x'), None);
-}

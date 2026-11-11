@@ -25,6 +25,8 @@ impl HighlightGroup {
         })
     }
 
+    /// Msg-only substring match (tests pin LogList substring semantics).
+    #[cfg(test)]
     pub fn matches_msg(&self, msg: &str) -> bool {
         fuzzy::substr_match(msg, &self.pattern)
     }
@@ -56,16 +58,9 @@ pub struct HighlightGroupList {
 }
 
 impl HighlightGroupList {
-    /// Flatten enabled groups' patterns with progressive color indices.
-    pub fn active_patterns(&self) -> Vec<(&str, usize)> {
-        self.paint_patterns(None)
-            .into_iter()
-            .map(|(p, idx, _)| (p, idx))
-            .collect()
-    }
-
-    /// Like [`Self::active_patterns`], plus whether each pattern is the
-    /// globally active highlight group (for underline / `n`/`N` paint).
+    /// Enabled groups' patterns with progressive color indices, plus whether
+    /// each pattern is the globally active highlight group (for underline /
+    /// `n`/`N` paint).
     pub fn paint_patterns(&self, active_group: Option<usize>) -> Vec<(&str, usize, bool)> {
         let mut out = Vec::new();
         let mut idx = 0usize;
@@ -111,21 +106,19 @@ pub struct HighlightBox {
 }
 
 impl HighlightBox {
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.draft.is_empty()
     }
 
+    #[cfg(test)]
     pub fn push_char(&mut self, c: char) {
         self.draft.insert(c);
         self.selected = 0;
     }
 
-    pub fn backspace(&mut self) {
-        let _ = self.draft.backspace();
-        self.selected = 0;
-    }
-
     /// Start editing in the retained HighlightBox model.
+    #[cfg(test)]
     pub fn begin_editing(&mut self) {
         self.editing = true;
         self.selected = 0;
@@ -250,7 +243,7 @@ mod tests {
         list.groups.push(HighlightGroup::from_pattern("c").unwrap());
         list.groups[0].enabled = false;
         list.groups[1].enabled = false;
-        let active = list.active_patterns();
+        let active = list.paint_patterns(None);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].1, 0);
         assert_eq!(active[0].0, "c");

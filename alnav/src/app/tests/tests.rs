@@ -359,7 +359,7 @@ fn test_drain_ring_applies_push_row() {
     ring.push(row("B"));
     ring.mark_disconnected();
     app.drain(&ring);
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert!(app.ingest_done);
     assert_eq!(app.rows()[0].tag, "A");
     assert_eq!(app.rows()[1].tag, "B");

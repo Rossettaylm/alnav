@@ -23,7 +23,7 @@ fn file_store_full_browse_no_max_lines_cap() {
     let mut app = App::new(10); // max_lines would cap stream; ignored for file
     app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
     app.set_file_store(FileStore::open_sync(f.path()).unwrap());
-    assert_eq!(app.visible_len(), 50);
+    assert_eq!(app.index.visible.len(), 50);
     app.jump_bottom();
     assert_eq!(app.cursor, 49);
     assert_eq!(app.row_at(0).unwrap().tag, "Tag0");
@@ -41,7 +41,7 @@ fn test_view_focus_fe_file_mode_keeps_severe() {
     let mut app = App::new(100);
     app.export_source = crate::export::ExportSource::File(f.path().display().to_string());
     app.set_file_store(FileStore::open_sync(f.path()).unwrap());
-    assert_eq!(app.visible_len(), 3);
+    assert_eq!(app.index.visible.len(), 3);
 
     app.toggle_view_focus(ViewFocusKind::Severe);
     assert!(app.view_focus.severe);
@@ -54,7 +54,7 @@ fn test_view_focus_fe_file_mode_keeps_severe() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
-        app.visible_len(),
+        app.index.visible.len(),
         1,
         "fe in file mode should keep the E/F (severe) row"
     );
@@ -91,7 +91,7 @@ fn file_filter_uses_subset_not_matched_buffer() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(matches!(app.index.visible, Visible::Subset(_)));
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert!(app.matched().is_empty());
     assert_eq!(app.row_at(0).unwrap().tag, "Keep");
     assert_eq!(app.row_at(1).unwrap().tag, "Keep");
@@ -132,14 +132,14 @@ fn file_pin_survives_filter_in_line_order() {
     app.rebuild_visible();
     wait_file_filter(&mut app);
     assert!(matches!(app.index.visible, Visible::Subset(_)));
-    assert_eq!(app.visible_len(), 3);
+    assert_eq!(app.index.visible.len(), 3);
     assert_eq!(app.row_at(0).unwrap().tag, "Keep");
     assert_eq!(app.row_at(1).unwrap().tag, "Drop");
     assert_eq!(app.row_at(2).unwrap().tag, "Keep");
     let pin_id = app.bookmarks.items[0].row_id();
     app.cursor = app.visible_idx_for_row_id(pin_id).unwrap();
     app.bookmark_remove_current();
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(app.row_at(0).unwrap().tag, "Keep");
     assert_eq!(app.row_at(1).unwrap().tag, "Keep");
 }
@@ -149,7 +149,7 @@ fn file_unparseable_kept_as_raw() {
     let f = write_temp("not a log\n04-02 10:00:00.000  1  1 I TagA   : ok\n");
     let mut app = App::new(100);
     app.set_file_store(FileStore::open_sync(f.path()).unwrap());
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(app.row_at(0).unwrap().raw, "not a log");
     assert!(!app.row_at(0).unwrap().is_parsed());
     assert_eq!(app.row_at(1).unwrap().tag, "TagA");
@@ -164,7 +164,7 @@ fn file_unparseable_rejected_under_any_filter() {
     );
     let mut app = App::new(100);
     app.set_file_store(FileStore::open_sync(f.path()).unwrap());
-    assert_eq!(app.visible_len(), 3);
+    assert_eq!(app.index.visible.len(), 3);
 
     // msg filter (would substring-match the header if unparsed were allowed)
     app.groups.groups.push(Group {
@@ -186,7 +186,7 @@ fn file_unparseable_rejected_under_any_filter() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
-        app.visible_len(),
+        app.index.visible.len(),
         0,
         "unparsed must not pass any active filter"
     );
@@ -206,7 +206,7 @@ fn file_unparseable_rejected_under_any_filter() {
         app.poll_file_store();
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert!(app.row_at(0).unwrap().is_parsed());
     assert_eq!(app.row_at(0).unwrap().tag, "TagA");
 }
@@ -351,7 +351,7 @@ fn file_highlight_scan_cancels_on_filter_change() {
     wait_highlight_done(&mut app);
     // Vis domain is Keep rows only: line 0 (hit) and line 2 (no hit) → one hit at vis 0.
     assert_eq!(app.highlight_scan.hits, vec![0]);
-    assert_eq!(app.visible_len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
 }
 
 #[test]

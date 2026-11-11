@@ -57,11 +57,11 @@ fn test_jump_first_match_and_highlight_match_stats() {
     app.cursor = 3;
     assert!(app.highlight_match_stats().is_none());
 
-    app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
+    let idx = app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
     app.cursor = 0; // non-hit row
     assert_eq!(app.highlight_match_stats(), Some((None, 2)));
 
-    assert!(app.jump_first_match());
+    assert!(app.jump_first_match_of(idx));
     assert_eq!(app.cursor, 1);
     assert!(!app.following);
     assert_eq!(app.highlight_match_stats(), Some((Some(1), 2)));
@@ -81,8 +81,8 @@ fn test_jump_first_match_noop_when_no_hits() {
     drop(tx);
     app.drain(&rx);
     app.cursor = 0;
-    app.push_or_find_highlight_group(HighlightGroup::from_pattern("zzz").unwrap());
-    assert!(!app.jump_first_match());
+    let idx = app.push_or_find_highlight_group(HighlightGroup::from_pattern("zzz").unwrap());
+    assert!(!app.jump_first_match_of(idx));
     assert_eq!(app.cursor, 0);
     assert_eq!(app.highlight_match_stats(), Some((None, 0)));
 }
@@ -100,10 +100,10 @@ fn test_jump_first_match_targets_newest_group_only() {
     app.cursor = 0;
 
     app.push_or_find_highlight_group(HighlightGroup::from_pattern("foo").unwrap());
-    app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
+    let idx = app.push_or_find_highlight_group(HighlightGroup::from_pattern("bar").unwrap());
     assert_eq!(app.active_highlight, Some(1));
 
-    assert!(app.jump_first_match());
+    assert!(app.jump_first_match_of(idx));
     // Must land on newest group ("bar"), not the earlier "foo" at index 0.
     assert_eq!(app.cursor, 1);
     assert_eq!(app.current_row().unwrap().msg, "bar later");
@@ -133,9 +133,9 @@ fn test_find_match_hits_tag_only() {
     app.drain(&rx);
     app.following = false;
     app.cursor = 0;
-    app.push_or_find_highlight_group(HighlightGroup::from_pattern("MyTag").unwrap());
+    let idx = app.push_or_find_highlight_group(HighlightGroup::from_pattern("MyTag").unwrap());
     assert_eq!(app.highlight_match_stats(), Some((None, 1)));
-    assert!(app.jump_first_match());
+    assert!(app.jump_first_match_of(idx));
     assert_eq!(app.cursor, 1);
     assert_eq!(app.current_row().unwrap().tag, "MyTag");
     assert_eq!(app.find_match(1), FindJumpResult::NoMore);

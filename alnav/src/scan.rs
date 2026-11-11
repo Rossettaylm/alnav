@@ -89,6 +89,7 @@ impl HighlightDomain {
         self.subset.write().expect("subset").extend_from_slice(hits);
     }
 
+    #[cfg(test)]
     pub fn replace_subset(&self, hits: Vec<usize>) {
         self.identity.store(false, Ordering::Release);
         *self.subset.write().expect("subset") = hits;

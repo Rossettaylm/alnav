@@ -102,7 +102,7 @@ fn test_highlight_box_space_is_literal_single_enter_submits() {
     handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.highlight_groups.groups.len(), 1);
     assert_eq!(app.highlight_groups.groups[0].pattern, "foo bar");
-    assert_eq!(app.highlight_groups.active_patterns().len(), 1);
+    assert_eq!(app.highlight_groups.paint_patterns(None).len(), 1);
 }
 
 #[test]

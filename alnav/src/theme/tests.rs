@@ -23,9 +23,9 @@ fn severe_entry_style_uses_theme_error_red() {
 }
 
 #[test]
-fn test_candidate_selection_style_soft_gray_with_white_fg() {
+fn test_candidate_selected_style_soft_gray_with_white_fg() {
     install(UiTokens::builtin());
-    let style = candidate_selection_style();
+    let style = candidate_selected_style();
     assert_eq!(style.bg, Some(Color::DarkGray));
     assert_eq!(style.fg, Some(Color::White));
     assert!(!style.add_modifier.contains(Modifier::REVERSED));
@@ -83,11 +83,11 @@ fn test_chip_group_border_style_distinct_from_region_accent() {
 }
 
 #[test]
-fn test_chip_pill_style_fill() {
+fn test_chip_pill_spans_fill() {
     install(UiTokens::builtin());
-    let (text, body) = chip_pill_style(ChipField::Tag, "MyTag", false);
-    assert_eq!(text, format!(" {} MyTag ", GLYPH_FIELD_TAG));
-    assert_eq!(body.bg, Some(accent()));
+    let spans = chip_pill_spans(ChipField::Tag, "MyTag", false);
+    assert_eq!(spans[0].content, format!(" {} MyTag ", GLYPH_FIELD_TAG));
+    assert_eq!(spans[0].style.bg, Some(accent()));
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn parse_named_and_hex_colors() {
 
 #[test]
 fn parse_theme_toml_partial_override() {
-    let t = parse_theme_toml("accent = \"red\"\n").unwrap();
+    let t = apply_overlay_for(Palette::default_ansi(), "default", "accent = \"red\"\n").unwrap();
     assert_eq!(t.accent, Color::Red);
     assert_eq!(t.success, Color::Green);
 }

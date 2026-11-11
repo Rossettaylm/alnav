@@ -1,7 +1,7 @@
 //! Persisted recent-files list for Dashboard / `C-f` source picker.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn load_save_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let mut recent = RecentFiles {
+        let recent = RecentFiles {
             paths: vec!["/tmp/one.log".into(), "/tmp/two.log".into()],
         };
         recent.save(dir.path()).unwrap();

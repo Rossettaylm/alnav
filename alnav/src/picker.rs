@@ -121,13 +121,6 @@ impl PickerSession {
         }
     }
 
-    pub fn prompt_prefix(&self) -> char {
-        match self.mode {
-            PickerMode::Manage => '/',
-            PickerMode::New | PickerMode::Edit { .. } => ':',
-        }
-    }
-
     pub fn enter_new(&mut self) {
         self.mode = PickerMode::New;
         self.query.clear();
@@ -216,10 +209,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_defaults_to_manage_with_slash_prefix() {
+    fn open_defaults_to_manage_mode() {
         let p = PickerSession::open(PickerKind::Unified);
         assert_eq!(p.mode, PickerMode::Manage);
-        assert_eq!(p.prompt_prefix(), '/');
         assert!(p.checked.is_empty());
     }
 
@@ -229,7 +221,6 @@ mod tests {
         p.query = "x".into();
         p.enter_new();
         assert_eq!(p.mode, PickerMode::New);
-        assert_eq!(p.prompt_prefix(), ':');
         assert!(p.query.is_empty());
         assert!(p.draft.is_empty());
         assert!(!p.auto_from_manage);

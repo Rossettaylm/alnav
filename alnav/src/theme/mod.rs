@@ -302,12 +302,6 @@ pub fn disabled_chip_style() -> Style {
         .add_modifier(Modifier::DIM)
 }
 
-/// Status-bar search hit counter `[k/N]`: accent foreground only (no reverse
-/// badge), so it reads as related-but-distinct from the dim filter `cursor/total`.
-pub fn highlight_match_status_style() -> Style {
-    Style::default().fg(accent())
-}
-
 /// Chip field -> accent color, shared by the input box, popup, and (once
 /// committed) the chip strip so a field always reads the same color
 /// everywhere it appears.
@@ -355,11 +349,6 @@ pub fn candidate_match_style(selected: bool) -> Style {
 /// Prefix string for the selected candidate row (nerdfont caret-right glyph).
 pub fn candidate_prefix() -> String {
     format!("{} ", GLYPH_CARET_SEL)
-}
-
-/// Backward-compatible alias for selected candidate style.
-pub fn candidate_selection_style() -> Style {
-    candidate_selected_style()
 }
 
 /// Compact / Minimal Dashboard wordmark (`"alnav"`): signature accent.
@@ -487,35 +476,6 @@ pub fn chip_pill_spans(field: ChipField, value: &str, disabled: bool) -> Vec<Spa
     vec![Span::styled(body_text, body_style)]
 }
 
-/// Backward-compatible single-span pill (tests / callers that don't need
-/// powerline ends). Returns body text + style only.
-pub fn chip_pill_style(field: ChipField, value: &str, disabled: bool) -> (String, Style) {
-    if disabled {
-        return (format!(" {value} "), disabled_chip_style());
-    }
-    let icon = field_icon(field);
-    let text = format!(" {icon} {value} ");
-    let style = match field {
-        ChipField::Level => {
-            let level = match value.chars().next().unwrap_or('I').to_ascii_uppercase() {
-                'V' => Level::V,
-                'D' => Level::D,
-                'I' => Level::I,
-                'W' => Level::W,
-                'E' => Level::E,
-                'F' => Level::F,
-                _ => Level::I,
-            };
-            level_badge_style(level)
-        }
-        other => Style::default()
-            .fg(contrast_fg(field_color(other)))
-            .bg(field_color(other))
-            .add_modifier(Modifier::BOLD),
-    };
-    (text, style)
-}
-
 /// Exclude pill (H9): space-filled pill with a `!` prefix before the field icon.
 pub fn exclude_pill_spans(field: ChipField, value: &str, disabled: bool) -> Vec<Span<'static>> {
     let icon = field_icon(field);
@@ -545,12 +505,6 @@ pub fn exclude_pill_spans(field: ChipField, value: &str, disabled: bool) -> Vec<
     vec![Span::styled(body_text, body_style)]
 }
 
-/// Backward-compatible single-span exclude pill.
-pub fn exclude_pill_style(field: ChipField, value: &str, disabled: bool) -> (String, Style) {
-    let (inner, style) = chip_pill_style(field, value, disabled);
-    (format!("!{inner}"), style)
-}
-
 /// Search/highlight pill as a single space-filled span.
 /// `active_global` underlines the globally active (n/N) search chip.
 pub fn highlight_pill_spans(
@@ -569,25 +523,6 @@ pub fn highlight_pill_spans(
         highlight_style(color_idx)
     };
     vec![Span::styled(format!(" {pattern} "), style)]
-}
-
-/// Backward-compatible single-span highlight pill.
-pub fn highlight_pill_style(
-    pattern: &str,
-    color_idx: usize,
-    disabled: bool,
-    active_global: bool,
-) -> (String, Style) {
-    let text = format!(" {pattern} ");
-    if disabled {
-        return (text, disabled_chip_style());
-    }
-    let style = if active_global {
-        highlight_style_active(color_idx)
-    } else {
-        highlight_style(color_idx)
-    };
-    (text, style)
 }
 
 /// Border color for a bordered region: dimmed accent when it currently has
@@ -687,30 +622,6 @@ pub fn log_visual_style() -> Style {
     Style::default().bg(t().log_visual_bg)
 }
 
-/// Icon-only status marker (follow / visual). No word label.
-pub fn status_icon(glyph: &str, fg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {glyph} "),
-        Style::default().fg(fg).add_modifier(Modifier::BOLD),
-    )
-}
-
-/// Icon + short value (lock / time / progress). Glyph carries the noun.
-pub fn status_icon_value(glyph: &str, value: &str, fg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {glyph} {value} "),
-        Style::default().fg(fg).add_modifier(Modifier::BOLD),
-    )
-}
-
-/// Soft (non-inverse) pending / flash text. Kept for non-status-bar callers.
-pub fn status_soft(text: &str, fg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {text} "),
-        Style::default().fg(fg).add_modifier(Modifier::DIM),
-    )
-}
-
 fn status_pill_style(fg: Color) -> Style {
     Style::default()
         .fg(contrast_fg(fg))
@@ -775,15 +686,6 @@ pub fn context_help_style() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-/// Help panel section title (inactive).
-pub fn help_section_style(active: bool) -> Style {
-    if active {
-        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().add_modifier(Modifier::DIM)
-    }
-}
-
 /// Substring hit inside the Help panel (non-current).
 pub fn help_search_hit_style() -> Style {
     highlight_style(0)
@@ -792,15 +694,6 @@ pub fn help_search_hit_style() -> Style {
 /// Current Help search hit (same ramp slot, underlined).
 pub fn help_search_current_style() -> Style {
     highlight_style_active(0)
-}
-
-/// Faint search-hit highlight inside the H1 Preview window (distinct from
-/// formal [`highlight_style`] chips).
-pub fn preview_highlight_style() -> Style {
-    Style::default()
-        .fg(contrast_fg(t().preview_highlight_bg))
-        .bg(t().preview_highlight_bg)
-        .add_modifier(Modifier::DIM)
 }
 
 /// Dim style for Preview placeholder / empty state.

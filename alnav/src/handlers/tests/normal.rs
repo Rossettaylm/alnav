@@ -522,10 +522,8 @@ fn test_cl_uses_level_gte_semantics() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('l'));
     assert_eq!(app.index.visible.len(), 3, "level>=W keeps W/E/F");
-    let levels: Vec<_> = app
-        .visible_rows()
-        .iter()
-        .map(|r| r.level.as_char())
+    let levels: Vec<_> = (0..app.index.visible.len())
+        .filter_map(|i| app.row_at(i).map(|r| r.level.as_char()))
         .collect();
     assert_eq!(levels, vec!['W', 'E', 'F']);
 }

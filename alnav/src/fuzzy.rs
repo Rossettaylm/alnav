@@ -3,7 +3,7 @@
 //! CLI `alnav grep` keeps its own FilterChain/Expr path. Interactive TUI
 //! matching goes through this module:
 //! - **Substring** (`substr_match`): Filter/Exclude/Search/Highlight vs log rows
-//! - **Fuzzy / parse** (`fuzzy_match` / `fuzzy_label_indices`): Picker/vocab/
+//! - **Fuzzy / parse** (`FuzzyScorer` / `fuzzy_label_indices`): Picker/vocab/
 //!   candidate lists via [`Pattern::parse`] — whitespace atoms AND, plus fzf-style
 //!   `'…` / `^…` / `…$` / `^…$` / `!…` per atom (default atom kind remains Fuzzy).
 
@@ -75,12 +75,12 @@ fn fuzzy_pattern(pattern: &str) -> Pattern {
 
 /// Reusable nucleo scorer for **one query × many haystacks**.
 ///
-/// Batch paths (vocab filter, candidate lists) MUST use this instead of calling
-/// [`fuzzy_score`] / recreating `Pattern`+`Matcher` per row — that rebuild cost
-/// dominates at ~100k Msg vocab size.
+/// Batch paths (vocab filter, candidate lists) MUST use this instead of
+/// recreating `Pattern`+`Matcher` per row — that rebuild cost dominates at
+/// ~100k Msg vocab size.
 ///
-/// Semantics match the one-shot helpers: empty query → `Some(0)` for every
-/// haystack; empty haystack + non-empty query → `None`.
+/// Semantics: empty query → `Some(0)` for every haystack; empty haystack +
+/// non-empty query → `None`.
 pub struct FuzzyScorer {
     pattern: Pattern,
     matcher: Matcher,
@@ -129,11 +129,11 @@ impl FuzzyScorer {
     }
 }
 
-/// Nucleo score for `pattern` against `haystack`, if it matches.
-/// Empty pattern scores `Some(0)` (match-all). Empty haystack with non-empty pattern → `None`.
-///
-/// For many haystacks with the same query, prefer [`FuzzyScorer`].
-pub fn fuzzy_score(haystack: &str, pattern: &str) -> Option<u32> {
+/// One-shot nucleo score for `pattern` against `haystack` (test oracle for
+/// [`FuzzyScorer`]). Empty pattern scores `Some(0)`; empty haystack with
+/// non-empty pattern → `None`.
+#[cfg(test)]
+fn fuzzy_score(haystack: &str, pattern: &str) -> Option<u32> {
     FuzzyScorer::new(pattern).score(haystack)
 }
 
@@ -141,15 +141,15 @@ pub fn fuzzy_score(haystack: &str, pattern: &str) -> Option<u32> {
 ///
 /// Multi-word queries (`guild viewmodel`) split on whitespace and AND each atom,
 /// so they match CamelCase haystacks without a literal space.
-pub fn fuzzy_match(haystack: &str, pattern: &str) -> bool {
+#[cfg(test)]
+fn fuzzy_match(haystack: &str, pattern: &str) -> bool {
     fuzzy_score(haystack, pattern).is_some()
 }
 
-/// Char indices (into `haystack`) of a fuzzy match; empty if no match / empty pattern.
-/// Merges indices from all whitespace-separated atoms.
-///
-/// For many haystacks with the same query, prefer [`FuzzyScorer::char_indices`].
-pub fn fuzzy_char_indices(haystack: &str, pattern: &str) -> Vec<u32> {
+/// One-shot char indices of a fuzzy match (test oracle for
+/// [`FuzzyScorer::char_indices`]).
+#[cfg(test)]
+fn fuzzy_char_indices(haystack: &str, pattern: &str) -> Vec<u32> {
     FuzzyScorer::new(pattern).char_indices(haystack)
 }
 
@@ -418,11 +418,6 @@ pub fn fuzzy_label_indices(labels: &[String], query: &str) -> Vec<usize> {
     scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     scored.truncate(CANDIDATE_RESULT_CAP);
     scored.into_iter().map(|(i, _)| i).collect()
-}
-
-/// First Search/Highlight substring match byte range (for preview line highlight).
-pub fn first_match_byte_range(text: &str, pattern: &str) -> Option<(usize, usize)> {
-    substr_byte_ranges(text, pattern).into_iter().next()
 }
 
 #[cfg(test)]

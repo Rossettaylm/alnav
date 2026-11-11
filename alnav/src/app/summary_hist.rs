@@ -151,6 +151,7 @@ impl App {
     }
 
     /// Block until the in-flight summary job completes (tests).
+    #[cfg(test)]
     pub fn flush_summary_job(&mut self, timeout: std::time::Duration) {
         if !matches!(self.summary_view, SummaryView::Loading) {
             return;
@@ -242,6 +243,8 @@ impl App {
         }
     }
 
+    /// Block until the in-flight histogram job completes (tests).
+    #[cfg(test)]
     pub fn flush_hist_job(&mut self, timeout: std::time::Duration) {
         if !matches!(self.hist_view, HistView::Loading { .. }) {
             return;

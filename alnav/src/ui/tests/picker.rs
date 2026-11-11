@@ -318,40 +318,6 @@ fn confirm_dialog_renders_delete_one_copy_over_picker() {
 }
 
 #[test]
-fn render_picker_detail_shows_fields() {
-    let row =
-        crate::model::EntryRow::from_line("04-02 10:00:00.000  1  1 I TagA    : hello detail")
-            .unwrap();
-    let backend = TestBackend::new(60, 20);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| {
-            render_picker_detail(Some(&row), frame, frame.area());
-        })
-        .unwrap();
-    let content = cell_text(terminal.backend().buffer());
-    assert!(content.contains("Detail"));
-    assert!(content.contains("TagA"));
-    assert!(content.contains("hello detail"));
-}
-
-#[test]
-fn render_picker_detail_stale_placeholder() {
-    let backend = TestBackend::new(80, 12);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| {
-            render_picker_detail(None, frame, frame.area());
-        })
-        .unwrap();
-    let content = cell_text(terminal.backend().buffer());
-    assert!(
-        content.contains("Detail") && content.contains("row gone"),
-        "stale detail must show placeholder, got: {content:?}"
-    );
-}
-
-#[test]
 fn confirm_dialog_renders_delete_many_count() {
     use crate::picker::{ConfirmKind, UnifiedId, UnifiedKind};
 

@@ -66,20 +66,6 @@ impl KeymapStore {
         })
     }
 
-    pub fn display_aggregate(&self, ids: &[ActionId]) -> Option<String> {
-        let mut parts = Vec::new();
-        for &id in ids {
-            if let Some(s) = self.display(id) {
-                parts.push(s);
-            }
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("/"))
-        }
-    }
-
     pub fn matches_stroke(&self, id: ActionId, stroke: &KeyStroke) -> bool {
         match self.binding(id) {
             Some(b) if b.strokes.len() == 1 => b.strokes[0] == *stroke,
@@ -99,25 +85,6 @@ impl KeymapStore {
             return false;
         };
         self.matches_stroke(id, &stroke)
-    }
-
-    /// Find an action in `ctx` whose single-key binding equals `stroke`.
-    pub fn action_for_stroke(
-        &self,
-        ctx: KeyContext,
-        stroke: &KeyStroke,
-        file_mode: bool,
-    ) -> Option<ActionId> {
-        for &id in ActionId::ALL {
-            let meta = id.meta();
-            if meta.context != ctx || !meta.allowed(file_mode) {
-                continue;
-            }
-            if self.matches_stroke(id, stroke) {
-                return Some(id);
-            }
-        }
-        None
     }
 }
 

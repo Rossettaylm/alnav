@@ -13,6 +13,7 @@ pub enum OpenFileChoice {
 }
 
 impl OpenFileChoice {
+    #[cfg(test)]
     pub fn label(&self) -> String {
         match self {
             Self::Recent(p) => p.clone(),
@@ -127,19 +128,16 @@ pub struct OpenFilePanel {
     pub draft: TextField,
     pub selected: usize,
     pub choices: Vec<OpenFileChoice>,
-    /// Esc returns to Dashboard when true (still unbound).
-    pub from_dashboard: bool,
     /// Corpus scan progress / count (from [`LogCorpus::status_label`]).
     pub corpus_status: Option<String>,
 }
 
 impl OpenFilePanel {
-    pub fn open(recent: &RecentFiles, corpus: &LogCorpus, from_dashboard: bool) -> Self {
+    pub fn open(recent: &RecentFiles, corpus: &LogCorpus) -> Self {
         let mut panel = Self {
             draft: TextField::new(),
             selected: 0,
             choices: Vec::new(),
-            from_dashboard,
             corpus_status: corpus.status_label(),
         };
         panel.refresh_choices(recent, corpus);
@@ -234,19 +232,15 @@ fn fuzzy_open_choices(
 }
 
 /// Centered HDC / ADB chooser (no preview).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StreamSourcePanel {
     /// 0 = HDC, 1 = ADB
     pub selected: usize,
-    pub from_dashboard: bool,
 }
 
 impl StreamSourcePanel {
-    pub fn new(from_dashboard: bool) -> Self {
-        Self {
-            selected: 0,
-            from_dashboard,
-        }
+    pub fn new() -> Self {
+        Self { selected: 0 }
     }
 
     pub fn move_by(&mut self, delta: isize) {
@@ -282,7 +276,7 @@ mod tests {
         }
         corpus.poll();
 
-        let panel = OpenFilePanel::open(&recent, &corpus, false);
+        let panel = OpenFilePanel::open(&recent, &corpus);
         assert!(matches!(&panel.choices[0], OpenFileChoice::Recent(p) if p == "/tmp/a.log"));
         assert!(
             panel.choices.iter().any(
@@ -330,7 +324,7 @@ mod tests {
         }
         corpus.poll();
 
-        let mut panel = OpenFilePanel::open(&recent, &corpus, false);
+        let mut panel = OpenFilePanel::open(&recent, &corpus);
         panel.draft = TextField::from_text("crash");
         panel.refresh_choices(&recent, &corpus);
         assert!(!panel.choices.is_empty(), "crash must remain after filter");
@@ -377,7 +371,7 @@ mod tests {
         }
         corpus.poll();
 
-        let mut panel = OpenFilePanel::open(&recent, &corpus, false);
+        let mut panel = OpenFilePanel::open(&recent, &corpus);
         panel.draft = TextField::from_text("crsh");
         panel.refresh_choices(&recent, &corpus);
         assert!(
@@ -391,7 +385,7 @@ mod tests {
 
     #[test]
     fn stream_panel_toggles() {
-        let mut p = StreamSourcePanel::new(false);
+        let mut p = StreamSourcePanel::new();
         p.move_by(1);
         assert!(!p.is_hdc());
         p.move_by(1);

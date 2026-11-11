@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
@@ -13,7 +13,9 @@ use memmap2::Mmap;
 use crate::model::{is_severe_row, EntryRow};
 use crate::scan::{self, HighlightDomain};
 
-use super::workers::{index_file_background, scan_line_spans, spawn_filter_scan};
+#[cfg(test)]
+use super::workers::scan_line_spans;
+use super::workers::{index_file_background, spawn_filter_scan};
 use super::LineSpan;
 
 /// Parse-cache capacity for file lazy rows (viewport + minimap reuse).
@@ -47,7 +49,6 @@ pub enum FileEvent {
     /// Indexer appended lines; `line_count` is the new total.
     IndexProgress {
         line_count: usize,
-        bytes_done: usize,
     },
     IndexDone {
         line_count: usize,
@@ -56,11 +57,9 @@ pub enum FileEvent {
     FilterBatch {
         gen: u64,
         hits: Vec<usize>,
-        scanned: usize,
     },
     FilterDone {
         gen: u64,
-        scanned: usize,
     },
     /// Incremental highlight hits (Vis indices) for generation `gen`.
     HighlightBatch {
@@ -79,7 +78,6 @@ pub type FilterPred = Arc<dyn Fn(&EntryRow) -> bool + Send + Sync>;
 
 /// mmap + line index + lazy parse file backend.
 pub struct FileStore {
-    path: PathBuf,
     mmap: Arc<Mmap>,
     lines: Arc<RwLock<Vec<LineSpan>>>,
     file_bytes: usize,
@@ -98,7 +96,6 @@ pub struct FileStore {
     highlight_gen: Arc<AtomicU64>,
     highlight_scanned: Arc<AtomicUsize>,
     highlight_done: Arc<AtomicBool>,
-    highlight_domain: Option<Arc<HighlightDomain>>,
     _severe_handle: Option<JoinHandle<()>>,
     _severe_cancel: Arc<AtomicBool>,
     severe_scanned: Arc<AtomicUsize>,
@@ -146,7 +143,6 @@ impl FileStore {
         ));
 
         Ok(Self {
-            path,
             mmap,
             lines,
             file_bytes,
@@ -165,7 +161,6 @@ impl FileStore {
             highlight_gen: Arc::new(AtomicU64::new(0)),
             highlight_scanned: Arc::new(AtomicUsize::new(0)),
             highlight_done: Arc::new(AtomicBool::new(true)),
-            highlight_domain: None,
             _severe_handle,
             _severe_cancel: severe_cancel,
             severe_scanned,
@@ -178,7 +173,8 @@ impl FileStore {
         })
     }
 
-    /// Synchronous full index (tests / B-gate smoke).
+    /// Synchronous full index (tests).
+    #[cfg(test)]
     pub fn open_sync(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         let file = File::open(&path)?;
@@ -208,7 +204,6 @@ impl FileStore {
         ));
 
         Ok(Self {
-            path,
             mmap,
             lines,
             file_bytes,
@@ -227,7 +222,6 @@ impl FileStore {
             highlight_gen: Arc::new(AtomicU64::new(0)),
             highlight_scanned: Arc::new(AtomicUsize::new(0)),
             highlight_done: Arc::new(AtomicBool::new(true)),
-            highlight_domain: None,
             _severe_handle,
             _severe_cancel: severe_cancel,
             severe_scanned,
@@ -240,20 +234,12 @@ impl FileStore {
         })
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn line_count(&self) -> usize {
         self.lines.read().expect("lines lock").len()
     }
 
     pub fn index_done(&self) -> bool {
         self.index_done.load(Ordering::Acquire)
-    }
-
-    pub fn event_sender(&self) -> Sender<FileEvent> {
-        self.event_tx.clone()
     }
 
     pub fn progress(&self) -> FileProgress {
@@ -339,7 +325,6 @@ impl FileStore {
             self.highlight_gen.store(g, Ordering::Release);
             g
         };
-        self.highlight_domain = Some(Arc::clone(&domain));
         let handle = scan::spawn_highlight_scan(
             Arc::clone(&self.mmap),
             Arc::clone(&self.lines),
@@ -361,12 +346,6 @@ impl FileStore {
         drop(self.highlight_handle.take());
         self.highlight_done = Arc::new(AtomicBool::new(true));
         self.highlight_scanned = Arc::new(AtomicUsize::new(0));
-        self.highlight_domain = None;
-    }
-
-    /// Shared domain for Inc growth (FilterBatch / IndexProgress), if scanning.
-    pub fn highlight_domain(&self) -> Option<&Arc<HighlightDomain>> {
-        self.highlight_domain.as_ref()
     }
 
     /// Cached severe flag without parsing (`None` = unknown).
@@ -431,7 +410,8 @@ impl FileStore {
         }
     }
 
-    /// Synchronous filter scan over currently indexed lines (B-gate / tests).
+    /// Synchronous filter scan over currently indexed lines (tests).
+    #[cfg(test)]
     pub fn scan_filter_sync(&self, mut pred: impl FnMut(&EntryRow) -> bool) -> Vec<usize> {
         let n = self.line_count();
         let mut hits = Vec::new();

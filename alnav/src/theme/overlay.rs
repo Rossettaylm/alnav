@@ -80,11 +80,6 @@ fn apply_palette_file(mut p: Palette, f: PaletteFile) -> Result<Palette, String>
     Ok(p)
 }
 
-/// Merge `theme.toml` onto the default ANSI palette.
-pub fn apply_overlay(base: Palette, text: &str) -> Result<UiTokens, String> {
-    apply_overlay_for(base, "default", text)
-}
-
 /// Merge `theme.toml` semantic keys and `[palette]` onto a named base palette.
 pub fn apply_overlay_for(base: Palette, canonical: &str, text: &str) -> Result<UiTokens, String> {
     let file: ThemeFile = toml::from_str(text).map_err(|e| e.to_string())?;
@@ -160,11 +155,6 @@ pub fn apply_overlay_for(base: Palette, canonical: &str, text: &str) -> Result<U
         t.highlight = colors;
     }
     Ok(t)
-}
-
-/// Parse a theme.toml body into tokens (merged onto builtin ANSI defaults).
-pub fn parse_theme_toml(text: &str) -> Result<UiTokens, String> {
-    apply_overlay(Palette::default_ansi(), text)
 }
 
 /// Named ratatui color or `#RRGGBB` / `#RGB`.

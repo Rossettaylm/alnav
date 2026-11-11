@@ -1,6 +1,7 @@
 //! Generation-tagged background job slot: newest request wins, stale results are dropped.
 
 use std::sync::mpsc::{self, Receiver, Sender};
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 /// One logical background job (summary, histogram, …). Each [`Self::start`]
@@ -60,6 +61,7 @@ impl<T> BgJob<T> {
     }
 
     /// Block up to `timeout` for a result of the current generation (tests).
+    #[cfg(test)]
     pub fn wait(&mut self, timeout: Duration) -> Option<T> {
         let deadline = Instant::now() + timeout;
         loop {

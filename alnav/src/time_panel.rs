@@ -1,6 +1,6 @@
 //! Global session time-window editor (`tt` panel, file mode only).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use crossterm::event::KeyCode;
 
@@ -155,13 +155,9 @@ pub enum TimePanelOutcome {
 }
 
 impl TimePanel {
-    /// Build panel from buffered rows and optional current bound (best-effort prefill).
+    /// Build panel from any `EntryRow` iterator (buffered rows or file sample)
+    /// and optional current bound (best-effort prefill).
     /// Returns `None` when there are no date candidates.
-    pub fn open(rows: &VecDeque<EntryRow>, bound: Option<&TimeBound>) -> Option<Self> {
-        Self::open_from_iter(rows.iter(), bound)
-    }
-
-    /// Same as [`Self::open`] but accepts any `EntryRow` iterator (file sample).
     pub fn open_from_iter<'a, I>(rows: I, bound: Option<&TimeBound>) -> Option<Self>
     where
         I: IntoIterator<Item = &'a EntryRow>,
@@ -224,10 +220,6 @@ impl TimePanel {
         } else {
             &mut self.until
         }
-    }
-
-    pub fn since_selected_date(&self) -> Option<&str> {
-        self.since.selected_date.as_deref()
     }
 
     pub fn since_date_query(&self) -> &str {
@@ -616,15 +608,11 @@ pub fn clamp_hms(hms: &str, min: &str, max: &str) -> String {
     hms.to_string()
 }
 
-/// Convenience: extract catalog from a slice (tests / callers without VecDeque).
-pub fn extract_date_catalog(rows: &[EntryRow]) -> DateCatalog {
-    DateCatalog::from_rows(rows.iter())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::EntryRow;
+    use std::collections::VecDeque;
 
     fn row_at(ts_prefix: &str) -> EntryRow {
         // threadtime: "MM-DD HH:MM:SS.mmm ..."
@@ -633,13 +621,13 @@ mod tests {
 
     #[test]
     fn extract_dates_dedup_sorted_with_minmax() {
-        let rows = vec![
+        let rows = [
             row_at("04-02 10:00:00"),
             row_at("04-02 12:30:00"),
             row_at("04-01 09:00:00"),
             row_at("04-02 11:00:00"),
         ];
-        let cat = extract_date_catalog(&rows);
+        let cat = DateCatalog::from_rows(rows.iter());
         assert_eq!(cat.dates.len(), 2);
         assert_eq!(cat.dates[0].date, "04-01");
         assert_eq!(cat.dates[0].min_hms, "09:00:00");
@@ -660,7 +648,7 @@ mod tests {
     #[test]
     fn submit_one_sided_since() {
         let rows: VecDeque<_> = vec![row_at("04-02 10:00:00"), row_at("04-02 12:00:00")].into();
-        let mut panel = TimePanel::open(&rows, None).unwrap();
+        let mut panel = TimePanel::open_from_iter(&rows, None).unwrap();
         // Select date
         panel.focus = TimeField::SinceDate;
         panel.since.date_highlight = Some(0);
@@ -697,7 +685,7 @@ mod tests {
     #[test]
     fn submit_partial_side_flashes() {
         let rows: VecDeque<_> = vec![row_at("04-02 10:00:00")].into();
-        let mut panel = TimePanel::open(&rows, None).unwrap();
+        let mut panel = TimePanel::open_from_iter(&rows, None).unwrap();
         panel.since.selected_date = Some("04-02".into());
         // time empty → partial
         panel.focus = TimeField::UntilTime;
@@ -708,7 +696,7 @@ mod tests {
     #[test]
     fn clamp_since_le_until_on_current_side() {
         let rows: VecDeque<_> = vec![row_at("04-02 10:00:00"), row_at("04-02 15:00:00")].into();
-        let mut panel = TimePanel::open(&rows, None).unwrap();
+        let mut panel = TimePanel::open_from_iter(&rows, None).unwrap();
         panel.since.selected_date = Some("04-02".into());
         panel.since.time.set_text("14:00:00");
         panel.until.selected_date = Some("04-02".into());
@@ -726,8 +714,8 @@ mod tests {
             since: Some("04-02 10:30:00".into()),
             until: Some("04-02 11:00:00".into()),
         };
-        let panel = TimePanel::open(&rows, Some(&bound)).unwrap();
-        assert_eq!(panel.since_selected_date(), Some("04-02"));
+        let panel = TimePanel::open_from_iter(&rows, Some(&bound)).unwrap();
+        assert_eq!(panel.since.selected_date.as_deref(), Some("04-02"));
         assert_eq!(panel.since_time(), "10:30:00");
         assert_eq!(panel.until_time(), "11:00:00");
     }

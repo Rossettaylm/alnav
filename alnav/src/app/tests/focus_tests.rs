@@ -34,7 +34,7 @@ fn test_delete_focused_group_removes_and_rescans() {
     app.groups.groups.push(g("g0"));
     app.groups.groups.push(g("g1"));
     app.group_cursor = 0;
-    app.delete_focused_group();
+    app.delete_focused_strip_group(StripKind::Filter);
     assert_eq!(app.groups.groups.len(), 1);
     assert_eq!(app.groups.groups[0].label, "g1");
 }
@@ -44,7 +44,7 @@ fn test_delete_focused_group_returns_focus_to_loglist_when_list_becomes_empty() 
     let mut app = App::new(100);
     app.groups.groups.push(g("g0"));
     app.focus = Focus::ChipStrip;
-    app.delete_focused_group();
+    app.delete_focused_strip_group(StripKind::Filter);
     assert!(app.groups.groups.is_empty());
     assert_eq!(app.focus, Focus::LogList);
 }
@@ -55,7 +55,7 @@ fn test_delete_focused_group_keeps_focus_when_groups_remain() {
     app.groups.groups.push(g("g0"));
     app.groups.groups.push(g("g1"));
     app.focus = Focus::ChipStrip;
-    app.delete_focused_group();
+    app.delete_focused_strip_group(StripKind::Filter);
     assert!(!app.groups.groups.is_empty());
     assert_eq!(
         app.focus,
@@ -68,9 +68,9 @@ fn test_delete_focused_group_keeps_focus_when_groups_remain() {
 fn test_move_group_cursor_clamps() {
     let mut app = App::new(100);
     app.groups.groups.push(g("g0"));
-    app.move_group_cursor(-5);
+    app.move_strip_cursor(StripKind::Filter, -5);
     assert_eq!(app.group_cursor, 0);
-    app.move_group_cursor(5);
+    app.move_strip_cursor(StripKind::Filter, 5);
     assert_eq!(app.group_cursor, 0);
 }
 

@@ -199,17 +199,6 @@ pub enum JumpResult {
     Filtered,
 }
 
-/// Build a compact label from log fields (tests / fallback). Msg kept in full.
-pub fn bookmark_label(timestamp: &str, level: char, tag: &str, msg: &str) -> String {
-    let msg = msg.trim_end();
-    let tag = if tag.is_empty() { "-" } else { tag };
-    if msg.is_empty() {
-        format!("{timestamp} {level} {tag}")
-    } else {
-        format!("{timestamp} {level} {tag} {msg}")
-    }
-}
-
 /// Fit `label` into `max_cols` display cells, appending `…` when truncated.
 pub fn fit_label(label: &str, max_cols: usize) -> String {
     if max_cols == 0 {
@@ -331,45 +320,27 @@ fn format_delta(ms: u64) -> String {
     }
 }
 
-/// Pairwise helper used by tests: `None` hide (first timed), `Some("—")` untimed.
-pub fn delta_label(prev_ts: Option<&str>, curr_ts: &str) -> Option<String> {
-    let curr = dummy_row(0, curr_ts);
-    let curr_ms = stamp_millis(&curr);
-    if curr_ms.is_none() {
-        return Some("—".to_string());
-    }
-    let Some(prev) = prev_ts else {
-        return None;
-    };
-    let prev_row = dummy_row(0, prev);
-    let Some(prev_ms) = stamp_millis(&prev_row) else {
-        return None;
-    };
-    let delta = curr_ms.unwrap().saturating_sub(prev_ms).max(0) as u64;
-    Some(format_delta(delta))
-}
-
-fn dummy_row(row_id: u64, ts: &str) -> EntryRow {
-    let line = if ts.is_empty() {
-        "not a log line".to_string()
-    } else if ts.len() >= 19 && ts.as_bytes().get(4) == Some(&b'-') {
-        format!("{ts} 1234 5678 I Tag     : msg")
-    } else {
-        format!("{ts}  1  1 I Tag     : msg")
-    };
-    let mut row = EntryRow::from_line_or_raw(&line);
-    if ts.is_empty() {
-        row.timestamp.clear();
-    } else {
-        row.timestamp = ts.to_string();
-    }
-    row.row_id = row_id;
-    row
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dummy_row(row_id: u64, ts: &str) -> EntryRow {
+        let line = if ts.is_empty() {
+            "not a log line".to_string()
+        } else if ts.len() >= 19 && ts.as_bytes().get(4) == Some(&b'-') {
+            format!("{ts} 1234 5678 I Tag     : msg")
+        } else {
+            format!("{ts}  1  1 I Tag     : msg")
+        };
+        let mut row = EntryRow::from_line_or_raw(&line);
+        if ts.is_empty() {
+            row.timestamp.clear();
+        } else {
+            row.timestamp = ts.to_string();
+        }
+        row.row_id = row_id;
+        row
+    }
 
     fn bm_ts(row_id: u64, ts: &str) -> Bookmark {
         Bookmark::from_row(dummy_row(row_id, ts))
@@ -421,16 +392,13 @@ mod tests {
     }
 
     #[test]
-    fn delta_label_helper_first_timed_hides() {
-        assert_eq!(delta_label(None, "04-02 10:00:00.000"), None);
-        assert_eq!(
-            delta_label(Some("04-02 10:00:00.000"), "04-02 10:03:00.000").as_deref(),
-            Some("+3m")
-        );
-        assert_eq!(
-            delta_label(Some("04-02 10:00:00.000"), "").as_deref(),
-            Some("—")
-        );
+    fn delta_labels_first_timed_hides_then_minutes() {
+        let mut list = BookmarkList::default();
+        list.try_add(bm_ts(1, "04-02 10:00:00.000")).unwrap();
+        list.try_add(bm_ts(2, "04-02 10:03:00.000")).unwrap();
+        let labels = list.delta_labels();
+        assert_eq!(labels[0], None);
+        assert_eq!(labels[1].as_deref(), Some("+3m"));
     }
 
     #[test]
@@ -466,18 +434,6 @@ mod tests {
         list.try_add(bm_ts(1, "")).unwrap();
         list.try_add(bm_ts(2, "")).unwrap();
         assert_eq!(list.summary_line(), "★ 2");
-    }
-
-    #[test]
-    fn bookmark_label_keeps_long_text() {
-        let msg = "x".repeat(80);
-        let label = bookmark_label("04-02 10:00:00.000", 'I', "Tag", &msg);
-        assert!(label.len() > 56, "must not eagerly truncate at 56");
-        assert!(label.starts_with("04-02 10:00:00.000 I Tag "));
-        assert_eq!(
-            label.chars().count(),
-            "04-02 10:00:00.000 I Tag ".chars().count() + 80
-        );
     }
 
     #[test]

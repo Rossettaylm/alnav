@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
+#[cfg(test)]
 use std::time::Duration;
 
 use crate::fuzzy::CANDIDATE_RESULT_CAP;
@@ -69,10 +70,6 @@ impl Default for CandidateMatchService {
 impl CandidateMatchService {
     pub fn pending(&self) -> bool {
         self.pending_gen.is_some()
-    }
-
-    pub fn cache(&self) -> &CandidateMatchCache {
-        &self.cache
     }
 
     /// Best-effort labels for UI (exact hit or previous list while matching).
@@ -190,6 +187,7 @@ impl CandidateMatchService {
     }
 
     /// Block until the current request finishes or timeout (tests).
+    #[cfg(test)]
     pub fn flush(&mut self, timeout: Duration) {
         let deadline = std::time::Instant::now() + timeout;
         while self.pending_gen.is_some() {
@@ -284,7 +282,7 @@ mod tests {
     fn parity_with_sync_tag_candidates() {
         let mut svc = CandidateMatchService::default();
         let v = feed_vocab();
-        let sync = v.tag_candidates("app");
+        let sync = v.candidates(CandidateScope::Tag, "app");
         svc.request(&v, CandidateScope::Tag, "app");
         svc.flush(Duration::from_secs(2));
         assert_eq!(svc.display_labels(), sync.as_slice());
@@ -294,7 +292,7 @@ mod tests {
     fn parity_with_sync_all_candidates() {
         let mut svc = CandidateMatchService::default();
         let v = feed_vocab();
-        let sync = v.all_candidates("hello");
+        let sync = v.candidates(CandidateScope::All, "hello");
         svc.request(&v, CandidateScope::All, "hello");
         svc.flush(Duration::from_secs(2));
         assert_eq!(svc.display_labels(), sync.as_slice());
@@ -305,9 +303,9 @@ mod tests {
         let mut svc = CandidateMatchService::default();
         let v = feed_vocab();
         svc.request(&v, CandidateScope::Tag, "");
-        assert!(!svc.cache().labels.is_empty());
+        assert!(!svc.display_labels().is_empty());
         svc.clear();
-        assert!(svc.cache().labels.is_empty());
+        assert!(svc.display_labels().is_empty());
         assert!(!svc.pending());
     }
 

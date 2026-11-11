@@ -39,6 +39,7 @@ pub(super) fn should_flush_filter_batch(batch_len: usize, sent_any: bool, chunk_
     batch_len >= threshold
 }
 
+#[cfg(test)]
 pub(super) fn scan_line_spans(mmap: &[u8]) -> Vec<LineSpan> {
     let mut spans = Vec::new();
     let mut start = 0usize;
@@ -96,10 +97,7 @@ pub(super) fn index_file_background(
             since_progress = 0;
             let count = lines.read().expect("lines lock").len();
             if tx
-                .send(FileEvent::IndexProgress {
-                    line_count: count,
-                    bytes_done: start,
-                })
+                .send(FileEvent::IndexProgress { line_count: count })
                 .is_err()
             {
                 return;
@@ -170,14 +168,7 @@ pub(super) fn spawn_filter_scan(
                     batch.push(i);
                     if should_flush_filter_batch(batch.len(), sent_any, false) {
                         let hits = std::mem::take(&mut batch);
-                        if tx
-                            .send(FileEvent::FilterBatch {
-                                gen,
-                                hits,
-                                scanned: i + 1,
-                            })
-                            .is_err()
-                        {
+                        if tx.send(FileEvent::FilterBatch { gen, hits }).is_err() {
                             return;
                         }
                         sent_any = true;
@@ -189,14 +180,7 @@ pub(super) fn spawn_filter_scan(
             // Chunk boundary: flush sparse remainder so UI paints before Done.
             if should_flush_filter_batch(batch.len(), sent_any, true) {
                 let hits = std::mem::take(&mut batch);
-                if tx
-                    .send(FileEvent::FilterBatch {
-                        gen,
-                        hits,
-                        scanned: i,
-                    })
-                    .is_err()
-                {
+                if tx.send(FileEvent::FilterBatch { gen, hits }).is_err() {
                     return;
                 }
                 sent_any = true;
@@ -204,18 +188,11 @@ pub(super) fn spawn_filter_scan(
         }
         if !batch.is_empty() {
             let hits = std::mem::take(&mut batch);
-            if tx
-                .send(FileEvent::FilterBatch {
-                    gen,
-                    hits,
-                    scanned: i,
-                })
-                .is_err()
-            {
+            if tx.send(FileEvent::FilterBatch { gen, hits }).is_err() {
                 return;
             }
         }
         filter_done_flag.store(true, Ordering::Release);
-        let _ = tx.send(FileEvent::FilterDone { gen, scanned: i });
+        let _ = tx.send(FileEvent::FilterDone { gen });
     })
 }
