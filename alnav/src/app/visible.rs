@@ -118,6 +118,7 @@ impl App {
 
     /// Stream-only: the buffer `visible` indexes (`matched` when filter
     /// active). Prefer [`Self::row_at`] for render paths (works for File too).
+    #[cfg(test)]
     pub fn view_source(&self) -> &VecDeque<EntryRow> {
         self.index.view_source(self.filter_active())
     }
