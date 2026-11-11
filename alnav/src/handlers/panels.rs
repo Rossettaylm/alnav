@@ -263,7 +263,7 @@ pub(crate) fn handle_help_key(app: &mut App, key: event::KeyEvent) {
 /// Read-only summary panel keys (Leader `i`). `j`/`k`/`Down`/`Up` scroll the
 /// body; `Esc`/Ctrl+C close without resuming follow (same convention as
 /// Detail/Help). Re-pressing the `Leader i` chord while open also closes it
-/// (toggle semantics) — this is the only place `pending_leader` is armed
+/// (toggle semantics) — this is the only place `Pending::Leader` is armed
 /// while the panel owns key routing.
 pub(crate) fn handle_summary_key(app: &mut App, key: event::KeyEvent) {
     use keymap::ActionId;
