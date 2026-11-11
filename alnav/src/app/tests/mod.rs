@@ -14,6 +14,7 @@ mod focus_tests;
 mod follow_tests;
 mod highlight_tests;
 mod severe_tests;
+mod surface_tests;
 mod tests;
 mod vocab_tests;
 mod yank_and_search_tests;
