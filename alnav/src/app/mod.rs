@@ -4,7 +4,7 @@ use crate::bookmark::{BookmarkList, ComparePanel};
 use crate::filter_model::{GroupList, TimeBound};
 use crate::help::{HelpSearch, HelpView};
 use crate::highlight_model::{HighlightBox, HighlightGroupList};
-use crate::hist_panel::{HistJobMsg, HistView};
+use crate::hist_panel::{HistReport, HistView};
 use crate::scan::{HighlightDomain, HighlightScanState};
 use crate::store::RowStore;
 use crate::time_panel::TimePanel;
@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+mod bg_job;
 mod bookmarks;
 mod cursor;
 mod help_panel;
@@ -176,12 +177,7 @@ pub enum SummaryView {
     Ready(alnav::summary::SummaryOutput),
 }
 
-/// Result of a background summary job, tagged with the request generation so
-/// stale results (panel closed/reopened) can be dropped on arrival.
-struct SummaryJobMsg {
-    gen: u64,
-    report: alnav::summary::SummaryOutput,
-}
+type SummaryReport = alnav::summary::SummaryOutput;
 
 pub struct App {
     /// Stream (live/tests) or mmap file (`-f`) row backend.
@@ -319,18 +315,14 @@ pub struct App {
     preview_cache: std::cell::RefCell<PreviewThrottleCache>,
     /// Leader `i` summary panel state (static `visible` snapshot).
     pub summary_view: SummaryView,
-    /// Bumped on open/close; background job results with a stale gen are dropped.
-    summary_gen: u64,
+    /// Leader `i` summary background job (stale generations dropped).
+    summary_job: bg_job::BgJob<SummaryReport>,
     /// Scroll offset (lines) inside the summary panel body.
     pub summary_scroll: usize,
-    summary_tx: std::sync::mpsc::Sender<SummaryJobMsg>,
-    summary_rx: std::sync::mpsc::Receiver<SummaryJobMsg>,
     pub hist_view: HistView,
-    hist_gen: u64,
     pub hist_cursor: usize,
     hist_restore_key: Option<String>,
-    hist_tx: std::sync::mpsc::Sender<HistJobMsg>,
-    hist_rx: std::sync::mpsc::Receiver<HistJobMsg>,
+    hist_job: bg_job::BgJob<HistReport>,
     /// Restored `row_id` awaiting a resolvable visible slot. The File line index
     /// and the filter scan both grow in the background, so the jump is applied in
     /// [`Self::poll_file_store`] rather than at restore time.
@@ -353,8 +345,6 @@ struct PreviewThrottleCache {
 
 impl App {
     pub fn new(max_lines: usize) -> Self {
-        let (summary_tx, summary_rx) = std::sync::mpsc::channel();
-        let (hist_tx, hist_rx) = std::sync::mpsc::channel();
         Self {
             store: RowStore::stream(max_lines, MATCHED_HARD_CAP),
             matched_cap: MATCHED_HARD_CAP,
@@ -426,16 +416,12 @@ impl App {
             ingest_done: false,
             preview_cache: std::cell::RefCell::new(PreviewThrottleCache::default()),
             summary_view: SummaryView::Closed,
-            summary_gen: 0,
+            summary_job: bg_job::BgJob::new(),
             summary_scroll: 0,
-            summary_tx,
-            summary_rx,
             hist_view: HistView::Closed,
-            hist_gen: 0,
             hist_cursor: 0,
             hist_restore_key: None,
-            hist_tx,
-            hist_rx,
+            hist_job: bg_job::BgJob::new(),
             pending_restore_cursor: None,
             pending_restore_offset: 0,
             session_restore_disabled: false,

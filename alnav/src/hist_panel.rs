@@ -16,11 +16,6 @@ pub enum HistView {
     Ready(HistReport),
 }
 
-pub struct HistJobMsg {
-    pub gen: u64,
-    pub report: HistReport,
-}
-
 #[derive(Debug, Clone)]
 pub struct HistBucket {
     pub key: String,

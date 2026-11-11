@@ -753,11 +753,9 @@ fn summary_panel_rapid_reopen_drops_stale_gen_result() {
     app.drain(&rx);
 
     app.open_summary_panel();
-    let stale_gen = app.summary_gen;
+    let stale_ticket = app.summary_ticket();
     app.close_summary_panel();
     app.open_summary_panel();
-    let fresh_gen = app.summary_gen;
-    assert_ne!(stale_gen, fresh_gen);
 
     // Simulate a slow background result from the *first* (now-closed) request
     // arriving after the second request was opened.
@@ -773,12 +771,7 @@ fn summary_panel_rapid_reopen_drops_stale_gen_result() {
         top_errors: Vec::new(),
         crashes: 0,
     };
-    app.summary_tx
-        .send(SummaryJobMsg {
-            gen: stale_gen,
-            report: stale_report,
-        })
-        .unwrap();
+    stale_ticket.send(stale_report);
     app.poll_summary_job();
     assert!(
         matches!(app.summary_view, SummaryView::Loading),

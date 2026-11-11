@@ -1,8 +1,9 @@
 //! Summary and histogram panels with their background report jobs.
 
-use super::{App, SummaryJobMsg, SummaryView, Visible};
+use super::bg_job::JobTicket;
+use super::{App, SummaryReport, SummaryView, Visible};
 use crate::hist_panel;
-use crate::hist_panel::{HistJobMsg, HistView};
+use crate::hist_panel::{HistReport, HistView};
 use crate::model::EntryRow;
 use crate::store::RowStore;
 use std::sync::Arc;
@@ -18,8 +19,7 @@ fn spawn_file_summary_job(
     mmap: Arc<memmap2::Mmap>,
     lines: Arc<std::sync::RwLock<Vec<crate::store::LineSpan>>>,
     target: SummaryTarget,
-    gen: u64,
-    tx: std::sync::mpsc::Sender<SummaryJobMsg>,
+    ticket: JobTicket<SummaryReport>,
 ) {
     std::thread::spawn(move || {
         let mut summary = alnav::summary::Summary::new();
@@ -38,23 +38,17 @@ fn spawn_file_summary_job(
                 count += 1;
             }
         }
-        let report = summary.into_report(count);
-        let _ = tx.send(SummaryJobMsg { gen, report });
+        ticket.send(summary.into_report(count));
     });
 }
 
-fn spawn_stream_summary_job(
-    rows: Vec<EntryRow>,
-    gen: u64,
-    tx: std::sync::mpsc::Sender<SummaryJobMsg>,
-) {
+fn spawn_stream_summary_job(rows: Vec<EntryRow>, ticket: JobTicket<SummaryReport>) {
     std::thread::spawn(move || {
         let mut summary = alnav::summary::Summary::new();
         for row in &rows {
             summary.record(&row.as_log_entry());
         }
-        let report = summary.into_report(rows.len());
-        let _ = tx.send(SummaryJobMsg { gen, report });
+        ticket.send(summary.into_report(rows.len()));
     });
 }
 
@@ -63,8 +57,7 @@ fn spawn_file_hist_job(
     lines: Arc<std::sync::RwLock<Vec<crate::store::LineSpan>>>,
     target: SummaryTarget,
     interval_secs: u64,
-    gen: u64,
-    tx: std::sync::mpsc::Sender<HistJobMsg>,
+    ticket: JobTicket<HistReport>,
 ) {
     std::thread::spawn(move || {
         let mut pairs = Vec::new();
@@ -92,20 +85,17 @@ fn spawn_file_hist_job(
                 }
             }
         }
-        let report = hist_panel::build_report(pairs, interval_secs);
-        let _ = tx.send(HistJobMsg { gen, report });
+        ticket.send(hist_panel::build_report(pairs, interval_secs));
     });
 }
 
 fn spawn_stream_hist_job(
     pairs: Vec<(usize, EntryRow)>,
     interval_secs: u64,
-    gen: u64,
-    tx: std::sync::mpsc::Sender<HistJobMsg>,
+    ticket: JobTicket<HistReport>,
 ) {
     std::thread::spawn(move || {
-        let report = hist_panel::build_report(pairs, interval_secs);
-        let _ = tx.send(HistJobMsg { gen, report });
+        ticket.send(hist_panel::build_report(pairs, interval_secs));
     });
 }
 
@@ -116,11 +106,10 @@ impl App {
     }
 
     /// Leader `i`: snapshot the current `visible` into a background summary
-    /// job. Bumps `summary_gen` so a stale in-flight result (from a prior
-    /// open) is dropped when it arrives. Does not change `following`.
+    /// job. Starting a new job invalidates any in-flight result (from a prior
+    /// open), which is dropped when it arrives. Does not change `following`.
     pub fn open_summary_panel(&mut self) {
-        self.summary_gen = self.summary_gen.wrapping_add(1);
-        let gen = self.summary_gen;
+        let ticket = self.summary_job.start();
         self.summary_view = SummaryView::Loading;
         self.summary_scroll = 0;
         match &self.store {
@@ -130,7 +119,7 @@ impl App {
                     Visible::All { len } => SummaryTarget::All(*len),
                     Visible::Subset(v) => SummaryTarget::Subset(v.clone()),
                 };
-                spawn_file_summary_job(mmap, lines, target, gen, self.summary_tx.clone());
+                spawn_file_summary_job(mmap, lines, target, ticket);
             }
             RowStore::Stream(s) => {
                 let rows: Vec<EntryRow> = s
@@ -138,52 +127,44 @@ impl App {
                     .iter()
                     .cloned()
                     .collect();
-                spawn_stream_summary_job(rows, gen, self.summary_tx.clone());
+                spawn_stream_summary_job(rows, ticket);
             }
         }
     }
 
-    /// Close the summary panel (Esc / toggle re-press). Bumps `summary_gen`
-    /// so any in-flight background result is discarded on arrival. Does not
+    /// Close the summary panel (Esc / toggle re-press). Cancels the job so
+    /// any in-flight background result is discarded on arrival. Does not
     /// resume following (same convention as Detail/Help).
     pub fn close_summary_panel(&mut self) {
-        self.summary_gen = self.summary_gen.wrapping_add(1);
+        self.summary_job.cancel();
         self.summary_view = SummaryView::Closed;
         self.summary_scroll = 0;
     }
 
-    /// Drain finished summary jobs (call each frame). Results whose `gen`
-    /// no longer matches the current request are silently dropped.
+    /// Drain finished summary jobs (call each frame). Results from a
+    /// superseded request are silently dropped.
     pub fn poll_summary_job(&mut self) {
-        while let Ok(msg) = self.summary_rx.try_recv() {
-            if msg.gen != self.summary_gen {
-                continue;
-            }
-            self.summary_view = SummaryView::Ready(msg.report);
+        if let Some(report) = self.summary_job.poll() {
+            self.summary_view = SummaryView::Ready(report);
         }
     }
 
     /// Block until the in-flight summary job completes (tests).
     pub fn flush_summary_job(&mut self, timeout: std::time::Duration) {
-        let deadline = std::time::Instant::now() + timeout;
-        while matches!(self.summary_view, SummaryView::Loading) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match self.summary_rx.recv_timeout(remaining) {
-                Ok(msg) => {
-                    if msg.gen == self.summary_gen {
-                        self.summary_view = SummaryView::Ready(msg.report);
-                    }
-                }
-                Err(_) => break,
-            }
+        if !matches!(self.summary_view, SummaryView::Loading) {
+            return;
+        }
+        if let Some(report) = self.summary_job.wait(timeout) {
+            self.summary_view = SummaryView::Ready(report);
         }
     }
 
-    /// Scroll the summary panel body; only active while `Ready`. Upper bound
-    /// is clamped at render time against the built content length.
+    /// Ticket for the current summary generation (tests simulate late workers).
+    #[cfg(test)]
+    pub(in crate::app) fn summary_ticket(&self) -> JobTicket<SummaryReport> {
+        self.summary_job.ticket()
+    }
+
     pub fn hist_open(&self) -> bool {
         !matches!(self.hist_view, HistView::Closed)
     }
@@ -206,8 +187,7 @@ impl App {
     }
 
     fn spawn_hist_job(&mut self, interval_secs: u64) {
-        self.hist_gen = self.hist_gen.wrapping_add(1);
-        let gen = self.hist_gen;
+        let ticket = self.hist_job.start();
         self.hist_view = HistView::Loading { interval_secs };
         match &self.store {
             RowStore::File(f) => {
@@ -216,14 +196,7 @@ impl App {
                     Visible::All { len } => SummaryTarget::All(*len),
                     Visible::Subset(v) => SummaryTarget::Subset(v.clone()),
                 };
-                spawn_file_hist_job(
-                    mmap,
-                    lines,
-                    target,
-                    interval_secs,
-                    gen,
-                    self.hist_tx.clone(),
-                );
+                spawn_file_hist_job(mmap, lines, target, interval_secs, ticket);
             }
             RowStore::Stream(_) => {
                 let n = self.visible.len();
@@ -233,7 +206,7 @@ impl App {
                         pairs.push((i, row.into_owned()));
                     }
                 }
-                spawn_stream_hist_job(pairs, interval_secs, gen, self.hist_tx.clone());
+                spawn_stream_hist_job(pairs, interval_secs, ticket);
             }
         }
     }
@@ -257,58 +230,39 @@ impl App {
     }
 
     pub fn close_hist_panel(&mut self) {
-        self.hist_gen = self.hist_gen.wrapping_add(1);
+        self.hist_job.cancel();
         self.hist_view = HistView::Closed;
         self.hist_cursor = 0;
     }
 
     pub fn poll_hist_job(&mut self) {
-        while let Ok(msg) = self.hist_rx.try_recv() {
-            if msg.gen != self.hist_gen {
-                continue;
-            }
-            if msg.report.buckets.is_empty() {
-                self.hist_view = HistView::Closed;
-                self.hist_restore_key = None;
-                self.set_flash("NO DATES");
-                continue;
-            }
-            self.hist_cursor = if let Some(key) = self.hist_restore_key.take() {
-                msg.report.index_for_key(&key)
-            } else {
-                self.hist_cursor.min(msg.report.buckets.len() - 1)
-            };
-            self.hist_view = HistView::Ready(msg.report);
+        while let Some(report) = self.hist_job.poll() {
+            self.accept_hist_report(report);
         }
     }
 
     pub fn flush_hist_job(&mut self, timeout: std::time::Duration) {
-        let deadline = std::time::Instant::now() + timeout;
-        while matches!(self.hist_view, HistView::Loading { .. }) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match self.hist_rx.recv_timeout(remaining) {
-                Ok(msg) => {
-                    if msg.gen == self.hist_gen {
-                        if msg.report.buckets.is_empty() {
-                            self.hist_view = HistView::Closed;
-                            self.hist_restore_key = None;
-                            self.set_flash("NO DATES");
-                        } else {
-                            self.hist_cursor = if let Some(key) = self.hist_restore_key.take() {
-                                msg.report.index_for_key(&key)
-                            } else {
-                                self.hist_cursor.min(msg.report.buckets.len() - 1)
-                            };
-                            self.hist_view = HistView::Ready(msg.report);
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
+        if !matches!(self.hist_view, HistView::Loading { .. }) {
+            return;
         }
+        if let Some(report) = self.hist_job.wait(timeout) {
+            self.accept_hist_report(report);
+        }
+    }
+
+    fn accept_hist_report(&mut self, report: HistReport) {
+        if report.buckets.is_empty() {
+            self.hist_view = HistView::Closed;
+            self.hist_restore_key = None;
+            self.set_flash("NO DATES");
+            return;
+        }
+        self.hist_cursor = if let Some(key) = self.hist_restore_key.take() {
+            report.index_for_key(&key)
+        } else {
+            self.hist_cursor.min(report.buckets.len() - 1)
+        };
+        self.hist_view = HistView::Ready(report);
     }
 
     pub fn move_hist_cursor(&mut self, delta: isize) {
