@@ -25,9 +25,11 @@ mod presets;
 mod rules;
 mod session_state;
 mod summary_hist;
+mod surface;
 mod visible;
 mod vocab_preview;
 
+pub use surface::{Dialog, Surface};
 pub use visible::Visible;
 
 /// Hard cap on the matched-rows buffer (OOM safety). When a filter is active,

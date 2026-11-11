@@ -1,7 +1,7 @@
 //! Picker, command palette, source panels, confirm dialog, detail overlay, and flash toasts.
 
 use super::Pending;
-use super::{App, DetailView, Focus, Mode};
+use super::{App, DetailView, Focus, Mode, Surface};
 use std::time::{Duration, Instant};
 
 impl App {
@@ -19,28 +19,13 @@ impl App {
     /// Whether `C-p` may open the command palette (R3: Normal LogList/strips,
     /// no other modal). Pending chords are allowed — opening clears them.
     pub fn command_palette_available(&self) -> bool {
-        if self.command_palette.is_some()
-            || self.confirm.is_some()
-            || self.picker.is_some()
-            || self.time_panel.is_some()
-            || self.detail_open()
-            || self.highlight_box.editing
-            || self.help_open
-            || self.compare.is_some()
-            || self.summary_open()
-            || self.hist_open()
-            || self.dashboard.is_some()
-            || self.open_file_panel.is_some()
-            || self.stream_source_panel.is_some()
-            || self.preset_name.is_some()
-            || self.mode != Mode::Normal
-        {
-            return false;
-        }
-        matches!(
-            self.focus,
-            Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
-        )
+        self.surface() == Surface::Main
+            && self.dialog().is_none()
+            && self.mode == Mode::Normal
+            && matches!(
+                self.focus,
+                Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
+            )
     }
 
     /// Open the command palette from a Normal LogList/strip surface.

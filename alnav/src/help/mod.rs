@@ -9,7 +9,7 @@
 //!
 //! Key strings come from [`App::keymap`]; labels/details stay in this module.
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, Surface};
 
 mod hints;
 mod pages;
@@ -29,22 +29,11 @@ pub const FAST_SCROLL_STEP: isize = 7;
 
 /// Whether Help may open for the current app state.
 pub fn help_available(app: &App) -> bool {
-    if app.confirm.is_some()
-        || app.picker.is_some()
-        || app.time_panel.is_some()
-        || app.hist_open()
-        || app.detail_open()
-        || app.highlight_box.editing
-        || app.command_palette.is_some()
-        || app.compare.is_some()
-    {
-        return false;
-    }
-    if app.pending.is_armed() {
-        return false;
-    }
-    matches!(
-        app.focus,
-        Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
-    )
+    matches!(app.surface(), Surface::Main)
+        && app.dialog().is_none()
+        && !app.pending.is_armed()
+        && matches!(
+            app.focus,
+            Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip
+        )
 }
