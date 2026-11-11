@@ -38,7 +38,7 @@ impl App {
         }
         self.active_highlight = Some(index);
         self.match_stats_stale = true;
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
         self.jump_first_match_of(index)
@@ -70,7 +70,7 @@ impl App {
             }
         }
         self.match_stats_stale = true;
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
         self.confirm = None;
@@ -252,7 +252,7 @@ impl App {
                 let g = &mut self.highlight_groups.groups[cursor];
                 g.enabled = !g.enabled;
                 self.match_stats_stale = true;
-                if self.store.is_file() {
+                if self.index.store.is_file() {
                     self.restart_highlight_scan();
                 }
             }
@@ -365,7 +365,7 @@ impl App {
         group.enabled = self.highlight_groups.groups[index].enabled;
         self.highlight_groups.groups[index] = group;
         self.match_stats_stale = true;
-        if self.store.is_file() && self.active_highlight == Some(index) {
+        if self.index.store.is_file() && self.active_highlight == Some(index) {
             self.restart_highlight_scan();
         }
         true
@@ -376,7 +376,7 @@ impl App {
         self.active_highlight = None;
         self.highlight_cursor = 0;
         self.match_stats_stale = true;
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
     }
@@ -390,7 +390,7 @@ impl App {
             self.highlight_cursor = self.highlight_groups.groups.len().saturating_sub(1);
         }
         self.fix_active_highlight_after_delete(index);
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
         true
@@ -418,7 +418,7 @@ impl App {
                 };
                 g.enabled = !g.enabled;
                 self.match_stats_stale = true;
-                if self.store.is_file() {
+                if self.index.store.is_file() {
                     self.restart_highlight_scan();
                 }
                 true
@@ -490,7 +490,7 @@ impl App {
         }
         if highlight_dirty {
             self.match_stats_stale = true;
-            if self.store.is_file() {
+            if self.index.store.is_file() {
                 self.restart_highlight_scan();
             }
         }
@@ -525,7 +525,7 @@ impl App {
         };
         self.active_highlight = Some(idx);
         self.match_stats_stale = true;
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
         idx

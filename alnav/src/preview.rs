@@ -95,14 +95,14 @@ fn row_passes_preview(
 }
 
 fn preview_source_len(app: &App) -> usize {
-    match &app.store {
+    match &app.index.store {
         RowStore::Stream(s) => s.rows.len(),
         RowStore::File(f) => f.line_count(),
     }
 }
 
 fn preview_row_at(app: &App, i: usize) -> Option<EntryRow> {
-    match &app.store {
+    match &app.index.store {
         RowStore::Stream(s) => s.rows.get(i).cloned(),
         RowStore::File(f) => f.row_at(i),
     }

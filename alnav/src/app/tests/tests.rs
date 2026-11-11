@@ -46,7 +46,7 @@ fn test_drain_appends_visible_rows() {
     tx.send(row("B")).unwrap();
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn test_time_bound_alone_activates_filter_and_matches() {
     tx.send(late).unwrap();
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert_eq!(
         app.view_source()[app.source_idx_for_visible(0).unwrap()].tag,
         "A"
@@ -132,11 +132,11 @@ fn test_clear_time_bound_restores_visibility() {
     tx.send(row("A")).unwrap();
     drop(tx);
     app.drain(&rx);
-    assert!(app.visible.is_empty());
+    assert!(app.index.visible.is_empty());
     app.clear_time_bound();
     assert!(app.time_bound.is_none());
     assert!(!app.filter_active());
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
 }
 
 #[test]
@@ -169,14 +169,14 @@ fn test_view_focus_highlight_and_severe_toggle() {
     assert!(!app.view_focus.severe);
     assert!(!app.following);
     assert!(app.filter_active());
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(app.view_focus_badge_label(), Some("HL"));
 
     // Independent: fe stacks with fh → intersection.
     app.toggle_view_focus(ViewFocusKind::Severe);
     assert!(app.view_focus.highlight);
     assert!(app.view_focus.severe);
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert_eq!(app.current_row().unwrap().msg, "hit err");
     assert_eq!(app.view_focus_badge_label(), Some("HL+ERR"));
 
@@ -191,12 +191,12 @@ fn test_view_focus_highlight_and_severe_toggle() {
     app.toggle_view_focus(ViewFocusKind::Highlight);
     assert!(!app.view_focus.highlight);
     assert!(app.view_focus.severe);
-    assert_eq!(app.visible.len(), 2, "fe-only keeps both severe rows");
+    assert_eq!(app.index.visible.len(), 2, "fe-only keeps both severe rows");
     assert_eq!(app.view_focus_badge_label(), Some("ERR"));
 
     app.toggle_view_focus(ViewFocusKind::Severe);
     assert!(!app.view_focus.is_active());
-    assert_eq!(app.visible.len(), 4);
+    assert_eq!(app.index.visible.len(), 4);
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn test_view_focus_fh_without_highlight_flashes() {
     app.toggle_view_focus(ViewFocusKind::Highlight);
     assert!(!app.view_focus.is_active());
     assert_eq!(app.status_msg.as_deref(), Some("NO HIGHLIGHT"));
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
 }
 
 #[test]
@@ -238,12 +238,16 @@ fn test_view_focus_fh_ands_after_chip_filter() {
     );
     app.push_or_find_highlight_group(HighlightGroup::from_pattern("hit").unwrap());
     app.rebuild_visible();
-    assert_eq!(app.visible.len(), 2, "chip filter keeps both Keep rows");
+    assert_eq!(
+        app.index.visible.len(),
+        2,
+        "chip filter keeps both Keep rows"
+    );
 
     app.toggle_view_focus(ViewFocusKind::Highlight);
     assert!(app.view_focus.highlight);
     assert_eq!(
-        app.visible.len(),
+        app.index.visible.len(),
         1,
         "fh keeps only highlight hits inside filter"
     );
@@ -252,7 +256,7 @@ fn test_view_focus_fh_ands_after_chip_filter() {
     app.toggle_view_focus(ViewFocusKind::Highlight);
     assert!(!app.view_focus.is_active());
     assert_eq!(
-        app.visible.len(),
+        app.index.visible.len(),
         2,
         "second fh restores chip-filter-only view"
     );
@@ -289,7 +293,7 @@ fn test_di_group_zero_does_not_clear_time_bound() {
         .unwrap();
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert_eq!(
         app.view_source()[app.source_idx_for_visible(0).unwrap()]
             .as_log_entry()
@@ -302,7 +306,7 @@ fn test_di_group_zero_does_not_clear_time_bound() {
     // Group disabled → include vacuous, but global time window still AND.
     assert!(app.time_bound.is_some());
     assert!(app.filter_active());
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert_eq!(
         app.view_source()[app.source_idx_for_visible(0).unwrap()]
             .as_log_entry()
@@ -323,7 +327,7 @@ fn test_ring_buffer_evicts_oldest_and_shifts_indices() {
     assert_eq!(app.rows().len(), 2);
     assert_eq!(app.rows()[0].tag, "B");
     assert_eq!(app.rows()[1].tag, "C");
-    assert_eq!(app.visible, Visible::All { len: 2 });
+    assert_eq!(app.index.visible, Visible::All { len: 2 });
 }
 
 #[test]
@@ -340,7 +344,7 @@ fn test_visible_all_identity_under_filter_active() {
     drop(tx);
     app.drain(&rx);
     assert_eq!(app.matched().len(), 2);
-    assert_eq!(app.visible, Visible::All { len: 2 });
+    assert_eq!(app.index.visible, Visible::All { len: 2 });
     assert_eq!(app.source_idx_for_visible(0), Some(0));
     assert_eq!(app.source_idx_for_visible(1), Some(1));
     assert_eq!(app.source_idx_for_visible(2), None);
@@ -394,7 +398,7 @@ fn test_inactive_front_evict_decrements_list_offset_o1() {
     app.following = false;
     app.list_offset = 1;
     app.cursor = 1;
-    assert_eq!(app.visible, Visible::All { len: 2 });
+    assert_eq!(app.index.visible, Visible::All { len: 2 });
 
     let (tx2, rx2) = mpsc::channel();
     tx2.send(row("C")).unwrap(); // rows at cap → pop A, O(1) adjust
@@ -403,7 +407,7 @@ fn test_inactive_front_evict_decrements_list_offset_o1() {
 
     assert_eq!(app.rows()[0].tag, "B");
     assert_eq!(app.rows()[1].tag, "C");
-    assert_eq!(app.visible, Visible::All { len: 2 });
+    assert_eq!(app.index.visible, Visible::All { len: 2 });
     assert_eq!(app.list_offset, 0);
     assert_eq!(app.cursor, 0);
 }
@@ -414,7 +418,7 @@ fn test_evicting_visible_front_decrements_list_offset() {
     // `rows` overflow — only by reaching `matched_cap`. Simulate that:
     // two matching rows fill `matched`; a third match evicts the oldest.
     let mut app = App::new(100);
-    app.matched_cap = 2;
+    app.index.matched_cap = 2;
     app.groups = GroupList {
         groups: vec![filter_group("keep-A", "A")],
         excludes: Vec::new(),
@@ -424,7 +428,7 @@ fn test_evicting_visible_front_decrements_list_offset() {
     tx.send(row("A")).unwrap(); // matched=[A0,A1], visible=[0,1]
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     app.following = false;
     app.list_offset = 1;
     app.cursor = 1;
@@ -434,7 +438,7 @@ fn test_evicting_visible_front_decrements_list_offset() {
     drop(tx2);
     app.drain(&rx2);
 
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(
         app.list_offset, 0,
         "viewport must shift with front eviction"
@@ -495,7 +499,7 @@ fn clear_buffered_logs_drops_buffers_keeps_filters_and_resumes() {
     app.drain(&rx);
     assert!(!app.rows().is_empty());
     assert!(!app.matched().is_empty());
-    assert!(!app.visible.is_empty());
+    assert!(!app.index.visible.is_empty());
 
     let row_id = app.matched()[0].row_id;
     let mut snap = app.matched()[0].clone();
@@ -513,7 +517,7 @@ fn clear_buffered_logs_drops_buffers_keeps_filters_and_resumes() {
 
     assert!(app.rows().is_empty());
     assert!(app.matched().is_empty());
-    assert!(app.visible.is_empty());
+    assert!(app.index.visible.is_empty());
     assert!(app.bookmarks.is_empty());
     assert!(app.bookmark_row_ids.is_empty());
     assert_eq!(app.groups.groups.len(), 1);
@@ -579,7 +583,7 @@ fn test_cursor_unaffected_when_evicted_row_was_already_filtered_out() {
     tx.send(row("X2")).unwrap();
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible, Visible::All { len: 2 });
+    assert_eq!(app.index.visible, Visible::All { len: 2 });
     app.cursor = 1; // pointing at X2
     app.following = false;
     let selected_tag_before = app.current_row().unwrap().tag.clone();
@@ -618,7 +622,7 @@ fn test_matched_rows_survive_rows_overflow() {
     assert_eq!(app.rows()[1].tag, "Y");
     assert_eq!(app.matched().len(), 1);
     assert_eq!(app.matched()[0].tag, "A");
-    assert_eq!(app.visible, Visible::All { len: 1 });
+    assert_eq!(app.index.visible, Visible::All { len: 1 });
     assert_eq!(app.current_row().unwrap().tag, "A");
 }
 
@@ -645,7 +649,7 @@ fn test_rebuild_visible_after_filter_change_loses_matched_evicted_from_rows() {
     app.rebuild_visible();
     assert_eq!(app.matched().len(), 1);
     assert_eq!(app.matched()[0].tag, "A");
-    assert_eq!(app.visible, Visible::All { len: 1 });
+    assert_eq!(app.index.visible, Visible::All { len: 1 });
 }
 
 #[test]
@@ -663,7 +667,7 @@ fn summary_panel_stream_ready_reflects_visible() {
     .unwrap();
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible.len(), 3);
+    assert_eq!(app.index.visible.len(), 3);
 
     assert!(!app.summary_open());
     app.open_summary_panel();
@@ -732,7 +736,11 @@ fn hist_panel_jumps_to_severe_and_applies_window() {
     app.apply_hist_window();
     assert!(!app.hist_open());
     assert!(app.time_bound.as_ref().is_some_and(|t| t.is_active()));
-    assert_eq!(app.visible.len(), 1, "severe bucket window keeps the E row");
+    assert_eq!(
+        app.index.visible.len(),
+        1,
+        "severe bucket window keeps the E row"
+    );
 }
 
 #[test]

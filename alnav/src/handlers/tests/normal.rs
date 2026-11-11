@@ -499,7 +499,7 @@ fn test_ct_pushes_tag_chip_and_narrows_visible() {
     assert_ne!(app.pending, Pending::Chip);
     assert_eq!(app.groups.groups.len(), 1);
     assert_eq!(app.groups.groups[0].chips[0].value, "Keep");
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert!(!app.following, "chip-from-cursor leaves following off");
     assert_eq!(app.status_msg.as_deref(), Some("FILTER"));
 }
@@ -521,7 +521,7 @@ fn test_cl_uses_level_gte_semantics() {
     app.cursor = 1; // W
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('l'));
-    assert_eq!(app.visible.len(), 3, "level>=W keeps W/E/F");
+    assert_eq!(app.index.visible.len(), 3, "level>=W keeps W/E/F");
     let levels: Vec<_> = app
         .visible_rows()
         .iter()
@@ -618,7 +618,7 @@ fn test_fh_fe_view_focus_keys() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
     assert!(app.view_focus.highlight);
     assert!(!app.view_focus.severe);
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert!(!app.following);
 
     // fe stacks: intersection of highlight ∩ severe.
@@ -626,7 +626,7 @@ fn test_fh_fe_view_focus_keys() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
     assert!(app.view_focus.highlight);
     assert!(app.view_focus.severe);
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert_eq!(app.current_row().unwrap().msg, "hit err");
 
     app.following = false;
@@ -638,12 +638,12 @@ fn test_fh_fe_view_focus_keys() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('e'));
     assert!(app.view_focus.highlight);
     assert!(!app.view_focus.severe);
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
 
     handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
     assert!(!app.view_focus.is_active());
-    assert_eq!(app.visible.len(), 4);
+    assert_eq!(app.index.visible.len(), 4);
 }
 
 #[test]
@@ -665,7 +665,7 @@ fn test_fp_locks_pid_and_ft_clears_pid_lock() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
     assert_eq!(app.lock_pid.as_deref(), Some("111"));
     assert!(app.lock_tid.is_none());
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert!(app.following, "lock coexists with following");
     assert_eq!(app.lock_badge_label().as_deref(), Some("pid=111"));
 
@@ -693,11 +693,11 @@ fn test_fp_toggle_same_value_and_fu_clear() {
     app.cursor = 0;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('p'));
     assert!(app.lock_pid.is_none());
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(app.status_msg.as_deref(), Some("UNLOCK"));
 
     app.cursor = 0;
@@ -706,7 +706,7 @@ fn test_fp_toggle_same_value_and_fu_clear() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('u'));
     assert!(app.lock_pid.is_none());
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
 }
 
 #[test]
@@ -728,7 +728,7 @@ fn test_esc_resume_following_keeps_lock() {
     handle_normal_key(&mut app, &mut input, KeyCode::Esc);
     assert!(app.following);
     assert_eq!(app.lock_pid.as_deref(), Some("111"));
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
 }
 
 #[test]
@@ -767,14 +767,14 @@ fn test_ct_exclude_hides_tag_and_dd_clears() {
         .chip
         .value
         .eq_ignore_ascii_case("Spam"));
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     app.focus = app::Focus::ExcludeStrip;
     app.exclude_cursor = 0;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
     assert!(app.groups.excludes.is_empty());
     assert_eq!(app.focus, app::Focus::LogList);
-    assert_eq!(app.visible.len(), 3);
+    assert_eq!(app.index.visible.len(), 3);
 }
 
 #[test]
@@ -792,12 +792,12 @@ fn test_exclude_di_restores_visibility() {
     app.cursor = 0;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('C'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     app.focus = app::Focus::ExcludeStrip;
     handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
     assert!(!app.groups.excludes[0].enabled);
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
 }
 
 #[test]
@@ -912,7 +912,7 @@ fn test_detail_c_field_still_works() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
     handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
     assert_eq!(app.groups.groups.len(), 1);
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert!(app.detail_open(), "c+t keeps detail open");
 }
 

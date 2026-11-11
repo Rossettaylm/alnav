@@ -113,10 +113,10 @@ impl App {
         let ticket = self.summary_job.start();
         self.summary_view = SummaryView::Loading;
         self.summary_scroll = 0;
-        match &self.store {
+        match &self.index.store {
             RowStore::File(f) => {
                 let (mmap, lines) = f.scan_snapshot();
-                let target = match &self.visible {
+                let target = match &self.index.visible {
                     Visible::All { len } => SummaryTarget::All(*len),
                     Visible::Subset(v) => SummaryTarget::Subset(v.clone()),
                 };
@@ -190,17 +190,17 @@ impl App {
     fn spawn_hist_job(&mut self, interval_secs: u64) {
         let ticket = self.hist_job.start();
         self.hist_view = HistView::Loading { interval_secs };
-        match &self.store {
+        match &self.index.store {
             RowStore::File(f) => {
                 let (mmap, lines) = f.scan_snapshot();
-                let target = match &self.visible {
+                let target = match &self.index.visible {
                     Visible::All { len } => SummaryTarget::All(*len),
                     Visible::Subset(v) => SummaryTarget::Subset(v.clone()),
                 };
                 spawn_file_hist_job(mmap, lines, target, interval_secs, ticket);
             }
             RowStore::Stream(_) => {
-                let n = self.visible.len();
+                let n = self.index.visible.len();
                 let mut pairs = Vec::with_capacity(n);
                 for i in 0..n {
                     if let Some(row) = self.row_at(i) {
@@ -315,11 +315,11 @@ impl App {
         };
         let idx = bucket.jump_visible();
         self.close_hist_panel();
-        if self.visible.is_empty() {
+        if self.index.visible.is_empty() {
             return;
         }
         self.following = false;
-        self.cursor = idx.min(self.visible.len() - 1);
+        self.cursor = idx.min(self.index.visible.len() - 1);
         self.match_stats_stale = true;
     }
 

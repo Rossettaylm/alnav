@@ -1,57 +1,12 @@
-//! Visible-row index (`Visible`), filter predicates, and row lookup over the active store.
+//! Filter predicates over rows, visible-set rebuilds, and `App` row lookups via [`LogIndex`].
 
-use super::{App, ViewFocus};
+use super::{App, ViewFocus, Visible};
 use crate::highlight_model::HighlightGroupList;
 use crate::model::EntryRow;
-use crate::store::{RowRef, RowStore, StreamStore};
+use crate::store::{RowRef, StreamStore};
 use std::cmp::Ordering;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-
-/// Visible-row index set into the active row source.
-///
-/// Stream path (`--hdc` / `--adb`) always uses [`Visible::All`]: an identity mapping
-/// `0..len` — never a materialised `Vec<usize>`. File path uses [`Visible::All`]
-/// when unfiltered and [`Visible::Subset`] (hit line numbers) when filtered.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Visible {
-    /// Identity: visible slot `i` maps to source index `i`.
-    All { len: usize },
-    /// Sparse hits (file/mmap filter): visible slot `i` → `hits[i]` line index.
-    Subset(Vec<usize>),
-}
-
-impl Visible {
-    pub fn len(&self) -> usize {
-        match self {
-            Visible::All { len } => *len,
-            Visible::Subset(v) => v.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn clear(&mut self) {
-        *self = Visible::All { len: 0 };
-    }
-
-    /// Source index for visible slot `vis_i`.
-    pub fn source_idx(&self, vis_i: usize) -> Option<usize> {
-        match self {
-            Visible::All { len } if vis_i < *len => Some(vis_i),
-            Visible::All { .. } => None,
-            Visible::Subset(v) => v.get(vis_i).copied(),
-        }
-    }
-}
-
-impl Default for Visible {
-    fn default() -> Self {
-        Visible::All { len: 0 }
-    }
-}
 
 fn row_time_order(a: &EntryRow, b: &EntryRow) -> Ordering {
     match (a.as_log_entry().time_full(), b.as_log_entry().time_full()) {
@@ -63,36 +18,23 @@ fn row_time_order(a: &EntryRow, b: &EntryRow) -> Ordering {
 }
 
 impl App {
-    /// Stream rolling buffer (tests / live). Empty static for File.
+    /// Stream rolling buffer (tests / live). Empty for File.
     pub fn rows(&self) -> &VecDeque<EntryRow> {
-        static EMPTY: std::sync::OnceLock<VecDeque<EntryRow>> = std::sync::OnceLock::new();
-        match &self.store {
-            RowStore::Stream(s) => &s.rows,
-            RowStore::File(_) => EMPTY.get_or_init(VecDeque::new),
-        }
+        self.index.rows()
     }
 
-    /// Stream matched buffer (tests / live). Empty static for File.
+    /// Stream matched buffer (tests / live). Empty for File.
     pub fn matched(&self) -> &VecDeque<EntryRow> {
-        static EMPTY: std::sync::OnceLock<VecDeque<EntryRow>> = std::sync::OnceLock::new();
-        match &self.store {
-            RowStore::Stream(s) => &s.matched,
-            RowStore::File(_) => EMPTY.get_or_init(VecDeque::new),
-        }
+        self.index.matched()
     }
 
     pub(super) fn stream_mut(&mut self) -> &mut StreamStore {
-        self.store
-            .as_stream_mut()
-            .expect("stream operation on file store")
+        self.index.stream_mut()
     }
 
     /// Visible slot → row (lazy-parse for File).
     pub fn row_at(&self, vis_i: usize) -> Option<RowRef<'_>> {
-        let src = self.source_idx_for_visible(vis_i)?;
-        // File ignores filter_active for buffer selection (source is line idx).
-        let filter_active = matches!(self.store, RowStore::Stream(_)) && self.filter_active();
-        self.store.row_at_source(src, filter_active)
+        self.index.row_at(vis_i, self.filter_active())
     }
 
     /// Whether the session still has no bound source (Dashboard active).
@@ -177,25 +119,22 @@ impl App {
     /// Stream-only: the buffer `visible` indexes (`matched` when filter
     /// active). Prefer [`Self::row_at`] for render paths (works for File too).
     pub fn view_source(&self) -> &VecDeque<EntryRow> {
-        match &self.store {
-            RowStore::Stream(s) => s.view_source(self.filter_active()),
-            RowStore::File(_) => self.rows(), // empty
-        }
+        self.index.view_source(self.filter_active())
     }
 
     /// Number of currently visible rows.
     pub fn visible_len(&self) -> usize {
-        self.visible.len()
+        self.index.visible.len()
     }
 
     /// Source index for visible slot `vis_i`.
     pub fn source_idx_for_visible(&self, vis_i: usize) -> Option<usize> {
-        self.visible.source_idx(vis_i)
+        self.index.visible.source_idx(vis_i)
     }
 
     /// Whether `row_id` is still present (bookmark liveness).
     pub(super) fn row_alive(&self, row_id: u64) -> bool {
-        self.store.row_alive(row_id)
+        self.index.store.row_alive(row_id)
     }
 
     pub(super) fn alive_bookmark_file_line_indices(&self) -> Vec<usize> {
@@ -241,7 +180,7 @@ impl App {
         let stream = self.stream_mut();
         stream.matched.clear();
         stream.matched.extend(passing);
-        self.visible = Visible::All {
+        self.index.visible = Visible::All {
             len: stream.matched.len(),
         };
     }
@@ -251,7 +190,7 @@ impl App {
             return;
         };
         self.stream_mut().matched.remove(idx);
-        self.visible = Visible::All {
+        self.index.visible = Visible::All {
             len: self.matched().len(),
         };
         self.adjust_after_mid_visible_evict(idx);
@@ -262,8 +201,8 @@ impl App {
         if !self.filter_active() {
             return;
         }
-        if self.store.is_file() {
-            let Some(src) = self.store.find_row_id(row_id, false) else {
+        if self.index.store.is_file() {
+            let Some(src) = self.index.store.find_row_id(row_id, false) else {
                 return;
             };
             if self
@@ -272,7 +211,7 @@ impl App {
             {
                 return;
             }
-            if let Visible::Subset(v) = &mut self.visible {
+            if let Visible::Subset(v) = &mut self.index.visible {
                 if let Ok(i) = v.binary_search(&src) {
                     v.remove(i);
                     self.adjust_after_mid_visible_evict(i);
@@ -295,18 +234,18 @@ impl App {
     /// background filter scan into [`Visible::Subset`] (or All when inactive).
     pub fn rebuild_visible(&mut self) {
         let active = self.filter_active();
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             if !active {
-                if let Some(file) = self.store.as_file_mut() {
+                if let Some(file) = self.index.store.as_file_mut() {
                     file.cancel_filter_scan();
                     let n = file.line_count();
                     let done = file.index_done();
-                    self.file_filter_gen = 0;
-                    self.visible = Visible::All { len: n };
+                    self.index.filter_gen = 0;
+                    self.index.visible = Visible::All { len: n };
                     self.ingest_done = done;
                 }
             } else {
-                self.visible = Visible::Subset(self.alive_bookmark_file_line_indices());
+                self.index.visible = Visible::Subset(self.alive_bookmark_file_line_indices());
                 self.ingest_done = false;
                 let groups = self.groups.clone();
                 let lock_pid = self.lock_pid.clone();
@@ -327,30 +266,31 @@ impl App {
                     )
                 });
                 let gen = self
+                    .index
                     .store
                     .as_file_mut()
                     .expect("file")
                     .start_filter_scan(pred);
-                self.file_filter_gen = gen;
+                self.index.filter_gen = gen;
             }
         } else if active {
             self.rebuild_stream_matched_with_pins();
         } else {
             let stream = self.stream_mut();
             stream.matched.clear();
-            self.visible = Visible::All {
+            self.index.visible = Visible::All {
                 len: stream.rows.len(),
             };
         }
 
         if self.following {
             self.jump_bottom();
-        } else if self.cursor >= self.visible.len() {
-            self.cursor = self.visible.len().saturating_sub(1);
+        } else if self.cursor >= self.index.visible.len() {
+            self.cursor = self.index.visible.len().saturating_sub(1);
         }
         self.match_stats_stale = true;
         // File: filter change invalidates Vis domain — restart highlight Inc.
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
     }
@@ -358,7 +298,7 @@ impl App {
     /// Collect currently visible rows (owned clones; prefer [`Self::row_at`]
     /// for hot paths).
     pub fn visible_rows(&self) -> Vec<EntryRow> {
-        let len = self.visible.len();
+        let len = self.index.visible.len();
         (0..len)
             .filter_map(|i| self.row_at(i).map(|r| r.into_owned()))
             .collect()
@@ -371,32 +311,12 @@ impl App {
     /// Resolve a bookmarked `row_id` to an owned row (Stream: rows or matched;
     /// File: `row_id - 1`). Returns `None` when the row has left the buffers.
     pub fn row_by_id(&self, row_id: u64) -> Option<EntryRow> {
-        match &self.store {
-            RowStore::Stream(s) => s
-                .matched
-                .iter()
-                .chain(s.rows.iter())
-                .find(|r| r.row_id == row_id)
-                .cloned(),
-            RowStore::File(f) => {
-                if row_id == 0 {
-                    return None;
-                }
-                let i = (row_id - 1) as usize;
-                f.row_at(i)
-            }
-        }
+        self.index.row_by_id(row_id)
     }
 
     /// Map `row_id` → visible slot without parsing file lines.
-    /// `Subset` hits are append-ordered, so lookup is binary search.
     pub fn visible_idx_for_row_id(&self, row_id: u64) -> Option<usize> {
-        let filter_active = matches!(self.store, RowStore::Stream(_)) && self.filter_active();
-        let src_idx = self.store.find_row_id(row_id, filter_active)?;
-        match &self.visible {
-            Visible::All { len } if src_idx < *len => Some(src_idx),
-            Visible::All { .. } => None,
-            Visible::Subset(v) => v.binary_search(&src_idx).ok(),
-        }
+        self.index
+            .visible_idx_for_row_id(row_id, self.filter_active())
     }
 }

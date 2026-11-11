@@ -1,22 +1,19 @@
 //! Session capture/restore, source switching, and recent-file tracking.
 
 use super::Pending;
-use super::{App, DetailView, Focus, Mode, SummaryView, ViewFocus, Visible};
+use super::{App, DetailView, Focus, Mode, SummaryView, ViewFocus};
 use crate::bookmark::Bookmark;
 use crate::help::HelpView;
 use crate::highlight_model::HighlightBox;
 use crate::hist_panel::HistView;
 use crate::model::{is_severe_row, EntryRow};
 use crate::scan::HighlightScanState;
-use crate::store::RowStore;
 use crate::vocab::Vocab;
 
 impl App {
     /// Reset session for a confirmed source switch. Keeps Filter / Exclude / Highlight only.
     pub fn reset_for_source_switch(&mut self) {
-        self.store = RowStore::stream(self.max_lines, self.matched_cap);
-        self.visible = Visible::default();
-        self.file_filter_gen = 0;
+        self.index.reset_stream(self.max_lines);
         self.ingest_done = false;
         self.clear_bookmarks();
         self.clear_visual();

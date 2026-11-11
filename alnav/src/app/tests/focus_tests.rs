@@ -93,8 +93,12 @@ fn test_toggle_disable_filter_rebuilds_visible() {
         .unwrap();
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     app.toggle_disable_focused(StripKind::Filter);
     assert!(!app.groups.groups[0].enabled);
-    assert_eq!(app.visible.len(), 2, "disabled-only list ≡ empty filter");
+    assert_eq!(
+        app.index.visible.len(),
+        2,
+        "disabled-only list ≡ empty filter"
+    );
 }

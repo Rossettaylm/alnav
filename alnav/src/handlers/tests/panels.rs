@@ -213,7 +213,7 @@ fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
         until: None,
     });
     assert!(app.filter_active());
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert!(app.export_cli_command().contains("--since "));
 
     app.following = true;
@@ -221,7 +221,7 @@ fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
     handle_normal_key(&mut app, &mut input, KeyCode::Char('u'));
     assert!(app.time_bound.is_none());
     assert!(!app.following);
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     assert_eq!(app.status_msg.as_deref(), Some("TIME CLEARED"));
 }
 

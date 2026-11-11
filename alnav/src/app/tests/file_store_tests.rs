@@ -90,7 +90,7 @@ fn file_filter_uses_subset_not_matched_buffer() {
         app.poll_file_store();
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(matches!(app.visible, Visible::Subset(_)));
+    assert!(matches!(app.index.visible, Visible::Subset(_)));
     assert_eq!(app.visible_len(), 2);
     assert!(app.matched().is_empty());
     assert_eq!(app.row_at(0).unwrap().tag, "Keep");
@@ -131,7 +131,7 @@ fn file_pin_survives_filter_in_line_order() {
     });
     app.rebuild_visible();
     wait_file_filter(&mut app);
-    assert!(matches!(app.visible, Visible::Subset(_)));
+    assert!(matches!(app.index.visible, Visible::Subset(_)));
     assert_eq!(app.visible_len(), 3);
     assert_eq!(app.row_at(0).unwrap().tag, "Keep");
     assert_eq!(app.row_at(1).unwrap().tag, "Drop");
@@ -367,6 +367,7 @@ fn file_find_severe_uses_cache_not_full_visible_parse() {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let done = app
+            .index
             .store
             .as_file()
             .map(|f| f.progress().severe_done)
@@ -379,7 +380,10 @@ fn file_find_severe_uses_cache_not_full_visible_parse() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(app.store.as_file().unwrap().severe_cached(1), Some(true));
+    assert_eq!(
+        app.index.store.as_file().unwrap().severe_cached(1),
+        Some(true)
+    );
     app.following = false;
     app.cursor = 0;
     assert_eq!(app.find_severe(1), FindJumpResult::Moved);
@@ -691,7 +695,7 @@ fn deferred_cursor_waits_for_an_in_flight_filter_scan() {
     // Index done (open_sync) but the filter scan has not reported hits yet:
     // `visible` is legitimately an empty Subset here.
     app.pending_restore_cursor = Some(4);
-    app.visible = Visible::Subset(Vec::new());
+    app.index.visible = Visible::Subset(Vec::new());
     app.ingest_done = false;
     app.poll_file_store();
     assert_eq!(

@@ -172,7 +172,7 @@ const CRASH_SCAN_LIMIT: usize = 500;
 pub fn crash_context_for_row(app: &App, row: &EntryRow) -> Option<(CrashInfo, bool)> {
     let crash_type = crash_detector().detect(&row.as_log_entry())?;
 
-    let (merged_msg, truncated) = if app.store.is_file() {
+    let (merged_msg, truncated) = if app.index.store.is_file() {
         let mut merged = row.msg.clone();
         let mut truncated = false;
         if let Some(start) = app.source_idx_for_visible(app.cursor) {
@@ -183,7 +183,7 @@ pub fn crash_context_for_row(app: &App, row: &EntryRow) -> Option<(CrashInfo, bo
                     truncated = true;
                     break;
                 }
-                let Some(next) = app.store.row_at_source(idx, false) else {
+                let Some(next) = app.index.store.row_at_source(idx, false) else {
                     break;
                 };
                 if next.parsed {
@@ -290,7 +290,7 @@ pub fn detail_content_lines(app: &App, inner_width: u16) -> Vec<Line<'static>> {
                     let width = inner_width.max(1) as usize;
                     return render_crash_detail_lines(
                         &info,
-                        !app.store.is_file(),
+                        !app.index.store.is_file(),
                         truncated,
                         width,
                     );

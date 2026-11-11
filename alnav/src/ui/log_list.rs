@@ -37,10 +37,10 @@ pub fn minimap_row_for_index(index: usize, visible_len: usize, height: usize) ->
 /// Build H3 rail marks for `height` cells. Empty when `visible` is empty.
 pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
     let h = height as usize;
-    if h == 0 || app.visible.is_empty() {
+    if h == 0 || app.index.visible.is_empty() {
         return Vec::new();
     }
-    let n = app.visible.len();
+    let n = app.index.visible.len();
     let mut cells = vec![MinimapMark::Track; h];
 
     // Approximate viewport band from list_offset (item units ≈ 1 row each).
@@ -57,7 +57,7 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
 
     // File: never O(budget) `row_at` — severe via prefetch cache, highlight via
     // async hit index. Stream keeps owned-row sample parse (bounded buffer).
-    if app.store.is_file() {
+    if app.index.store.is_file() {
         let samples = n.min(MINIMAP_MARK_BUDGET);
         for s in 0..samples {
             let i = if samples <= 1 {
@@ -68,7 +68,7 @@ pub fn build_minimap_marks(app: &App, height: u16) -> Vec<MinimapMark> {
             let Some(src) = app.source_idx_for_visible(i) else {
                 continue;
             };
-            if app.store.as_file().and_then(|f| f.severe_cached(src)) == Some(true) {
+            if app.index.store.as_file().and_then(|f| f.severe_cached(src)) == Some(true) {
                 let r = minimap_row_for_index(i, n, h);
                 cells[r] = MinimapMark::Severe;
             }
@@ -185,7 +185,7 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let block = rounded_block(title, active);
     let inner = block.inner(area);
     // H3: reserve 1 inner column for the minimap when there is content.
-    let rail_w = if !app.visible.is_empty() && inner.width > 1 {
+    let rail_w = if !app.index.visible.is_empty() && inner.width > 1 {
         1u16
     } else {
         0
@@ -195,7 +195,7 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let selection = app.selection_range();
     let patterns = app.highlight_groups.paint_patterns(app.active_highlight);
 
-    let lineno_width = app.visible.len().max(1).to_string().len();
+    let lineno_width = app.index.visible.len().max(1).to_string().len();
 
     // Compute list_area before building items for the virtual-scroll window size.
     // block.inner() is a pure rect computation — it does not render anything.
@@ -223,7 +223,7 @@ pub fn render_log_list(app: &mut App, frame: &mut Frame, area: Rect) {
     // ── Virtual scroll ─────────────────────────────────────────────────────────
     // Build ListItems only for a window around the current scroll position.
     // 3× the viewport height provides a safe margin for multi-line entries.
-    let n = app.visible.len();
+    let n = app.index.visible.len();
     let viewport_h = (list_area.height as usize).max(1);
     let window_size = (viewport_h * 3).max(20);
 

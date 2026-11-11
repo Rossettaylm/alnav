@@ -123,11 +123,11 @@ fn test_rebuild_visible_follows_when_following_and_visible_set_grows() {
     tx.send(row("B")).unwrap(); // doesn't match "a" group, filtered out
     drop(tx);
     app.drain(&rx);
-    assert_eq!(app.visible, Visible::All { len: 1 }); // only A is visible
+    assert_eq!(app.index.visible, Visible::All { len: 1 }); // only A is visible
     assert!(app.following);
 
     app.groups.groups.clear(); // simulates deleting the last filter group -> empty GroupList matches everything
     app.rebuild_visible();
-    assert_eq!(app.visible, Visible::All { len: 2 }); // both now visible, set grew
+    assert_eq!(app.index.visible, Visible::All { len: 2 }); // both now visible, set grew
     assert_eq!(app.cursor, 1); // still following: cursor pinned to new bottom (B), not stuck at old position
 }

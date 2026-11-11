@@ -795,7 +795,7 @@ fn test_cm_opens_picker_enter_pushes_token() {
     assert!(app.picker.is_none());
     assert_eq!(app.groups.groups.len(), 1);
     assert_eq!(app.groups.groups[0].chips[0].value, "timeout");
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
 }
 
 #[test]
@@ -833,7 +833,7 @@ fn test_cm_draft_fallback_when_no_candidate() {
         event::KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE),
     );
     assert_eq!(app.groups.groups[0].chips[0].value, "customxyz");
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
 }
 
 #[test]
@@ -888,7 +888,7 @@ fn test_capital_cm_picker_pushes_exclude_token() {
     assert!(app.picker.is_none(), "Cm skips ActionList");
     assert_eq!(app.groups.excludes.len(), 1);
     assert_eq!(app.groups.excludes[0].chip.value, "timeout");
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
 }
 
 #[test]

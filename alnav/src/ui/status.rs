@@ -13,7 +13,7 @@ const FLASH_MIN: usize = 12;
 
 pub fn render_status_bar(app: &mut App, frame: &mut Frame, area: Rect) {
     let mut left = vec![Span::styled(
-        format!("{}/{}", app.cursor + 1, app.visible.len()),
+        format!("{}/{}", app.cursor + 1, app.index.visible.len()),
         Style::default().add_modifier(Modifier::DIM),
     )];
     if let Some((current, total)) = app.highlight_match_stats() {

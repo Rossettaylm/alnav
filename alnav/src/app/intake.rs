@@ -52,10 +52,10 @@ impl App {
     pub fn set_file_store(&mut self, file: FileStore) {
         let n = file.line_count();
         let done = file.index_done();
-        self.store = RowStore::File(file);
-        self.visible = Visible::All { len: n };
+        self.index.store = RowStore::File(file);
+        self.index.visible = Visible::All { len: n };
         self.ingest_done = done && !self.filter_active();
-        self.file_filter_gen = 0;
+        self.index.filter_gen = 0;
         // Drain priming events (e.g. open_sync IndexDone) + start filter if needed.
         self.poll_file_store();
         if self.filter_active() {
@@ -69,7 +69,7 @@ impl App {
     /// Drain pending rows from a stream ingest source without blocking.
     /// No-op for File (use [`Self::poll_file_store`]).
     pub fn drain(&mut self, ingest: &impl crate::ingest::TryRecvRow) {
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             return;
         }
         let mut drained = 0usize;
@@ -93,10 +93,11 @@ impl App {
 
     /// Poll mmap indexer / filter / highlight worker events (file mode). Call each frame.
     pub fn poll_file_store(&mut self) {
-        let Some(_) = self.store.as_file() else {
+        let Some(_) = self.index.store.as_file() else {
             return;
         };
         let events = self
+            .index
             .store
             .as_file()
             .map(|f| f.drain_events())
@@ -111,11 +112,11 @@ impl App {
             match ev {
                 FileEvent::IndexProgress { line_count, .. } => {
                     index_grew = true;
-                    if let Some(f) = self.store.as_file() {
+                    if let Some(f) = self.index.store.as_file() {
                         f.grow_severe_cache();
                     }
                     if !self.filter_active() {
-                        self.visible = Visible::All { len: line_count };
+                        self.index.visible = Visible::All { len: line_count };
                         if let Some(dom) = &self.highlight_domain {
                             dom.set_identity_len(line_count);
                         }
@@ -124,18 +125,18 @@ impl App {
                 FileEvent::IndexDone { line_count } => {
                     index_grew = true;
                     index_done = true;
-                    if let Some(f) = self.store.as_file() {
+                    if let Some(f) = self.index.store.as_file() {
                         f.grow_severe_cache();
                     }
                     if !self.filter_active() {
-                        self.visible = Visible::All { len: line_count };
+                        self.index.visible = Visible::All { len: line_count };
                         if let Some(dom) = &self.highlight_domain {
                             dom.set_identity_len(line_count);
                             dom.seal();
                         }
                     }
                     // One-shot sampled vocab after index completes.
-                    if let Some(f) = self.store.as_file() {
+                    if let Some(f) = self.index.store.as_file() {
                         if f.mark_vocab_started() {
                             let mut feeds = Vec::new();
                             f.feed_vocab_sample(|tag, pkg, tokens| {
@@ -163,7 +164,7 @@ impl App {
         }
         let mut filter_grew = false;
         for (gen, hits) in filter_batches {
-            if gen != self.file_filter_gen {
+            if gen != self.index.filter_gen {
                 continue;
             }
             // Inc: grow highlight domain with Subset so the worker can continue.
@@ -178,7 +179,7 @@ impl App {
             self.match_stats_stale = true;
         }
         if let Some(gen) = filter_done_gen {
-            if gen == self.file_filter_gen {
+            if gen == self.index.filter_gen {
                 // ensure Subset even if zero hits; re-merge pins after index growth
                 if self.filter_active() {
                     self.merge_file_filter_hits(&[]);
@@ -210,8 +211,8 @@ impl App {
         if index_grew || index_done || filter_grew {
             if self.following {
                 self.jump_bottom();
-            } else if self.cursor >= self.visible.len() {
-                self.cursor = self.visible.len().saturating_sub(1);
+            } else if self.cursor >= self.index.visible.len() {
+                self.cursor = self.index.visible.len().saturating_sub(1);
             }
         }
         if index_done {
@@ -222,7 +223,7 @@ impl App {
             }
         }
         if let Some(gen) = filter_done_gen {
-            if gen == self.file_filter_gen && self.filter_active() {
+            if gen == self.index.filter_gen && self.filter_active() {
                 self.ingest_done = true;
             }
         }
@@ -267,7 +268,7 @@ impl App {
 
     /// Whether the File line index finished. Always false for Stream.
     pub fn file_index_done(&self) -> bool {
-        self.store.as_file().is_some_and(|f| f.index_done())
+        self.index.store.as_file().is_some_and(|f| f.index_done())
     }
 
     fn try_pending_jump_first(&mut self) {
@@ -290,7 +291,7 @@ impl App {
 
     /// Status fragment for file load/filter progress (None when idle/stream).
     pub fn file_progress_label(&self) -> Option<String> {
-        let f = self.store.as_file()?;
+        let f = self.index.store.as_file()?;
         let p = f.progress();
         if !p.index_done {
             // Approximate total lines from byte progress for status `idx a/b`.
@@ -314,7 +315,7 @@ impl App {
     /// LogList title/banner loading text (index / filter / highlight). Free: does
     /// not block input. Stream sessions always return `None`.
     pub fn log_loading_label(&self) -> Option<String> {
-        let f = self.store.as_file()?;
+        let f = self.index.store.as_file()?;
         let p = f.progress();
         if !p.index_done {
             let pct = if p.file_bytes == 0 {
@@ -330,7 +331,7 @@ impl App {
             return Some(format!("Filtering {pct}%…"));
         }
         if self.active_highlight_group().is_some() && !self.highlight_scan.done {
-            let total = self.visible.len().max(1);
+            let total = self.index.visible.len().max(1);
             let pct = (self.highlight_scan.scanned_vis.saturating_mul(100) / total).min(100);
             return Some(format!("Highlight {pct}%…"));
         }
@@ -340,14 +341,14 @@ impl App {
     /// Cancel + restart File highlight Vis scan for the active group (or clear).
     pub fn restart_highlight_scan(&mut self) {
         self.pending_jump_first = None;
-        if !self.store.is_file() {
+        if !self.index.store.is_file() {
             self.highlight_scan.clear();
             self.highlight_domain = None;
             self.match_stats_stale = true;
             return;
         }
         let Some(group) = self.active_highlight_group().cloned() else {
-            if let Some(f) = self.store.as_file_mut() {
+            if let Some(f) = self.index.store.as_file_mut() {
                 f.cancel_highlight_scan();
             }
             self.highlight_scan.clear();
@@ -356,11 +357,11 @@ impl App {
             self.match_stats_stale = true;
             return;
         };
-        let domain = match &self.visible {
+        let domain = match &self.index.visible {
             Visible::All { len } => {
                 let d = HighlightDomain::identity(*len);
                 // Seal when index already done and no filter growth expected.
-                if let Some(f) = self.store.as_file() {
+                if let Some(f) = self.index.store.as_file() {
                     let p = f.progress();
                     if p.index_done && !self.filter_active() {
                         d.seal();
@@ -370,7 +371,7 @@ impl App {
             }
             Visible::Subset(v) => {
                 let d = HighlightDomain::subset(v.clone());
-                if let Some(f) = self.store.as_file() {
+                if let Some(f) = self.index.store.as_file() {
                     if f.progress().filter_done {
                         d.seal();
                     }
@@ -381,6 +382,7 @@ impl App {
         self.highlight_domain = Some(Arc::clone(&domain));
         self.highlight_scan.clear();
         let gen = self
+            .index
             .store
             .as_file_mut()
             .expect("file")
@@ -400,7 +402,7 @@ impl App {
         let active = self.filter_active();
         let matches = active && self.row_passes_filters(&row);
         let max_lines = self.max_lines;
-        let matched_cap = self.matched_cap;
+        let matched_cap = self.index.matched_cap;
 
         let mut evict_rows = false;
         let mut evict_matched = false;
@@ -450,12 +452,12 @@ impl App {
             stream.rows.push_back(row.clone());
             stream.matched.push_back(row);
             let len = stream.matched.len();
-            self.visible = Visible::All { len };
+            self.index.visible = Visible::All { len };
         } else {
             stream.rows.push_back(row);
             if !active {
                 let len = stream.rows.len();
-                self.visible = Visible::All { len };
+                self.index.visible = Visible::All { len };
             }
         }
         self.follow_tick();
@@ -467,7 +469,7 @@ impl App {
     /// appended — `Visible::All.len` is unchanged across the pop+push pair.
     fn adjust_after_identity_front_evict(&mut self) {
         // No visible slots ⇒ nothing was on-screen at source index 0.
-        if self.visible.is_empty() {
+        if self.index.visible.is_empty() {
             return;
         }
         // Identity: source index 0 was always visible slot 0 when non-empty.
@@ -498,15 +500,15 @@ impl App {
             Some(a) if a > idx => self.visual_anchor = Some(a - 1),
             _ => {}
         }
-        if self.cursor >= self.visible.len() {
-            self.cursor = self.visible.len().saturating_sub(1);
+        if self.cursor >= self.index.visible.len() {
+            self.cursor = self.index.visible.len().saturating_sub(1);
         }
         self.match_stats_stale = true;
     }
 
     fn merge_file_filter_hits(&mut self, hits: &[usize]) {
         let pins = self.alive_bookmark_file_line_indices();
-        match &mut self.visible {
+        match &mut self.index.visible {
             Visible::Subset(v) => {
                 merge_sorted_unique(v, hits);
                 merge_sorted_unique(v, &pins);
@@ -514,7 +516,7 @@ impl App {
             _ => {
                 let mut v = hits.to_vec();
                 merge_sorted_unique(&mut v, &pins);
-                self.visible = Visible::Subset(v);
+                self.index.visible = Visible::Subset(v);
             }
         }
     }
@@ -523,10 +525,10 @@ impl App {
     /// `visible` and bookmarks, keeps filter/highlight/exclude/lock, resumes
     /// following, and flashes `CLEARED`.
     pub fn clear_buffered_logs(&mut self) {
-        if let Some(stream) = self.store.as_stream_mut() {
+        if let Some(stream) = self.index.store.as_stream_mut() {
             stream.clear();
         }
-        self.visible.clear();
+        self.index.visible.clear();
         self.clear_bookmarks();
         self.clear_visual();
         self.pending = Pending::None;

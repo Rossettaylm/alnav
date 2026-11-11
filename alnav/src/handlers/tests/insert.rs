@@ -317,7 +317,7 @@ fn test_input_bang_exclude_mode_submit() {
     handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // commit pill
     handle_insert_key(&mut app, &mut input, KeyCode::Enter).unwrap(); // submit excludes
     assert_eq!(app.groups.excludes.len(), 1);
-    assert_eq!(app.visible.len(), 1);
+    assert_eq!(app.index.visible.len(), 1);
     assert_eq!(
         app.view_source()[app.source_idx_for_visible(0).unwrap()].tag,
         "Keep"

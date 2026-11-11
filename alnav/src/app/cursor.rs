@@ -15,11 +15,11 @@ impl App {
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
-        if self.visible.is_empty() {
+        if self.index.visible.is_empty() {
             return;
         }
         let new = self.cursor as isize + delta;
-        self.cursor = new.clamp(0, self.visible.len() as isize - 1) as usize;
+        self.cursor = new.clamp(0, self.index.visible.len() as isize - 1) as usize;
         self.match_stats_stale = true;
     }
 
@@ -29,7 +29,7 @@ impl App {
     }
 
     pub fn jump_bottom(&mut self) {
-        self.cursor = self.visible.len().saturating_sub(1);
+        self.cursor = self.index.visible.len().saturating_sub(1);
         self.match_stats_stale = true;
     }
 
@@ -53,10 +53,10 @@ impl App {
 
     /// If the cursor is on the last visible row, pin and resume following.
     pub fn maybe_follow_at_bottom(&mut self) {
-        if self.visible.is_empty() {
+        if self.index.visible.is_empty() {
             return;
         }
-        if self.cursor == self.visible.len() - 1 {
+        if self.cursor == self.index.visible.len() - 1 {
             self.resume_following();
         }
     }
@@ -72,16 +72,16 @@ impl App {
     /// mode; `None` when not selecting.
     pub fn selection_range(&self) -> Option<(usize, usize)> {
         let anchor = self.visual_anchor?;
-        if self.visible.is_empty() {
+        if self.index.visible.is_empty() {
             return None;
         }
-        let cur = self.cursor.min(self.visible.len() - 1);
-        let anchor = anchor.min(self.visible.len() - 1);
+        let cur = self.cursor.min(self.index.visible.len() - 1);
+        let anchor = anchor.min(self.index.visible.len() - 1);
         Some((anchor.min(cur), anchor.max(cur)))
     }
 
     pub fn enter_visual_line(&mut self) {
-        if self.visible.is_empty() {
+        if self.index.visible.is_empty() {
             return;
         }
         if self.pending != Pending::StripD {
@@ -97,9 +97,14 @@ impl App {
 
     /// Probe whether visible slot `idx` is severe. `None` = budget abort (flash set).
     fn severe_at_visible(&mut self, idx: usize, sync_parses: &mut usize) -> Option<bool> {
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             let src = self.source_idx_for_visible(idx)?;
-            match self.store.as_file().and_then(|f| f.severe_cached(src)) {
+            match self
+                .index
+                .store
+                .as_file()
+                .and_then(|f| f.severe_cached(src))
+            {
                 Some(v) => Some(v),
                 None => {
                     if *sync_parses >= SEVERE_SYNC_PARSE_BUDGET {
@@ -122,7 +127,7 @@ impl App {
     /// File mode prefers the severe cache / prefetch; synchronous `row_at` is
     /// budget-capped so a keypress never full-scans a huge visible set.
     pub fn find_severe(&mut self, dir: i8) -> FindJumpResult {
-        let n = self.visible.len();
+        let n = self.index.visible.len();
         if n == 0 {
             return FindJumpResult::None;
         }
@@ -190,7 +195,7 @@ impl App {
         {
             return FindJumpResult::None;
         }
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             return match self.highlight_scan.find_next(self.cursor, dir) {
                 Some(idx) => {
                     self.following = false;
@@ -202,7 +207,7 @@ impl App {
                 None => FindJumpResult::NoMore,
             };
         }
-        let n = self.visible.len();
+        let n = self.index.visible.len();
         if n == 0 {
             return FindJumpResult::None;
         }
@@ -249,7 +254,7 @@ impl App {
         if !group.enabled {
             return false;
         }
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             if let Some(h) = self.highlight_scan.first_hit() {
                 self.following = false;
                 self.cursor = h;
@@ -265,7 +270,7 @@ impl App {
             self.pending_jump_first = Some(group_idx);
             return true;
         }
-        for idx in 0..self.visible.len() {
+        for idx in 0..self.index.visible.len() {
             let Some(row) = self.row_at(idx) else {
                 continue;
             };
@@ -313,13 +318,13 @@ impl App {
         let Some(_group) = self.active_highlight_group() else {
             return None;
         };
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             return Some(self.highlight_scan.match_stats(self.cursor));
         }
         let group = self.active_highlight_group()?;
         let mut total = 0usize;
         let mut current = None;
-        for idx in 0..self.visible.len() {
+        for idx in 0..self.index.visible.len() {
             let Some(row) = self.row_at(idx) else {
                 continue;
             };

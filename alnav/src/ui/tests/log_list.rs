@@ -467,6 +467,7 @@ fn test_build_minimap_marks_file_uses_cache_and_hit_index() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         let done = app
+            .index
             .store
             .as_file()
             .map(|fs| fs.progress().severe_done)

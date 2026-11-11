@@ -15,7 +15,7 @@ impl App {
     }
 
     pub(super) fn sample_rows_for_dates(&self) -> Vec<EntryRow> {
-        match &self.store {
+        match &self.index.store {
             RowStore::Stream(s) => s.rows.iter().cloned().collect(),
             RowStore::File(f) => {
                 let n = f.line_count();
@@ -36,7 +36,7 @@ impl App {
     /// Whether `tt` would find at least one date candidate (file-mode catalog).
     /// Early-exits; does not clone the stream buffer (palette `when` hot path).
     pub fn has_time_date_candidates(&self) -> bool {
-        match &self.store {
+        match &self.index.store {
             RowStore::Stream(s) => crate::time_panel::DateCatalog::any_in_rows(s.rows.iter()),
             RowStore::File(f) => {
                 let n = f.line_count();
@@ -510,7 +510,7 @@ impl App {
 
     /// Join `field` values for visible indices `lo..=hi` with newlines.
     pub fn yank_range(&self, lo: usize, hi: usize, field: YankField) -> Option<String> {
-        if self.visible.is_empty() || lo > hi || hi >= self.visible.len() {
+        if self.index.visible.is_empty() || lo > hi || hi >= self.index.visible.len() {
             return None;
         }
         let mut parts = Vec::with_capacity(hi - lo + 1);

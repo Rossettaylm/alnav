@@ -52,7 +52,7 @@ impl App {
             }
         }
         self.match_stats_stale = true;
-        if self.store.is_file() {
+        if self.index.store.is_file() {
             self.restart_highlight_scan();
         }
         Ok(())

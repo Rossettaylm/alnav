@@ -6,7 +6,6 @@ use crate::help::{HelpSearch, HelpView};
 use crate::highlight_model::{HighlightBox, HighlightGroupList};
 use crate::hist_panel::{HistReport, HistView};
 use crate::scan::{HighlightDomain, HighlightScanState};
-use crate::store::RowStore;
 use crate::time_panel::TimePanel;
 use crate::vocab::Vocab;
 use std::collections::HashSet;
@@ -18,6 +17,7 @@ mod bg_job;
 mod bookmarks;
 mod cursor;
 mod help_panel;
+mod index;
 mod intake;
 mod operators;
 mod overlays;
@@ -29,8 +29,8 @@ mod surface;
 mod visible;
 mod vocab_preview;
 
+pub use index::{LogIndex, Visible};
 pub use surface::{Dialog, Surface};
-pub use visible::Visible;
 
 /// Hard cap on the matched-rows buffer (OOM safety). When a filter is active,
 /// matching rows are retained in `App::matched` independently of `rows`'
@@ -226,14 +226,8 @@ pub enum SummaryView {
 type SummaryReport = alnav::summary::SummaryOutput;
 
 pub struct App {
-    /// Stream (live/tests) or mmap file (`-f`) row backend.
-    pub store: RowStore,
-    /// Hard cap on stream `matched` (OOM safety). Defaults to
-    /// [`MATCHED_HARD_CAP`]; tests override. Ignored for File.
-    pub matched_cap: usize,
-    pub visible: Visible,
-    /// Active filter-scan generation for FileStore (stale batches ignored).
-    file_filter_gen: u64,
+    /// Row backend + visible-slot mapping (the message index).
+    pub index: LogIndex,
     pub groups: GroupList,
     pub highlight_groups: HighlightGroupList,
     pub highlight_box: HighlightBox,
@@ -379,10 +373,7 @@ struct PreviewThrottleCache {
 impl App {
     pub fn new(max_lines: usize) -> Self {
         Self {
-            store: RowStore::stream(max_lines, MATCHED_HARD_CAP),
-            matched_cap: MATCHED_HARD_CAP,
-            visible: Visible::default(),
-            file_filter_gen: 0,
+            index: LogIndex::new(max_lines, MATCHED_HARD_CAP),
             groups: GroupList::default(),
             highlight_groups: HighlightGroupList::default(),
             highlight_box: HighlightBox::default(),

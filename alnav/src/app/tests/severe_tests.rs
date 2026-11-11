@@ -82,7 +82,7 @@ fn test_find_severe_respects_visible_filter() {
 
     assert!(app.push_filter_group(filter_group("tag=Keep", "Keep")));
     app.rebuild_visible();
-    assert_eq!(app.visible.len(), 2);
+    assert_eq!(app.index.visible.len(), 2);
     app.following = false;
     app.cursor = 0; // on Keep E
 
