@@ -39,10 +39,8 @@ impl CrashDetector {
             anr_re: Regex::new(r"(?i)ANR in ").unwrap(),
             // Require `signal <n> (` (tombstone form) — bare `signal 4` in
             // ordinary prose (e.g. "connect signal 4") must not match.
-            native_re: Regex::new(
-                r"(?i)(SIGSEGV|SIGABRT|SIGBUS|SIGFPE|SIGILL|signal \d+\s*\()",
-            )
-            .unwrap(),
+            native_re: Regex::new(r"(?i)(SIGSEGV|SIGABRT|SIGBUS|SIGFPE|SIGILL|signal \d+\s*\()")
+                .unwrap(),
             exception_re: Regex::new(
                 r"(?:Caused by: |\n)([a-zA-Z][\w.]*(?:Exception|Error|Throwable))",
             )
