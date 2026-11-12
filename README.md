@@ -89,6 +89,8 @@ alnav grep --help
 
 In the TUI, `?` opens Help, `C-p` the command palette, and `yc` exports the current filter as one `alnav grep …` command.
 
+`-f` remembers each file's Filter / Exclude / Highlight, lock, time window, cursor, and bookmarks under `<config dir>/sessions/` and restores them the next time you open that file. Set `restore_session = false` in `config.toml` to turn this off; any CLI filter flag (`--tag`, `--level`, …) skips it for that run.
+
 ## Why not grep
 
 One `alnav grep` usually replaces several `grep` / `rg` passes plus ad-hoc stats:

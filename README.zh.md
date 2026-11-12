@@ -89,6 +89,8 @@ alnav grep --help
 
 TUI 内 `?` 打开 Help，`C-p` 打开命令面板，`yc` 将当前过滤导出为一行 `alnav grep …`。
 
+`-f` 会把每个文件的 Filter / Exclude / Highlight、lock、时间窗、光标与书签存到 `<配置目录>/sessions/`，下次打开同一文件时自动恢复。在 `config.toml` 设 `restore_session = false` 可关闭；命令行带任一过滤参数（`--tag`、`--level` 等）时本次运行不读也不写。
+
 ## 为什么不只用 grep
 
 一条 `alnav grep` 通常能替代多轮 `grep` / `rg` 加自行统计：
