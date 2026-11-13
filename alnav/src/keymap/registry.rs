@@ -35,7 +35,6 @@ pub enum KeyContext {
     Global,
     Help,
     HighlightModal,
-    Input,
     Leader,
     Lock,
     LogList,
@@ -61,7 +60,6 @@ impl KeyContext {
             Self::Global => "global",
             Self::Help => "help",
             Self::HighlightModal => "highlight_modal",
-            Self::Input => "input",
             Self::Leader => "leader",
             Self::Lock => "lock",
             Self::LogList => "log_list",
@@ -86,7 +84,6 @@ impl KeyContext {
             "global" => Some(Self::Global),
             "help" => Some(Self::Help),
             "highlight_modal" => Some(Self::HighlightModal),
-            "input" => Some(Self::Input),
             "leader" => Some(Self::Leader),
             "lock" => Some(Self::Lock),
             "log_list" => Some(Self::LogList),
@@ -406,10 +403,6 @@ actions! {
     TimePanelDateUp: TimePanel, "date_up", "Up", Leaf, [], "date", "previous date";
     TimePanelDateDown: TimePanel, "date_down", "Down", Leaf, [], "date", "next date";
     TimePanelCancel: TimePanel, "cancel", "Esc", Leaf, [], "cancel", "cancel time panel";
-    InputDraftSpace: Input, "draft_space", "Space", Leaf, [], "draft", "space in draft";
-    InputCommit: Input, "commit", "Enter", Leaf, [], "commit", "pill then submit group";
-    InputToggleExclude: Input, "toggle_exclude", "!", Leaf, [], "exclude", "toggle exclude draft";
-    InputCancel: Input, "cancel", "Esc", Leaf, [], "cancel", "cancel input";
     HighlightModalDraftSpace: HighlightModal, "draft_space", "Space", Leaf, [],
         "draft", "space in draft";
     HighlightModalConfirm: HighlightModal, "confirm", "Enter", Leaf, [], "ok", "confirm pattern";

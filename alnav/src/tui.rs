@@ -5,7 +5,7 @@ use crate::cli::{cli_has_filter_args, initial_group, initial_time_bound, validat
 use crate::event_loop::run;
 use crate::live_ctl::{spawn_live_ctl, LiveBackend};
 use crate::source_bind::{bind_file_source, persist_current_file};
-use crate::{config, dashboard, export, input, keymap, recent};
+use crate::{config, dashboard, export, keymap, recent};
 use crossterm::event;
 use crossterm::execute;
 use crossterm::terminal::{
@@ -142,9 +142,8 @@ pub(crate) fn run_tui(cli: TuiCli) -> Result<(), String> {
         }
     };
 
-    let mut input = input::InputBox::default();
     let _ = cli.ignore_case; // retained for CLI compat; TUI always ignore-case
-    let result = run(&mut terminal, &mut app, &mut input, &mut live);
+    let result = run(&mut terminal, &mut app, &mut live);
 
     let disable_result = disable_raw_mode().map_err(|e| e.to_string());
     let leave_result = execute!(

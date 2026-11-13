@@ -1,17 +1,15 @@
 //! TUI text-matching facade (nucleo-matcher + substring helpers).
 //!
-//! CLI `alnav grep` keeps its own FilterChain/Expr path. Interactive TUI
-//! matching goes through this module:
-//! - **Substring** (`substr_match`): Filter/Exclude/Search/Highlight vs log rows
+//! Filter/Exclude row matching lives in [`crate::filter_model::compile_predicate`]
+//! (one `alnav::expr::Expr`). This module covers interactive text matching:
+//! - **Substring** (`substr_match`): Search/Highlight vs log rows
 //! - **Fuzzy / parse** (`FuzzyScorer` / `fuzzy_label_indices`): Picker/vocab/
 //!   candidate lists via [`Pattern::parse`] — whitespace atoms AND, plus fzf-style
 //!   `'…` / `^…` / `…$` / `^…$` / `!…` per atom (default atom kind remains Fuzzy).
 
-use alnav::parser::Level;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-use crate::input::{Chip, ChipField};
 use crate::model::EntryRow;
 
 /// Hard cap on UI candidate-panel results (ResultCap SLO).
@@ -315,37 +313,6 @@ pub fn matches_search_row(row: &EntryRow, pattern: &str) -> bool {
     substr_match(&search_haystack_row(row), pattern)
 }
 
-/// Filter/Exclude text chip: **contiguous substring** on that field only;
-/// empty field → no match. `pid`/`tid` exact; `level` is minimum level
-/// (same as CLI LevelGte). Fuzzy stays for Picker/vocab candidate lists only.
-pub fn chip_matches_row(chip: &Chip, row: &EntryRow) -> bool {
-    match chip.field {
-        ChipField::Tag => {
-            if row.tag.is_empty() {
-                return false;
-            }
-            substr_match(&row.tag, &chip.value)
-        }
-        ChipField::Msg => {
-            if row.msg.is_empty() {
-                return false;
-            }
-            substr_match(&row.msg, &chip.value)
-        }
-        ChipField::Pkg => {
-            if row.pkg.is_empty() {
-                return false;
-            }
-            substr_match(&row.pkg, &chip.value)
-        }
-        ChipField::Pid => row.pid == chip.value,
-        ChipField::Tid => row.tid == chip.value,
-        ChipField::Level => Level::from_str(&chip.value)
-            .map(|min| row.level >= min)
-            .unwrap_or(false),
-    }
-}
-
 /// How same-field chips combine inside a Group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SameFieldOp {
@@ -354,43 +321,6 @@ pub enum SameFieldOp {
     And,
     /// Startup CLI multi-values: tag:A OR tag:B.
     Or,
-}
-
-/// Evaluate a chip list against a row (AND across fields; same-field per `op`).
-pub fn chips_match_row(chips: &[Chip], row: &EntryRow, op: SameFieldOp) -> bool {
-    if chips.is_empty() {
-        return true;
-    }
-    match op {
-        SameFieldOp::And => chips.iter().all(|c| chip_matches_row(c, row)),
-        SameFieldOp::Or => {
-            // Group by field; within field OR; across fields AND.
-            let mut tag = Vec::new();
-            let mut msg = Vec::new();
-            let mut pkg = Vec::new();
-            let mut pid = Vec::new();
-            let mut tid = Vec::new();
-            let mut level: Option<&Chip> = None;
-            for c in chips {
-                match c.field {
-                    ChipField::Tag => tag.push(c),
-                    ChipField::Msg => msg.push(c),
-                    ChipField::Pkg => pkg.push(c),
-                    ChipField::Pid => pid.push(c),
-                    ChipField::Tid => tid.push(c),
-                    ChipField::Level => level = Some(c),
-                }
-            }
-            let field_ok =
-                |cs: &[&Chip]| cs.is_empty() || cs.iter().any(|c| chip_matches_row(c, row));
-            field_ok(&tag)
-                && field_ok(&msg)
-                && field_ok(&pkg)
-                && field_ok(&pid)
-                && field_ok(&tid)
-                && level.map(|c| chip_matches_row(c, row)).unwrap_or(true)
-        }
-    }
 }
 
 /// Filter `&str` labels with the same semantics as [`fuzzy_label_indices`].
@@ -507,61 +437,6 @@ mod tests {
         assert_eq!(fuzzy_label_indices(&labels, "").len(), CANDIDATE_RESULT_CAP);
         assert!(fuzzy_label_indices(&labels, "item").len() <= CANDIDATE_RESULT_CAP);
     }
-
-    #[test]
-    fn chip_empty_field_no_match() {
-        let row = EntryRow::from_line("04-02 10:00:00.000  1234  5678 I Tag   : hello").unwrap();
-        let chip = Chip {
-            field: ChipField::Pkg,
-            value: "x".into(),
-        };
-        assert!(!chip_matches_row(&chip, &row));
-        let tag = Chip {
-            field: ChipField::Tag,
-            value: "Tag".into(),
-        };
-        assert!(chip_matches_row(&tag, &row));
-        // Non-contiguous must not match (was fuzzy before).
-        let gap = Chip {
-            field: ChipField::Tag,
-            value: "Tg".into(),
-        };
-        assert!(!chip_matches_row(&gap, &row));
-    }
-
-    #[test]
-    fn filter_chip_hex_is_contiguous_not_fuzzy() {
-        let line = "2026-07-22 16:43:02.809|1[14107]14321|14107|I|NTKernel|[I] sys_msg_mgr.cc(526)::NotifyRecvSysMsg [SysMsgMgr]->notify recv sys msg: msg_type=0xf01, sub_type=0x6d, is_guild_msg=1, is_online_msg=1 msg_id=0 chat_type=0 peer_uid= seq=0 random=0 time=0";
-        let row = EntryRow::from_line(line).unwrap();
-        let chips = vec![
-            Chip {
-                field: ChipField::Tag,
-                value: "NTkernel".into(),
-            },
-            Chip {
-                field: ChipField::Msg,
-                value: "0x1100".into(),
-            },
-        ];
-        // Fuzzy would stitch 0x + scattered 1/1/0/0; substring must reject.
-        assert!(fuzzy_match(&row.msg, "0x1100"));
-        assert!(!chips_match_row(&chips, &row, SameFieldOp::And));
-        assert!(chips_match_row(
-            &[
-                Chip {
-                    field: ChipField::Tag,
-                    value: "NTKernel".into(),
-                },
-                Chip {
-                    field: ChipField::Msg,
-                    value: "0x6d".into(),
-                },
-            ],
-            &row,
-            SameFieldOp::And
-        ));
-    }
-
     #[test]
     fn map_positions_substring_on_fields() {
         let spans = map_search_positions("MyTag", "hello guild world", "", "guild");
@@ -582,38 +457,5 @@ mod tests {
                 .unwrap();
         assert!(matches_search_row(&row2, "guild"));
         assert!(matches_search_row(&row2, "hello world")); // AND substrings
-    }
-
-    #[test]
-    fn pid_exact_level_gte() {
-        let row = EntryRow::from_line("04-02 10:00:00.000  1234  5678 E Tag   : hello").unwrap();
-        assert!(chip_matches_row(
-            &Chip {
-                field: ChipField::Pid,
-                value: "1234".into(),
-            },
-            &row
-        ));
-        assert!(!chip_matches_row(
-            &Chip {
-                field: ChipField::Pid,
-                value: "12".into(),
-            },
-            &row
-        ));
-        assert!(chip_matches_row(
-            &Chip {
-                field: ChipField::Level,
-                value: "W".into(),
-            },
-            &row
-        ));
-        assert!(!chip_matches_row(
-            &Chip {
-                field: ChipField::Level,
-                value: "F".into(),
-            },
-            &row
-        ));
     }
 }

@@ -118,6 +118,7 @@ fn test_rebuild_visible_follows_when_following_and_visible_set_grows() {
         }],
         excludes: Vec::new(),
     };
+    app.rebuild_visible();
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap();
     tx.send(row("B")).unwrap(); // doesn't match "a" group, filtered out

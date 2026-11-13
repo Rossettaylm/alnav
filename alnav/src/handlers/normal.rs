@@ -1,9 +1,9 @@
 //! Normal-mode key handling: focus/strip/loglist keys, leader and strip `d` chords, chip helpers.
 
+use crate::app;
 use crate::app::{App, Pending};
 use crate::handlers::km_code;
 use crate::keymap::ActionId;
-use crate::{app, input};
 use crossterm::event::KeyCode;
 
 fn handle_strip_d_chord(app: &mut App, kind: app::StripKind, code: KeyCode) -> bool {
@@ -57,7 +57,7 @@ fn handle_leader_key(app: &mut App, code: KeyCode) -> bool {
     false
 }
 
-pub(super) fn handle_normal_key(app: &mut App, _input: &mut input::InputBox, code: KeyCode) {
+pub(super) fn handle_normal_key(app: &mut App, code: KeyCode) {
     use app::{Focus, StripKind};
 
     // Visual-line: handle selection motions / yank before anything else.

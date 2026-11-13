@@ -113,7 +113,8 @@ fn print_examples() {
   alnav grep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
   alnav grep -f app.log -e 'not tag ~ Debug'
   alnav grep -f app.log -e 'tag ~ OkHttp' -e 'tag ~ Retrofit'  # multiple -e = OR
-  # Syntax: tag|msg|pkg ~ <regex>, level >= V|D|I|W|E|F
+  # Syntax: tag|msg|pkg|pid|tid ~ <regex>, pid|tid == <id>, level >= V|D|I|W|E|F,
+  #         time >= T, time <= T (T = HH:MM:SS | MM-DD HH:MM:SS | YYYY-MM-DD HH:MM:SS)
   # Combine with: and, or, not, ( )
 
   Context lines
@@ -152,9 +153,9 @@ fn print_examples() {
   alnav grep -f app.log --since '04-02 12:00:00'      # threadtime date+time
 
   PID/TID filtering
-  alnav grep -f app.log --tid 5678 --level W           # track specific thread
-  alnav grep -f app.log --pid 1234 --tid 5678          # PID + TID combined
-  alnav grep -f app.log -e 'pid ~ 3542 and level >= E' # expression with pid/tid
+  alnav grep -f app.log --tid 5678 --level W           # track specific thread (exact)
+  alnav grep -f app.log --pid 1234 --tid 5678          # PID + TID combined (exact)
+  alnav grep -f app.log -e 'pid == 3542 and level >= E' # expression with pid/tid
 
   Histogram (time distribution)
   alnav grep -f app.log --histogram 1m                 # level distribution per minute

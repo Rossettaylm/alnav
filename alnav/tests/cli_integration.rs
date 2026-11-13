@@ -12,9 +12,16 @@ fn temp_log(content: &str) -> NamedTempFile {
     f
 }
 
-/// Helper: run aloggrep (compat CLI bin) with args and stdin content.
+/// Helper: `alnav grep` command.
+fn grep_cmd() -> Command {
+    let mut cmd = Command::cargo_bin("alnav").unwrap();
+    cmd.arg("grep");
+    cmd
+}
+
+/// Helper: run `alnav grep` with args and stdin content.
 fn run_with_stdin(args: &[&str], stdin: &str) -> std::process::Output {
-    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    let mut cmd = grep_cmd();
     cmd.args(args);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
@@ -29,13 +36,13 @@ fn run_with_stdin(args: &[&str], stdin: &str) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 
-/// Helper: run aloggrep (compat CLI bin) with -f flag pointing to temp file.
+/// Helper: run `alnav grep` with -f flag pointing to temp file.
 fn run_with_file(args: &[&str], content: &str) -> (std::process::Output, NamedTempFile) {
     let f = temp_log(content);
     let path = f.path().to_str().unwrap().to_string();
     let mut all_args = vec!["-f", &path];
     all_args.extend_from_slice(args);
-    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    let mut cmd = grep_cmd();
     cmd.args(&all_args);
     let output = cmd.output().unwrap();
     (output, f)
@@ -510,7 +517,7 @@ fn test_cli_exit_code_no_match() {
 
 #[test]
 fn test_cli_exit_code_bad_args() {
-    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    let mut cmd = grep_cmd();
     cmd.args(["--level", "INVALID_LEVEL", "-f", "/dev/null"]);
     let output = cmd.output().unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -518,7 +525,7 @@ fn test_cli_exit_code_bad_args() {
 
 #[test]
 fn test_cli_rejects_adb_with_file() {
-    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    let mut cmd = grep_cmd();
     cmd.args(["--adb", "-f", "/dev/null"]);
     let output = cmd.output().unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -527,7 +534,7 @@ fn test_cli_rejects_adb_with_file() {
 
 #[test]
 fn test_cli_rejects_adb_with_hdc() {
-    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    let mut cmd = grep_cmd();
     cmd.args(["--adb", "--hdc"]);
     let output = cmd.output().unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -536,7 +543,7 @@ fn test_cli_rejects_adb_with_hdc() {
 
 #[test]
 fn test_cli_device_requires_live_source() {
-    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    let mut cmd = grep_cmd();
     cmd.args(["--device", "SERIAL"]);
     let output = cmd.output().unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -580,7 +587,7 @@ fn test_cli_glob_multiple_files() {
     std::fs::write(&f2, "04-02 10:00:01.000  1234  5678 E Tag     : err2\n").unwrap();
 
     let glob_pattern = dir.path().join("*.log").to_str().unwrap().to_string();
-    let mut cmd = Command::cargo_bin("aloggrep").unwrap();
+    let mut cmd = grep_cmd();
     cmd.args(["-f", &glob_pattern, "--count"]);
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -767,29 +774,4 @@ fn alnav_grep_filters_file_like_cli() {
     assert!(stdout.contains("timeout after 30000ms"));
     assert!(!stdout.contains("request started"));
     assert!(!stdout.contains("Retrofit"));
-}
-
-#[test]
-fn compat_alg_help_is_cli_entry() {
-    let output = Command::cargo_bin("alg")
-        .unwrap()
-        .arg("--help")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--summary") || stdout.contains("--crashes"));
-}
-
-#[test]
-fn compat_aloggrep_tui_help_is_tui_entry() {
-    let output = Command::cargo_bin("aloggrep-tui")
-        .unwrap()
-        .arg("--help")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Interactive vim-style"));
-    assert!(stdout.contains("--config-path"));
 }

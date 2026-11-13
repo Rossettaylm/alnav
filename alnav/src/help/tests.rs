@@ -29,10 +29,6 @@ fn context_kind_by_focus() {
         context_kind(&app_with_focus(Focus::HighlightStrip)),
         ContextKind::HighlightStrip
     );
-    assert_eq!(
-        context_kind(&app_with_focus(Focus::Input)),
-        ContextKind::Input
-    );
 }
 
 #[test]

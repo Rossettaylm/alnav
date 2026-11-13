@@ -87,7 +87,7 @@ alnav grep -f app.log --crashes
 alnav grep --help
 ```
 
-In the TUI, `?` opens Help, `C-p` the command palette, and `yc` exports the current filter as one `alnav grep …` command.
+In the TUI, `?` opens Help, `C-p` the command palette, and `yc` exports the current Filter / Exclude / lock / time window as one `alnav grep -i -e '…'` command that selects the same lines.
 
 `-f` remembers each file's Filter / Exclude / Highlight, lock, time window, cursor, and bookmarks under `<config dir>/sessions/` and restores them the next time you open that file. Set `restore_session = false` in `config.toml` to turn this off; any CLI filter flag (`--tag`, `--level`, …) skips it for that run.
 
@@ -111,12 +111,13 @@ Android / HarmonyOS device logs only. Use `rg` for general text.
 ```bash
 alnav grep -f app.log --tag "OkHttp" --msg "timeout" --level W
 alnav grep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+alnav grep -f app.log -e 'pid == 3542 and time >= "10:30:00" and time <= "10:35:00"'
 alnav grep -f app.log --since 10:30:00 --until 10:35:00
 alnav grep -f app.log --format json --fields timestamp,level,tag,msg --limit 50
 alnav grep --adb --device <serial> --level E
 ```
 
-Same-field flags OR; `--and` makes them AND. Cross-field is AND. `--level W` matches W/E/F. Multiple `-e` are OR.
+Same-field flags OR; `--and` makes them AND. Cross-field is AND. `--level W` matches W/E/F. `--pid` / `--tid` are exact. Multiple `-e` are OR.
 
 `--adb` and `--hdc` are mutually exclusive and cannot combine with `-f`, `--time-context`, `--follow-pid`/`--follow-tid`, or `--sort-time`.
 

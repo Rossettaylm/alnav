@@ -82,13 +82,6 @@ pub enum Focus {
     ExcludeStrip,
     HighlightStrip,
     LogList,
-    Input,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Normal,
-    Insert,
 }
 
 /// Operator / chord prefix armed by its first key; the next key completes or
@@ -196,7 +189,6 @@ pub struct App {
     pub max_lines: usize,
     pub should_quit: bool,
     pub focus: Focus,
-    pub mode: Mode,
     pub group_cursor: usize,
     pub exclude_cursor: usize,
     pub highlight_cursor: usize,
@@ -231,6 +223,9 @@ pub struct App {
     pub lock_tid: Option<String>,
     /// Global session time window (AND after lock). Not stored on Filter groups.
     pub time_bound: Option<TimeBound>,
+    /// [`Self::compiled_predicate`] as of the last [`Self::rebuild_visible`];
+    /// shared with File filter-scan workers.
+    pub predicate: Option<Arc<alnav::expr::Expr>>,
     /// Session view focus (`fh`/`fe`); AND after time. Esc resume does not clear.
     pub view_focus: ViewFocus,
     /// Open `tt` time-window editor (`None` when closed).
@@ -340,7 +335,6 @@ impl App {
             max_lines,
             should_quit: false,
             focus: Focus::LogList,
-            mode: Mode::Normal,
             group_cursor: 0,
             exclude_cursor: 0,
             highlight_cursor: 0,
@@ -360,6 +354,7 @@ impl App {
             lock_pid: None,
             lock_tid: None,
             time_bound: None,
+            predicate: None,
             view_focus: ViewFocus::default(),
             time_panel: None,
             visual_anchor: None,

@@ -14,10 +14,10 @@ use crossterm::event::{KeyEvent, KeyModifiers};
 #[test]
 fn space_f_no_longer_opens_filter_picker() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+
+    handle_normal_key(&mut app, KeyCode::Char(' '));
     assert_eq!(app.pending, Pending::Leader);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+    handle_normal_key(&mut app, KeyCode::Char('f'));
     assert_ne!(app.pending, Pending::Leader);
     assert!(app.picker.is_none());
 }
@@ -27,10 +27,10 @@ fn space_space_opens_unified_manage() {
     use crate::picker::{PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+
+    handle_normal_key(&mut app, KeyCode::Char(' '));
     assert_eq!(app.pending, Pending::Leader);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char(' '));
     assert_ne!(app.pending, Pending::Leader);
     let picker = app.picker.as_ref().expect("unified picker");
     assert_eq!(picker.kind, PickerKind::Unified);
@@ -44,7 +44,7 @@ fn bare_keys_open_unified_or_new() {
     use crate::picker::{PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.groups.groups.push(Group {
         label: "g".into(),
         chips: Vec::new(),
@@ -62,27 +62,27 @@ fn bare_keys_open_unified_or_new() {
         })
         .unwrap());
 
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(';'));
+    handle_normal_key(&mut app, KeyCode::Char(';'));
     let filter_new = app.picker.as_ref().expect("; opens filter New");
     assert_eq!(filter_new.kind, PickerKind::Filter);
     assert_eq!(filter_new.mode, PickerMode::New);
     app.close_picker();
 
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
+    handle_normal_key(&mut app, KeyCode::Char('/'));
     let hl = app.picker.as_ref().unwrap();
     assert_eq!(hl.kind, PickerKind::Highlight);
     assert_eq!(hl.mode, PickerMode::Manage);
     app.close_picker();
 
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('`'));
+    handle_normal_key(&mut app, KeyCode::Char('`'));
     let exclude = app.picker.as_ref().expect("` opens exclude New");
     assert_eq!(exclude.kind, PickerKind::Exclude);
     assert_eq!(exclude.mode, PickerMode::New);
     app.close_picker();
 
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert_eq!(app.pending, Pending::Mark);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert_ne!(app.pending, Pending::Mark);
     assert!(app.picker.is_none(), "mm must not open the Bookmark picker");
     assert!(app.compare.is_none());
@@ -117,8 +117,8 @@ fn manual_new_clears_draft_stays_in_new() {
     use crate::picker::{PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(';'));
+
+    handle_normal_key(&mut app, KeyCode::Char(';'));
     assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::New);
 
     handle_picker_key(
@@ -659,12 +659,12 @@ fn test_semicolon_opens_filter_picker_in_new() {
     use crate::picker::{PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(';'));
+
+    handle_normal_key(&mut app, KeyCode::Char(';'));
     let picker = app.picker.as_ref().expect("; must open filter New");
     assert_eq!(picker.kind, PickerKind::Filter);
     assert_eq!(picker.mode, PickerMode::New);
-    assert_eq!(app.mode, app::Mode::Normal);
+
     assert_eq!(app.focus, app::Focus::LogList);
 }
 
@@ -673,13 +673,13 @@ fn test_backtick_opens_exclude_picker() {
     use crate::picker::{PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('`'));
+
+    handle_normal_key(&mut app, KeyCode::Char('`'));
     let picker = app.picker.as_ref().expect("` must open exclude picker");
     assert_eq!(picker.kind, PickerKind::Exclude);
     // Empty excludes → New (same rule as Filter/Highlight/Bookmark).
     assert_eq!(picker.mode, PickerMode::New);
-    assert_eq!(app.mode, app::Mode::Normal);
+
     assert_eq!(app.focus, app::Focus::LogList);
 }
 
@@ -751,7 +751,7 @@ fn test_cm_opens_picker_enter_pushes_token() {
     use crate::picker::{MsgChipPurpose, PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &[
@@ -761,8 +761,8 @@ fn test_cm_opens_picker_enter_pushes_token() {
     );
     app.following = false;
     app.cursor = 0;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('c'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert!(matches!(
         app.picker
             .as_ref()
@@ -801,7 +801,7 @@ fn test_cm_opens_picker_enter_pushes_token() {
 #[test]
 fn test_cm_draft_fallback_when_no_candidate() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &[
@@ -811,8 +811,8 @@ fn test_cm_draft_fallback_when_no_candidate() {
     );
     app.following = false;
     app.cursor = 0;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('c'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     for c in "customxyz".chars() {
         handle_picker_key(
             &mut app,
@@ -839,13 +839,13 @@ fn test_cm_draft_fallback_when_no_candidate() {
 #[test]
 fn test_cm_picker_esc_closes_instead_of_opening_manage_mode() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &["04-02 10:00:00.000  1  1 I Tag     : hello world"],
     );
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('c'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     handle_picker_key(
         &mut app,
         event::KeyEvent::new(KeyCode::Esc, event::KeyModifiers::NONE),
@@ -858,7 +858,7 @@ fn test_capital_cm_picker_pushes_exclude_token() {
     use crate::picker::PickerKind;
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &[
@@ -867,8 +867,8 @@ fn test_capital_cm_picker_pushes_exclude_token() {
         ],
     );
     app.cursor = 0;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('C'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('C'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert!(matches!(
         app.picker.as_ref().map(|picker| &picker.kind),
         Some(PickerKind::MsgChip {
@@ -894,7 +894,7 @@ fn test_capital_cm_picker_pushes_exclude_token() {
 #[test]
 fn test_cm_action_list_highlight() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &[
@@ -904,8 +904,8 @@ fn test_cm_action_list_highlight() {
     );
     app.following = false;
     app.cursor = 0;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('c'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     for c in "timeout".chars() {
         handle_picker_key(
             &mut app,
@@ -943,14 +943,14 @@ fn test_cm_action_list_highlight() {
 #[test]
 fn test_cm_action_list_esc_cancels() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &["04-02 10:00:00.000  1  1 I Tag     : hello timeout"],
     );
     app.following = false;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('c'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     for c in "timeout".chars() {
         handle_picker_key(
             &mut app,
@@ -1009,10 +1009,10 @@ fn test_leader_space_opens_unified_picker() {
     use crate::picker::PickerKind;
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char(' '));
     assert_eq!(
         app.picker.as_ref().map(|picker| &picker.kind),
         Some(&PickerKind::Unified)

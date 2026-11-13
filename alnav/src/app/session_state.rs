@@ -1,7 +1,7 @@
 //! Session capture/restore, source switching, and recent-file tracking.
 
 use super::Pending;
-use super::{App, DetailView, Focus, Mode, SummaryView, ViewFocus};
+use super::{App, DetailView, Focus, SummaryView, ViewFocus};
 use crate::bookmark::Bookmark;
 use crate::help::HelpView;
 use crate::highlight_model::HighlightBox;
@@ -20,6 +20,7 @@ impl App {
         self.lock_pid = None;
         self.lock_tid = None;
         self.time_bound = None;
+        self.predicate = self.compiled_predicate().map(std::sync::Arc::new);
         self.view_focus = ViewFocus::default();
         self.time_panel = None;
         self.command_palette = None;
@@ -50,7 +51,6 @@ impl App {
         self.match_stats_stale = true;
         self.cached_match_stats = None;
         self.focus = Focus::LogList;
-        self.mode = Mode::Normal;
         self.following = true;
         self.status_msg = None;
         self.status_flash_until = None;

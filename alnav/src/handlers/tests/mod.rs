@@ -1,7 +1,6 @@
 //! Key-dispatch tests for `handlers`, split by surface; shared fixtures live here.
 
 mod help_palette;
-mod insert;
 mod layout;
 mod normal;
 mod panels;

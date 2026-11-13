@@ -14,26 +14,6 @@ readme = "../README.md"
 name = "alnav"
 path = "src/main.rs"
 
-# Compat aliases (remove next major). Disable harness so unit tests in main.rs
-# run once via the primary `alnav` target, not 4×.
-[[bin]]
-name = "aloggrep"
-path = "src/main.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "alg"
-path = "src/main.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "aloggrep-tui"
-path = "src/main.rs"
-test = false
-bench = false
-
 [dependencies]
 alnav-core = { path = "../alnav-core", version = "0.3.0" }
 arboard = "3"

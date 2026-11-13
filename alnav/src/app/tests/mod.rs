@@ -8,6 +8,7 @@ use crate::model::{is_severe_row, EntryRow};
 use crate::store::FileStore;
 use std::time::Duration;
 
+mod export_tests;
 mod file_store_tests;
 mod flash_tests;
 mod focus_tests;

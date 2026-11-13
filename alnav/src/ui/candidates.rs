@@ -1,8 +1,7 @@
-//! Candidate dropdown painting: labels, viewport windowing, input and highlight popups.
+//! Candidate dropdown painting: labels, viewport windowing, highlight popup.
 
 use super::{clear_to_canvas, popup_block, ActionKind};
 use crate::highlight_model::{HighlightBox, HighlightGroup};
-use crate::input::InputBox;
 use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -223,36 +222,6 @@ pub fn render_highlight_popup(
         selected,
         "no history",
         &search.draft,
-        frame,
-        area,
-        true,
-    );
-}
-
-pub fn render_popup(input: &InputBox, frame: &mut Frame, area: Rect) {
-    if !input.field_popup_visible() {
-        return;
-    }
-    let matches = input.field_candidates();
-    let labels: Vec<String> = matches.iter().map(|f| f.keyword().to_string()).collect();
-    let styles: Vec<Style> = matches
-        .iter()
-        .map(|&f| Style::default().fg(theme::field_color(f)))
-        .collect();
-    let selected = if matches.is_empty() {
-        0
-    } else {
-        input.field_selected.min(matches.len() - 1)
-    };
-    render_candidate_list(
-        "Fields",
-        &labels,
-        &styles,
-        &[],
-        &[],
-        selected,
-        "no match",
-        &input.draft,
         frame,
         area,
         true,

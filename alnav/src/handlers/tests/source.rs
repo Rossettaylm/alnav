@@ -4,7 +4,7 @@ use crate::app::App;
 use crate::handlers::handle_normal_event;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::source::handle_dashboard_key;
-use crate::{app, dashboard, input, model, recent};
+use crate::{app, dashboard, model, recent};
 use crossterm::event::KeyCode;
 use crossterm::event::{KeyEvent, KeyModifiers};
 
@@ -66,7 +66,7 @@ fn ctrl_l_clears_buffers_in_hdc_loglist() {
     let mut app = App::new(100);
     app.export_source = ExportSource::Hdc { device: None };
     app.focus = app::Focus::LogList;
-    app.mode = app::Mode::Normal;
+
     let (tx, rx) = mpsc::channel();
     tx.send(model::EntryRow::from_line("04-02 10:00:00.000  1  1 I T   : a").unwrap())
         .unwrap();
@@ -138,10 +138,9 @@ fn ctrl_l_noop_when_detail_open() {
 #[test]
 fn ctrl_f_opens_file_and_ctrl_g_opens_stream() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(
             KeyCode::Char('o'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
@@ -153,7 +152,6 @@ fn ctrl_f_opens_file_and_ctrl_g_opens_stream() {
     );
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
     );
     assert!(app.open_file_panel.is_some());
@@ -161,7 +159,6 @@ fn ctrl_f_opens_file_and_ctrl_g_opens_stream() {
 
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
     );
     assert!(app.open_file_panel.is_none());
@@ -195,17 +192,17 @@ fn dashboard_ctrl_f_opens_file_and_ctrl_g_opens_stream() {
 #[test]
 fn legacy_of_os_and_space_wo_no_longer_open_source_or_preset() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('f'));
+
+    handle_normal_key(&mut app, KeyCode::Char('o'));
+    handle_normal_key(&mut app, KeyCode::Char('f'));
     assert!(app.open_file_panel.is_none());
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+    handle_normal_key(&mut app, KeyCode::Char('o'));
+    handle_normal_key(&mut app, KeyCode::Char('s'));
     assert!(app.stream_source_panel.is_none());
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('w'));
+    handle_normal_key(&mut app, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char('w'));
     assert!(app.preset_name.is_none());
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('o'));
+    handle_normal_key(&mut app, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char('o'));
     assert!(app.picker.is_none());
 }

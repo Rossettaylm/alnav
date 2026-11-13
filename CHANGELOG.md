@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking:** the `aloggrep`, `alg`, and `aloggrep-tui` compat binaries are gone; use `alnav grep` and `alnav`.
+- Removed the unreachable standalone Input box (Insert mode) and its `[input]` keymap section; Filter / Exclude are created only through the picker (`;`, `` ` ``, `Space Space`, `5`).
+- **Breaking:** `alnav grep --pid` / `--tid` match exactly (`--pid 12` no longer matches `123`). Use `-e 'pid ~ REGEX'` for pattern matching.
+- **Breaking:** `--package` and `-e 'pkg ~ …'` no longer fall back to tag / msg on lines without a package (threadtime / brief); such lines never match.
+- `-e` gains `pid == ID`, `tid == ID`, `time >= T`, `time <= T`, and `\"` / `\\` escapes in quoted values. Fixed a hang on bare words containing `>` (e.g. `msg ~ a>b`).
+- `yc` exports one exact `alnav grep -i -e '…'`: lock becomes `pid ==` / `tid ==`, the time window `time >= / <=`, multi-word chips and startup OR-groups keep their TUI meaning. The command selects the same parsed rows the TUI shows.
+- TUI Filter / Exclude / lock / time window now compile to one `Expr` shared by stream intake, the file scan, and Preview. Filter Preview now honours the time window.
+
 ## 0.3.0 — 2026-11-12
 
 - `/` is a highlight find-or-create picker: search existing highlights, Enter activates and jumps; a trailing create row appears when the query is not an exact hit (including prefixes of existing patterns).

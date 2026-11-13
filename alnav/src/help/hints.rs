@@ -38,7 +38,6 @@ pub enum ContextKind {
     ChipField,
     Yank,
     StripD,
-    Input,
     ChipStrip,
     ExcludeStrip,
     HighlightStrip,
@@ -64,7 +63,6 @@ impl ContextKind {
             Self::ChipField => "Field",
             Self::Yank => "Yank",
             Self::StripD => "Strip delete",
-            Self::Input => "Input",
             Self::ChipStrip => "Filter strip",
             Self::ExcludeStrip => "Exclude strip",
             Self::HighlightStrip => "Highlight strip",
@@ -176,7 +174,6 @@ pub fn context_kind(app: &App) -> ContextKind {
         Pending::None => {}
     }
     match app.focus {
-        Focus::Input => ContextKind::Input,
         Focus::ChipStrip => ContextKind::ChipStrip,
         Focus::ExcludeStrip => ContextKind::ExcludeStrip,
         Focus::HighlightStrip => ContextKind::HighlightStrip,
@@ -605,32 +602,6 @@ pub fn context_entries(app: &App) -> Vec<HintEntry> {
             push_short(&mut out, app, ActionId::StripDDelete, "delete");
             push_short(&mut out, app, ActionId::StripDDisable, "disable");
             push_short(&mut out, app, ActionId::StripDCancel, "cancel");
-            out
-        }
-        ContextKind::Input => {
-            let mut out = Vec::new();
-            push_single(
-                &mut out,
-                app,
-                ActionId::InputDraftSpace,
-                "draft",
-                "space in draft",
-            );
-            push_single(
-                &mut out,
-                app,
-                ActionId::InputCommit,
-                "commit",
-                "pill then submit group",
-            );
-            push_single(
-                &mut out,
-                app,
-                ActionId::InputToggleExclude,
-                "exclude",
-                "toggle exclude draft",
-            );
-            push_short(&mut out, app, ActionId::InputCancel, "cancel");
             out
         }
         ContextKind::ChipStrip | ContextKind::ExcludeStrip | ContextKind::HighlightStrip => {

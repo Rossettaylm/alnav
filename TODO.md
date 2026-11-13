@@ -12,8 +12,8 @@
 | | lnav（对照物） | alnav（本项目） |
 |--|----------------|----------------|
 | 定位 | 通用日志「IDE」：多格式、多文件、SQL/脚本 | Android/鸿蒙 logcat「手术刀」：轻量、快、场景专一 |
-| 核心抽象 | 时间有序的**消息索引**；UI/SQL 都是索引的投影 | `rows`（环形缓冲）+ `visible` + chip/`Expr` 过滤 |
-| 过滤 UX | regex in/out、SQL 表达式、输入时预览效果 | Filter chip 组内 AND / 组间 OR；Search chip 高亮 OR |
+| 核心抽象 | 时间有序的**消息索引**；UI/SQL 都是索引的投影 | `LogIndex`（store + visible）+ **一个 `Expr` 谓词**（`compile_predicate`） |
+| 过滤 UX | regex in/out、SQL 表达式、输入时预览效果 | Filter chip 组内 AND / 组间 OR；Exclude / lock / 时间窗同属一个谓词；Highlight 只上色 |
 | 明确不做 | — | 内嵌 SQLite/PRQL、通用 70+ 格式生态、SSH/URL 远程协议、完整多 View 栈（LOG/DB/TIMELINE…） |
 
 **三条可落地的设计原则（从 lnav 提炼，已本地化）：**
@@ -22,7 +22,43 @@
 2. **先预览再提交** — 与现有 Input/Search 居中模态、chip Enter 两段式契合；draft 阶段应能看见「将隐藏 / 将命中」，而不只是改内部状态。
 3. **自动化能省则省，扩展能声明则声明** — 不追功能广度；把主题/键位/会话等用户可配置面与解析/过滤引擎分开。
 
-**建议落点（模块）：** `alnav` 的 `app.rs` / `ui.rs` / `input.rs` / `theme.rs`；分析能力可复用 `alnav-core`（lib `alnav`）已有 histogram/crash/`Expr`。
+**建议落点（模块）：** `alnav` 的 `app/` / `ui/` / `filter_model.rs` / `theme/`；分析能力复用 `alnav-core`（lib `alnav`）的 histogram/crash/`Expr`。
+
+---
+
+## 演进方向（2026-11-13，第一性原理 + 奥卡姆剃刀）
+
+用户任务只有一件：**从 N 行里最快找到能解释问题的 k 行（因果链）**。它由四个原语组成：
+
+| 原语 | 现有承载 |
+|---|---|
+| 选（哪些行留下） | 一个 `Expr`：Filter 组 ∨ … ∧ ¬Exclude ∧ lock ∧ 时间窗；视图层另有 view focus / 书签常驻 |
+| 定位（跳到哪行） | `e/E`、`n/N`、minimap、histogram、书签 |
+| 关联（前因后果） | lock、`--follow-pid/tid`、`--time-context` |
+| 带走（交给人 / agent） | `yc`（= `Expr` 的 `Display`）、yank、session、CLI JSON |
+
+**规则：** 不缩短「到达 k 行」步数的功能不做；做同一原语的两套机制必须合并。动作数（`keymap/registry.rs` 的 `actions!`）只减不增——新增一个须删一个。
+
+### P0. 减法 `[x]`
+
+- `[x]` 删 `aloggrep` / `alg` / `aloggrep-tui` 兼容别名（0.3.0 已承诺下版移除）。
+- `[x]` 删不可达的独立 Input 框 / Insert 模式 / `[input]` keymap 段（158 → 154 个动作）。
+- `[x]` **谓词统一**：Filter / Exclude / lock / 时间窗编译为一个 `Expr`，Stream intake / File 扫描 / Preview 共用；`yc` 导出与 TUI 对已解析行精确一致。设计与决议：`docs/superpowers/specs/2026-11-13-unified-predicate-expr-design.md`。
+- `[ ]` Summary / Histogram / Time 三面板合并为一个「聚合 → 跳转 / 设时间窗」面板（待确认使用频率）。
+
+### P1. 加深（只做通用工具做不到的 Android / 鸿蒙能力） `[ ]`
+
+- **`app` 维度（pid→包名映射）**：从 `ActivityManager: Start proc PID:PKG` 等行建映射，新增 `app ~ com.foo` 谓词项；进程重启后 lock 不断。直接复用统一谓词。
+- **崩溃 / ANR 前因一键**：`--crashes` + `--time-context` 在 TUI 内一步到位。
+- **输入源**：bugreport zip、`.gz`。
+
+### 不做
+
+MCP server（CLI `--format json` + skill 已够）、M3 多文件归并、SQL、远程协议、更多主题。
+
+### 度量（无 telemetry）
+
+5–10 份真实问题日志（crash / ANR / 登录失败）做 golden case，记录「打开到定位根因」的按键数；每次改动只看它是否下降。
 
 ---
 
@@ -235,11 +271,11 @@
 - H4 负责「看字段」；H7 负责「从字段行动」；overlay 打开时同一套字段键生效。
 - H9 是「排除」对称操作；建议 `C` 或 `!`+字段，字母表与 H7 共用（含 msg 切词面板）。
 
-**非目标：** 多字段一次组合成复杂 AND 向导；用户仍可用 Input 模态做多 pill 组。
+**非目标：** 多字段一次组合成复杂 AND 向导；用户仍可用 Filter Picker 做多 pill 组。
 
 **实现提示：**
 
-- 复用 `input::build_group` / `Chip` + `Expr::from_filters(..., SameFieldOp::And)`。
+- 复用 `input::build_group` / `Chip`；chip 经 `filter_model::chip_expr` 编译进统一谓词（见「P0. 谓词统一」）。
 - msg 切词纯函数可单测（分隔、最短长、上限、去重）。
 - pending `c` 状态机对齐现有 `y` / `d` operator-pending。
 
@@ -354,28 +390,28 @@
 |--------|------|
 | 键位 | **`y` `c`**（yank command；并入现有 `y` operator，`c` 非 `YankField`） |
 | 过滤编码 | **统一 `-e`**（组内 AND、组间 OR；excludes 为 `not …`） |
-| H8 lock | **`--pid` / `--tid` flag**（贴近 CLI follow） |
+| H8 lock | ~~`--pid` / `--tid` flag~~ → **`-e` 内 `pid == X` / `tid == X`**（2026-11-13 谓词统一后） |
 | 空过滤 | 仍复制骨架：`alnav grep -f …` 或 `alnav grep --hdc` |
-| 纳入 | 启用中的 Filter 组 + Excludes + lock；**不含** Search；**不含** `di` 禁用项 |
-| 二进制名 | `alnav grep`（兼容别名 `aloggrep`/`alg` 过渡一版） |
+| 纳入 | 启用中的 Filter 组 + Excludes + lock + 时间窗（`time >= / <=`）；**不含** Search / `di` 禁用项 / view focus / 书签常驻 |
+| 二进制名 | `alnav grep` |
 | 剪贴板 | 复用 `copy_to_clipboard` / `record_yank` + status |
 
 **本项目语境：**
 
 - `-f` 启动带同一路径；`--hdc` 带 `--hdc`（实时流无文件）。
-- 与 TUI visible「近似一致」即可（环形缓冲截断 / following 差异可接受，文档一句说明）。
+- 与 TUI visible **精确一致**（对已解析行）：导出即 `compile_predicate(...).to_string()`，由 `app/tests/export_tests.rs` 守护；live 环形缓冲截断只会让 CLI 结果更多，不会语义不同。
 
 **非目标：** `.lnav` 脚本、会话文件、复杂 pipeline；把 search 当 filter 导出。
 
 **实现提示：**
 
-- 从 `Expr`/chip 生成可解析的 `-e` 字符串（注意 shell 引号转义）。
-- 单测：给定 `GroupList` + excludes + lock，快照期望命令字符串。
+- 导出 = `Expr` 的 `Display`（规范形式，可回解析为相等 `Expr`），外层 POSIX 单引号转义。
+- 单测：固定语料上「TUI 可见行 == `-e` 选中行」，而非快照命令字符串。
 - `y` pending 时 `c` 走导出，勿落入「未知字段清 status」。
 
 **验收：**
 
-- `y` `c` 复制命令；CLI 同文件结果与 TUI 过滤语义近似一致。
+- `y` `c` 复制命令；CLI 同文件结果与 TUI 过滤结果一致。
 - M5 对照表「TUI→CLI 桥接」过滤导出打勾。
 - H6 含 `yc 导出命令`。
 

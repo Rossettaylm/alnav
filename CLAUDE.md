@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 alnav（App/Android Log Navigator）— 轻量级 Android logcat 日志过滤与分析工具（Rust）。Cargo workspace，两个 member crate：
 
 - **`alnav-core`** — 解析/过滤/格式化库（`[lib] name = "alnav"`，`use alnav::...`）。提供 `run_cli`；不发布独立 bin。
-- **`alnav`** — 统一发布包：默认 `alnav` 进 TUI；`alnav grep` 走 CLI。兼容别名（过渡一版，下版移除）：`aloggrep`/`alg` ≡ `alnav grep`，`aloggrep-tui` ≡ `alnav`。支持 `-f` 静态文件与 `--hdc` / `--adb` 实时流。配置硬切 `$ALNAV_HOME` / `~/.config/alnav`。
+- **`alnav`** — 统一发布包：默认 `alnav` 进 TUI；`alnav grep` 走 CLI。支持 `-f` 静态文件与 `--hdc` / `--adb` 实时流。配置硬切 `$ALNAV_HOME` / `~/.config/alnav`。
 
 ## Build & Test
 
@@ -29,7 +29,7 @@ cargo run -p alnav --bin alnav -- --adb       # TUI Android 实时抓取
 - `src/histogram.rs` — 3 个单元测试（访问私有 `snap_secs()` 和 `buckets` 字段）
 - `src/cli_run/tests.rs` — 6 个单元测试（`run_follow()` 与 live 源校验）
 - `src/hdc.rs` / `src/adb.rs` / `src/live.rs` — 后端命令与启动历史过滤测试
-- `src/expr.rs` — `Expr::from_filters` 相关测试
+- `tests/extended.rs` / `tests/expr.rs` — `Expr` 语法、`Display` 往返、pid/tid `==`、time 比较
 
 测试分布（`alnav`，位于 `alnav/`）：源文件 `#[cfg(test)]` 单元测试，**统一放在同级 `tests.rs` 或 `<module>/tests/*.rs`**（`app/tests/`、`ui/tests/`、`handlers/tests/`、`help/tests.rs`、`theme/tests.rs`、`keymap/tests.rs`、`store/tests.rs`、`cli/tests.rs`、`live_ctl/tests.rs`、`source_bind/tests.rs`）；小模块仍内联 `mod tests`。CLI 集成测试在 `alnav/tests/`。
 
@@ -48,7 +48,7 @@ alnav-core/src/
 ├── hdc.rs         # --hdc 设备时间查询 + `hdc hilog --no-block`；保留 Hdc* 兼容别名
 ├── parser.rs      # LogEntry 结构体 + 解析器（支持 hilog/threadtime/xlog/brief 四种格式）
 ├── filter.rs      # FilterChain：多条件组合过滤（同类 OR，跨类 AND），支持 pid/tid
-├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator；Expr::from_filters 供 TUI 复用
+├── expr.rs        # -e 布尔表达式：tokenizer + 递归下降 parser + AST evaluator + `Display`（规范形式可回解析）；TUI 谓词编译目标
 ├── multiline.rs   # MultilineMerger：多行合并迭代器适配器（合并续行如栈追踪）
 ├── crash.rs       # CrashDetector：崩溃识别 + CrashInfo 结构化提取
 ├── dedupe.rs      # Normalizer（消息归一化）+ Deduper（去重分组）
@@ -68,14 +68,13 @@ alnav/src/
 ├── handlers/          # 按键 → 状态变更（不画东西）
 │   ├── mod.rs         #   共享：km_code/km_event、Ctrl-C、鼠标、全局 Ctrl 和弦、Normal 事件入口
 │   ├── normal.rs      #   Normal 模式：visual、leader、`Pending` 和弦表（YANK/CHIP/LOCK/TIME/MARK）、strip `d`
-│   ├── insert.rs      #   遗留独立 Input 框（Insert 模式）
 │   ├── panels.rs      #   浮层键：highlight box / preset 名 / compare / help / summary / hist / time / palette
 │   ├── source.rs      #   Dashboard / 打开文件 / 流源面板
 │   └── picker/        #   render_data（视图模型）/ keys（按键分发）/ submit（提交/确认/管理）
 ├── app/               # App 状态机（唯一可变状态）；`impl App` 按关注点分布在子模块
 │   ├── mod.rs         #   App 结构体 + 共享枚举（Focus/Mode/Pending/StripKind/…）+ App::new
 │   ├── index.rs       #   **LogIndex**（store + visible + filter_gen）与 `Visible`：消息索引，视图都是它的投影
-│   ├── visible.rs     #   过滤谓词 row_passes_filters / filter_active / rebuild_visible / pins
+│   ├── visible.rs     #   过滤谓词 row_passes_filters（缓存 `App.predicate`）/ filter_active / rebuild_visible（唯一重编译点）/ pins
 │   ├── intake.rs      #   drain / poll_file_store / push_row / 淘汰修正 / highlight 扫描重启
 │   ├── cursor.rs      #   光标、following、visual、severe/match 跳转、match stats
 │   ├── rules.rs       #   Filter/Exclude/Highlight 组 CRUD、strip 光标/焦点循环、unified 启停
@@ -109,9 +108,9 @@ alnav/src/
 ├── store/             # mod.rs（RowStore/RowRef 分派）/ file.rs（FileStore：mmap+行索引+惰性解析）
 │                      # stream.rs（StreamStore：ADB/HDC VecDeque）/ workers.rs（后台索引/过滤扫描线程）
 ├── model.rs           # EntryRow：拥有所有权的行模型，as_log_entry() 借出给 core 匹配逻辑复用
-├── filter_model.rs    # Group / GroupList（组内 AND、组间 OR、excludes）+ TimeBound
+├── filter_model.rs    # Group / GroupList（组内 AND、组间 OR、excludes）+ TimeBound + `compile_predicate`（规则 → 一个 `Expr`）
 ├── highlight_model.rs # HighlightGroup / HighlightGroupList / HighlightBox
-├── input.rs           # ChipField/Chip/InputBox + build_group（复用 Expr::from_filters）
+├── input.rs           # ChipField/Chip/InputBox + build_group
 ├── picker.rs          # PickerSession / PickerKind / PickerMode / ConfirmKind（纯状态）
 ├── command_palette.rs # `C-p` 命令面板会话（纯状态）
 ├── preview.rs         # H1 草稿预览采样
@@ -127,7 +126,7 @@ alnav/src/
 **TUI 数据流：**
 - **`-f`：** `FileStore::open` → mmap + 后台行索引 → `Visible::All { len }`；filter 时后台扫描 → `Visible::Subset(命中行号)`；渲染经 `App::row_at`（→ `LogIndex::row_at`）惰性解析（无全文件 owned `EntryRow`，无 `max_lines` 淘汰）。
 - **`--hdc` / `--adb`：** 后台线程 → `EntryRow::from_line()` → `DropOldestRing` → `App::drain()` → `StreamStore`；filter 未激活时 `Visible::All` 索引 `rows`；激活时命中双写 `matched`、`Visible::All` 索引 `matched`。
-- **每帧：** `event_loop::run` → drain/poll（ingest、FileStore、`BgJob`）→ `draw_frame`（主布局 + `match app.surface()` 画浮层 + `app.dialog()` 置顶）→ `route_key`（`app.dialog()` → `match app.surface()` → Ctrl-C → Normal/Insert）。
+- **每帧：** `event_loop::run` → drain/poll（ingest、FileStore、`BgJob`）→ `draw_frame`（主布局 + `match app.surface()` 画浮层 + `app.dialog()` 置顶）→ `route_key`（`app.dialog()` → `match app.surface()` → Ctrl-C → Normal）。
 
 ## 代码组织规范（重构后约定，新增代码必须遵守）
 
@@ -144,27 +143,27 @@ alnav/src/
 ### Key Design Decisions
 
 - **`LogEntry<'a>` 零拷贝解析**：所有字段（timestamp, pid, tid, tag, pkg, msg）均为 `&'a str`，直接引用原始行，避免堆分配。`parse()` 依次尝试 hilog → threadtime → xlog → brief 四种格式。
-- **`FilterChain::from_cli(&Cli)`** 是 CLI 唯一的过滤器构建入口，将 CLI 参数（tag/msg/level/pid/tid/since/until/-e）统一转换为内部过滤链。TUI 不用 `FilterChain`，改用更轻量的 `Expr::from_filters` + `Group`/`GroupList`（见下）。
+- **`FilterChain::from_cli(&Cli)`** 是 CLI 唯一的过滤器构建入口，将 CLI 参数（tag/msg/level/pid/tid/since/until/-e）统一转换为内部过滤链。`--pid/--tid` 精确匹配；`--package` 对无包名的行恒不匹配。TUI 不用 `FilterChain`：`filter_model::compile_predicate` 把 Filter/Exclude/lock/时间窗编译成一个 `Expr`（见下）。
 - **`cli_run/mod.rs` 的 `dispatch_lines!` 宏**：根据 `--multiline`/`--crashes` 标志决定是否用 `MultilineMerger` 包裹迭代器，避免运行时分支开销。ADB/HDC 创建 `LiveSession` 后复用同一处理路径。
 - **输出路径分支**：`run_simple`（常规快速路径）vs `run_with_context`（-C/-A/-B 上下文行缓冲）vs `run_time_context`（--time-context 两遍扫描）vs `run_follow`（--follow-pid/tid 两遍扫描）。
 - **live Ctrl-L 清屏（CLI）**：`--hdc` / `--adb` 仅在 stdin/stdout 都是 tty 时启用；用 cbreak 模式（保留 `ISIG`）而非标准 raw mode，避免破坏现有 Ctrl+C 依赖的 `SIGINT` 语义。按键上报走 channel + `KeypressGate` 迭代器分发。仅支持 Unix，Windows 上静默不可用。已知权衡：若进程被 `SIGTERM`/`SIGKILL` 直接杀死（而非 Ctrl+C），termios 不会被恢复，终端会卡在 cbreak 模式，需手动 `stty sane`/`reset`——这与 vim/less 等直接操作终端的工具在被强杀时的行为一致，未特殊处理。
-- **`alnav` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND（内部编译为一个 `Expr`），`Vec<Group>` 之间 OR。Input：`Space` 进草稿（可含空格）；有草稿时 `Enter` 收成 pill；无草稿且已有 pill 时 `Enter` 提交组。提交前按 chip 多重集（ignore-case）去重，重复则不 push。启动 CLI 过滤转为第 0 组（可 `dd`/`di`）。chip 编译走 `Expr::from_filters(..., SameFieldOp::And)`；启动 `initial_group` 仍用 `SameFieldOp::Or`。**TUI 过滤/搜索一律 ignore-case**。LogList 另有 **H7 光标→Chip**：operator `c`+字段字母（`t/m/g/p/T/l`，与 `YankField` 对齐）从当前行推单 chip 组；`c`+`m` 开 msg 切词候选（无条数上限）→ 选中后 ActionList 选 Filter（默认）或 Highlight；`C`+`m` 切词后直接 Exclude；`y`+`m` 同壳切词后 yank 选中片段（`Y` 仍整段 msg）；成功后 `following=false`，Esc 只清 pending/关面板不 resume。**H8 会话 lock**：`App.lock_pid`/`App.lock_tid` 互斥，在 chip 过滤后 AND；operator `f`+`p`/`t`/`u`（toggle 同值清除）；status：follow 常驻（on=success pill / off=DIM glyph）、device 常驻 source/disconnect pill；lock/time 为填充 pill+短值（无 FOLLOWING/LOCK/TIME 单词）；Esc resume 不清除 lock。**全局时间窗（仅 `-f`）**：`App.time_bound: Option<TimeBound>` 与 Filter 组正交，在 chip/exclude/lock 之后 AND；启动 `--since`/`--until` 写入全局窗（不再挂 Group）；operator `t`+`s` 开靠上 Time 面板（日期候选自 `rows` 去重、只能选自候选；时间 `HH:MM:SS` 键入并夹到该日缓冲 min/max，保证 since≤until；允许只设一端，端内须日+时成对），`t`+`u` 清除；无日期候选时 `ts` flash 拒绝；`--hdc` / `--adb` 硬隐藏 `t`/`ts`/`tu`；status 时间窗图标+短值；计入 `filter_active`；`yc` 导出 `--since`/`--until`；打开/提交/`tu` → `following=false`，面板 Esc 不 resume。
+- **`alnav` 的 chip 过滤模型**：`Vec<Group>`，`Group` 内 chip 之间 AND，`Vec<Group>` 之间 OR；整个规则集（含 Exclude/lock/时间窗）经 `compile_predicate` 编译为**一个** `alnav::Expr`，在 `rebuild_visible` 里重编译并缓存到 `App.predicate`（File 扫描线程共享 `Arc<Expr>`；debug 构建断言缓存未过期，改规则后必须调 `rebuild_visible`）。chip 语义：tag/msg/pkg 按空白切 atom、每个 atom 为该字段连续子串（字段为空恒不中），pid/tid 精确 `==`，level 最低级别。Input：`Space` 进草稿（可含空格）；有草稿时 `Enter` 收成 pill；无草稿且已有 pill 时 `Enter` 提交组。提交前按 chip 多重集（ignore-case）去重，重复则不 push。启动 CLI 过滤转为第 0 组（可 `dd`/`di`）。交互组 `SameFieldOp::And`；启动 `initial_group` 用 `SameFieldOp::Or`（同字段 OR、跨字段 AND）。**TUI 过滤/搜索一律 ignore-case**。LogList 另有 **H7 光标→Chip**：operator `c`+字段字母（`t/m/g/p/T/l`，与 `YankField` 对齐）从当前行推单 chip 组；`c`+`m` 开 msg 切词候选（无条数上限）→ 选中后 ActionList 选 Filter（默认）或 Highlight；`C`+`m` 切词后直接 Exclude；`y`+`m` 同壳切词后 yank 选中片段（`Y` 仍整段 msg）；成功后 `following=false`，Esc 只清 pending/关面板不 resume。**H8 会话 lock**：`App.lock_pid`/`App.lock_tid` 互斥，在 chip 过滤后 AND；operator `f`+`p`/`t`/`u`（toggle 同值清除）；status：follow 常驻（on=success pill / off=DIM glyph）、device 常驻 source/disconnect pill；lock/time 为填充 pill+短值（无 FOLLOWING/LOCK/TIME 单词）；Esc resume 不清除 lock。**全局时间窗（仅 `-f`）**：`App.time_bound: Option<TimeBound>` 与 Filter 组正交，在 chip/exclude/lock 之后 AND；启动 `--since`/`--until` 写入全局窗（不再挂 Group）；operator `t`+`s` 开靠上 Time 面板（日期候选自 `rows` 去重、只能选自候选；时间 `HH:MM:SS` 键入并夹到该日缓冲 min/max，保证 since≤until；允许只设一端，端内须日+时成对），`t`+`u` 清除；无日期候选时 `ts` flash 拒绝；`--hdc` / `--adb` 硬隐藏 `t`/`ts`/`tu`；status 时间窗图标+短值；计入 `filter_active`；`yc` 导出为 `-e` 中的 `time >= / time <=`；打开/提交/`tu` → `following=false`，面板 Esc 不 resume。
 - **`alnav` 的统一 fzf Picker**：Normal `Space` 进入 Leader；`Space Space` 打开 Unified Manage（Filter / Highlight / Exclude）；裸键 New：`;`→Filter、`/`→Highlight、`` ` ``→Exclude；`mm`→Bookmark Manage；`?`→只读两级 Help（Home+七区页面，`/` 搜索，`h`/Backspace 回 Home，Esc 关面板；非 Highlight New）；`Space f/s/m/x` 历史别名已收敛。Picker 为左右 4:6（可由 `config.toml` 的 `picker_left_ratio` 调整），左侧候选+底部检索（mode 前缀图标：Manage 搜索镜 / New `＋` / Edit `✎`），右侧 Preview；Manage 下键入无匹配时自动切 New（query→draft；清空草稿回退 Manage）；手动进 New 不清空也不回退；Esc / 提交成功 Enter 一律关闭面板（不回 Manage）；Manage 内 Ctrl-X 编辑、Delete/Ctrl-Backspace 删除选中（二次确认）、Ctrl-T 一键全开/全关（有 Tab 勾选则只作用勾选项，否则作用 query 可见项；范围内有任一启用则全禁用，全禁用则全启用）；草稿行支持中间光标与 ←/→/Home/End/Ctrl-A/E/Ctrl-U（New/Edit 另有 Ctrl-Backspace 删词）。**Filter/Highlight/Exclude/Bookmark 统一**：候选为空时打开即 New；有候选且未强制 New 则 Manage；msg-chip 也复用 Picker 壳。
 - **`alnav` 的命令面板（`C-p`）**：LogList / Filter·Exclude·Highlight strip 上 `C-p` 打开顶居中面板（不是 Picker）。`action::dispatch` 是动作执行唯一入口（`match`，与按键共用）；KeymapStore 只管绑定。空查询只有输入条；输入后向下最多 10 行，nucleo 搜 `palette_title`；`j`/`k` 打字、Up/Down 移动。Esc/Ctrl+C 关面板不 resume following。不可用命令直接隐藏。Idle 状态栏不加第三条 `C-p` 提示（仍 `? help` + `; filter`）。
 - **`alnav` 的 RowStore**：`App.index.store`（`LogIndex`）为 `File`（`-f` mmap）或 `Stream`（`--hdc` / `--adb`）。Stream 的 `rows` 按 `max_lines`（默认 500_000，`--max-lines` 仅 live）淘汰；File 无淘汰、可浏览全文件。`Visible::All`（身份映射）用于 Stream 与未过滤 File；File 过滤用 `Visible::Subset(行号)`。读路径统一 `App::row_at` → `RowRef`（Stream 借出 / File 惰性 Owned）。
 - **`alnav` 的匹配行保留（Stream）**：filter active 时命中双写 `rows`+`matched`，`Visible::All` 索引 `matched`；`matched` 硬上限 `MATCHED_HARD_CAP`（1_000_000）。File 不过滤进 `matched`，只维护 `Subset`。书签：Stream 查 `rows`/`matched`；File 用稳定 `row_id = line_index+1`。preview 对 Stream 扫 `rows`、对 File 惰性 `row_at`。
 - **`alnav` 的 Following**：离开底部的手动操作（`k`/`K`/`g`、向上滚轮/翻页、`n`/`N`、Visual、搜索跳转等）一律 `following=false`；**移到可见列表最后一行**（`j`/`J`/`G`、向下滚轮/翻页等经 `move_cursor_manual` 落地，或 `G`→`resume_following`）自动恢复 following；`Esc`（及同等取消路径）仍可显式 `resume_following`（钉底并恢复）。
 - **`alnav` 的 LogList 滚动跟随**：`ui::render_log_list` 每帧用持久化的 `App.list_offset` 驱动 ratatui `List` 视口。
-- **`alnav` 的 LogList 作为行动原点**：`Esc` / Insert 取消 / 提交 Filter 组 → `Focus::LogList` 并恢复 following；HighlightBox `Enter` 上屏后跳到首命中（退出 following）；`dd` 删光 strip 后回 LogList。popup 打开时 `Esc` 只关 popup。
+- **`alnav` 的 LogList 作为行动原点**：`Esc` / 提交 Filter 组 → `Focus::LogList` 并恢复 following；HighlightBox `Enter` 上屏后跳到首命中（退出 following）；`dd` 删光 strip 后回 LogList。popup 打开时 `Esc` 只关 popup。
 - **`alnav` 的 LogList 快速移动与鼠标滚轮**：`Shift+J`/`Shift+K` 各 7 行（`help::FAST_SCROLL_STEP`，Help 面板滚动共用）；滚轮各 3 行，始终作用于日志列表。
 - **`alnav` 的终端生命周期**：panic hook 在 `main()` 最开始安装；ADB/HDC 子进程经 `LiveChildGuard` RAII 清理。
-- **`alnav` 的 Ctrl+C 语义**：Normal 退出；Insert 有 popup 只关 popup，否则重置 Input 并回 LogList；Search 模态编辑中取消草稿并回 LogList（不 resume following）。
-- **`alnav` 的五个可聚焦分区**：`Focus` 为 `ChipStrip`/`ExcludeStrip`/`HighlightStrip`/`LogList`/`Input`（数字键 1–5）；Filter/Exclude/Highlight strip **为空则折叠**。持久化条件的新增/编辑统一走 Leader fzf Picker，不再用 `a`/`i`/`o` 打开旧 Input 面板。布局：Filter → Exclude → Highlight → Log（Fill）→ status。**H9 排除**：`GroupList.excludes` 全局 AND NOT；`C`+字段（字母表同 H7）；Exclude strip 与 Filter 同构 `h/l/dd/di`。
+- **`alnav` 的 Ctrl+C 语义**：无浮层时，有 armed 和弦（`m`/`c`/`C`/`f`/`t`）则只取消和弦，否则退出；浮层/Picker/Search 编辑中取消草稿并关闭（不 resume following）。
+- **`alnav` 的四个可聚焦分区**：`Focus` 为 `ChipStrip`/`ExcludeStrip`/`HighlightStrip`/`LogList`（数字键 1–4；`5` 打开 Unified Manage）；Filter/Exclude/Highlight strip **为空则折叠**。持久化条件的新增/编辑统一走 Leader fzf Picker（无独立 Input 框 / Insert 模式）。布局：Filter → Exclude → Highlight → Log（Fill）→ status。**H9 排除**：`GroupList.excludes` 全局 AND NOT；`C`+字段（字母表同 H7）；Exclude strip 与 Filter 同构 `h/l/dd/di`。
 - **跨 crate 的日志颜色统一（仅 CLI）**：`alnav-core::logcolor` 是 CLI 唯一的颜色数据源（纯 RGB/枚举，不依赖 `colored`/`ratatui`），`formatter.rs` 将其转成 `colored` 类型。TUI 日志色（时间戳/level 徽标/关键词高亮）来自已安装的 `UiTokens`（Palette 映射 + `theme.toml` overlay），不再读 `logcolor`。`USER_HIGHLIGHT` 仍为 CLI `--highlight` 的 8 档色阶；TUI highlight 走 Palette 映射的 8-slot ramp。
 - **`alnav` 日志区默认多行展示**：`ui/entry.rs::wrap_ranges` 是唯一的换行实现（贪婪按空白断行，单词超宽则硬切），操作字节区间而非 `Cow<str>`（为了跟 `render_entry_lines` 里已经用 `Regex::find_iter` 算好的高亮命中区间对齐——顺序是"先算高亮区间，再换行"，换行只是把同一份区间数据切成多个 `Span` 分布到多个 `Line`，不会把一个高亮命中切碎到两半）。`ListItem` 内可以放多个 `Line`，`ListState` 选中/滚动天然按整个 item 处理，翻页逻辑（`PAGE_SIZE`/`move_cursor_manual`）不需要感知 item 内部行数。
-- **`alnav` 靠上模态 + Preview（H1）**：Input / Search 用 `top_modal_rect`（靠上，非垂直居中）；垂直栈为模态正文 → 字段/历史候选 → **Preview**（`preview.rs` 采样约 10 条，不改主 `visible`/`following`）。Search 淡高亮走 `theme::preview_highlight_style`。msg-chip 面板仍居中。
+- **`alnav` 靠上模态 + Preview（H1）**：Picker / Search 用 `top_modal_rect`（靠上，非垂直居中）；垂直栈为模态正文 → 字段/历史候选 → **Preview**（`preview.rs` 采样约 10 条，不改主 `visible`/`following`）。Search 淡高亮走 `theme::preview_highlight_style`。msg-chip 面板仍居中。
 - **`alnav` 字段详情 / Pretty overlay（H4/H5）**：LogList `p` 开关浮层（开→Fields，关→Closed）；`P` 开 Pretty 或在 Fields↔Pretty 间切换；靠上 `render_modal_shell`；Pretty 对 msg（失败再试 raw）做 JSON 缩进，非法则原文 + `not JSON`；内容随 `current_row`；Esc **只关浮层**不 `resume_following`；浮层内 `j`/`k`/`c`/`C`+字段仍可用。
-- **`alnav` 导出 CLI（H10）**：LogList `y` `c` 将当前启用 Filter 组（组内 AND、组间 OR）、启用 Excludes（`not …`）、H8 lock（`--pid`/`--tid`）、全局时间窗（`--since`/`--until`）编码为一行 `alnav grep -f…|-i` / `--hdc` / `--adb` 命令（统一 `-e` + `-i`；不含 Search / `di` 禁用项）；复用 yank 剪贴板与 `YANKED` status。近似一致即可（环形缓冲截断可接受）。
+- **`alnav` 导出 CLI（H10）**：LogList `y` `c` 将当前启用 Filter 组（组内 AND、组间 OR）、启用 Excludes（`not …`）、H8 lock、全局时间窗导出为 `alnav grep <源> -i -e '<compile_predicate 的 Display>'`（时间窗为 `time >=/<=`，lock 为 `pid ==`/`tid ==`；不含 Search / `di` 禁用项 / view focus / 书签常驻）；复用 yank 剪贴板与 `YANKED` status。对已解析行与 TUI 结果**精确一致**（`app/tests/export_tests.rs` 守护；环形缓冲截断仍会让 live 结果更少）。
 - **`alnav` 边轨 minimap（H3）**：Log 边框内侧 1 列只读轨；比例基准为 `visible`；标记严重(E/F/crash)、启用 search 命中、当前视口淡段；重叠时严重优先；`visible` 非空即画极淡轨；样式走 `theme::minimap_*`；每帧扫描预算约 4000。
 - **`alnav` 书签（对照盘）**：钉住时拷贝 `EntryRow` 快照；`ma` 开关当前行、`md` 按当前 origin 删除，`mm` 打开对照大面板（空则 `NO BOOKMARKS`）。Log 顶一行摘要 `★ N` + 时间跨度（空则折叠）；按日志时间排序并显示相对上一条的 Δt；上限 16。面板键仅 `j/k` `g/G` `yy` `dd` `Enter` `Esc`。活着的 origin 在 Filter/Exclude/lock/time/`view_focus` 未命中时仍留在 LogList（按时间穿插）；Stream 环形缓冲淘汰后不回灌，对照盘标 ☆，Enter 闪 `BOOKMARK EVICTED`。行号旁钉标 + lock 系淡底（`visual > cursor > bookmark wash`）。进程退出丢弃。
 - **`alnav` 配置外置**：启动时从配置目录读取 `theme.toml` 与 `config.toml`（默认 `~/.config/alnav`，`$ALNAV_HOME`/`--config-path DIR` 可覆盖）；`config.toml` 的 `theme` 选内置 Palette（`default` / `onedark` / `dracula` / `everforest` / `tokyo-night` / `catppuccin-mocha` / `gruvbox-dark` / `nord` / `kanagawa`），并配置 `picker_left_ratio` 等；`theme.toml` 是 overlay（`[palette]` 先合并，语义 token 后覆盖）；`logcolor` 仅服务 CLI。示例见 `alnav/examples/`。
@@ -210,9 +209,11 @@ alnav/src/
 - 跨类型 = AND：`--tag "A" --msg "err"` → tag=A AND msg~err
 - 值内 `|` 也是 OR：`--tag "A|B"`
 - `--level W` 匹配 W/E/F（最低级别）
+- `--pid` / `--tid` 精确匹配（`12` 不命中 `123`）；`--package` 对无包名的行（threadtime/brief）恒不匹配
 - `-e` 布尔表达式：支持 `and`/`or`/`not`/括号的任意组合
-  - 语法：`FIELD ~ VALUE`、`level >= LEVEL`，用 `and`/`or`/`not`/`()` 组合
-  - FIELD = `tag` | `msg` | `pkg` | `pid` | `tid`；VALUE = 裸词或 `"引号字符串"`
+  - 语法：`FIELD ~ REGEX`（tag/msg/pkg/pid/tid）、`pid == ID` / `tid == ID`、`level >= LEVEL`、`time >= T` / `time <= T`，用 `and`/`or`/`not`/`()` 组合
+  - VALUE = 裸词或 `"引号字符串"`（支持 `\"` 与 `\\` 转义，其余反斜杠原样交给正则）
+  - `pkg ~` 对无包名的行恒不匹配；`time` 比较规则同 `--since/--until`（`HH:MM:SS` 比时分秒，否则比完整时间戳；无时间戳的行通过）
   - 多个 `-e` 之间 OR（与 grep `-e` 一致），与其他 flag AND
 
 ## alnav 已知范围外事项（YAGNI）

@@ -311,8 +311,8 @@ fn test_filter_package_hilog() {
 }
 
 #[test]
-fn test_filter_package_fallback_to_tag() {
-    // When pkg is empty (threadtime format), package filter checks tag and msg
+fn test_filter_package_never_matches_entries_without_package() {
+    // threadtime has no package; --package must not fall back to tag/msg.
     let cli = make_cli_full(
         &[],
         &[],
@@ -328,31 +328,31 @@ fn test_filter_package_fallback_to_tag() {
         None,
     );
     let chain = FilterChain::from_cli(&cli).unwrap();
-    let hit = "04-02 12:34:56.789  1234  5678 D OkHttp  : msg";
-    let miss = "04-02 12:34:56.789  1234  5678 D Other   : msg";
-    assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
-    assert!(!chain.matches(&LogEntry::parse(miss).unwrap()));
+    let tag_hit = "04-02 12:34:56.789  1234  5678 D OkHttp  : msg";
+    let msg_hit = "04-02 12:34:56.789  1234  5678 D Tag     : crash in OkHttp";
+    assert!(!chain.matches(&LogEntry::parse(tag_hit).unwrap()));
+    assert!(!chain.matches(&LogEntry::parse(msg_hit).unwrap()));
 }
 
 #[test]
-fn test_filter_package_fallback_to_msg() {
+fn test_filter_pid_is_exact_not_substring() {
     let cli = make_cli_full(
         &[],
         &[],
         None,
-        &["com.example"],
-        false,
-        false,
-        false,
         &[],
+        false,
+        false,
+        false,
+        &["12"],
         &[],
         &[],
         None,
         None,
     );
     let chain = FilterChain::from_cli(&cli).unwrap();
-    let hit = "04-02 12:34:56.789  1234  5678 D Tag     : crash in com.example.app";
-    let miss = "04-02 12:34:56.789  1234  5678 D Tag     : all good";
+    let hit = "04-02 12:34:56.789    12  5678 D Tag     : msg";
+    let miss = "04-02 12:34:56.789   123  5678 D Tag     : msg";
     assert!(chain.matches(&LogEntry::parse(hit).unwrap()));
     assert!(!chain.matches(&LogEntry::parse(miss).unwrap()));
 }
@@ -717,6 +717,100 @@ fn test_expr_pid_regex() {
     let line = "04-02 12:34:56.789  1234  5678 D Tag     : msg";
     assert!(parse_and_eval("pid ~ 12.*", line));
     assert!(!parse_and_eval("pid ~ ^99", line));
+}
+
+#[test]
+fn test_expr_pid_tid_eq_is_exact() {
+    let line = "04-02 12:34:56.789   123  5678 D Tag     : msg";
+    assert!(parse_and_eval("pid == 123", line));
+    assert!(!parse_and_eval("pid == 12", line));
+    assert!(parse_and_eval("tid == \"5678\"", line));
+    assert!(!parse_and_eval("tid == 567", line));
+}
+
+#[test]
+fn test_expr_time_bounds() {
+    let at = |t: &str| format!("04-02 {t}.000  1  1 I T       : m");
+    let window = "time >= \"10:00:00\" and time <= \"10:05:00\"";
+    assert!(parse_and_eval(window, &at("10:00:00")));
+    assert!(parse_and_eval(window, &at("10:05:00")));
+    assert!(!parse_and_eval(window, &at("09:59:59")));
+    assert!(!parse_and_eval(window, &at("10:05:01")));
+    // Date-qualified bound compares against the full timestamp.
+    assert!(parse_and_eval(
+        "time >= \"04-02 10:00:00\"",
+        &at("10:00:00")
+    ));
+    assert!(!parse_and_eval(
+        "time >= \"04-03 00:00:00\"",
+        &at("23:59:59")
+    ));
+}
+
+#[test]
+fn test_expr_time_passes_rows_without_timestamp() {
+    let brief = "E/MyTag( 1234): no timestamp";
+    assert!(parse_and_eval("time >= \"23:00:00\"", brief));
+}
+
+#[test]
+fn test_expr_pkg_does_not_fall_back_to_tag_or_msg() {
+    let threadtime = "04-02 12:34:56.789  1234  5678 D com.app : starting com.app";
+    assert!(!parse_and_eval("pkg ~ com.app", threadtime));
+    let hilog = "04-16 11:52:56.297 1234 5678 D A00201/com.app/MyTag: m";
+    assert!(parse_and_eval("pkg ~ com.app", hilog));
+}
+
+#[test]
+fn test_expr_gt_inside_bare_word_terminates() {
+    // Regression: a `>` not followed by `=` used to loop forever.
+    let line = entry_line(Level::I, "T", "a>b");
+    assert!(parse_and_eval("msg ~ a>b", &line));
+}
+
+#[test]
+fn test_expr_quoted_escapes() {
+    let line = entry_line(Level::I, "T", r#"say "hi" \ bye"#);
+    assert!(parse_and_eval(r#"msg ~ "say \"hi\" \\\\ bye""#, &line));
+    // Unknown escapes stay verbatim for regex: \d matches a digit.
+    let digits = entry_line(Level::I, "T", "code 42");
+    assert!(parse_and_eval(r#"msg ~ "code \d+""#, &digits));
+}
+
+#[test]
+fn test_expr_display_round_trips() {
+    let cases = [
+        "tag ~ OkHttp",
+        "(tag ~ A or tag ~ B) and level >= W",
+        "tag ~ A or tag ~ B and msg ~ c",
+        "not (tag ~ A or msg ~ b) and not tag ~ c",
+        "not (not tag ~ a)",
+        "pid == 12 and tid == \"5678\"",
+        "time >= \"04-02 10:00:00\" and time <= \"10:05:00\"",
+        r#"msg ~ "say \"hi\"" and msg ~ "\d+\\\\""#,
+        "msg ~ a>b or pkg ~ com.app",
+    ];
+    for src in cases {
+        for ci in [false, true] {
+            let e = Expr::parse(src, ci).unwrap();
+            let printed = e.to_string();
+            let back =
+                Expr::parse(&printed, ci).unwrap_or_else(|err| panic!("{src} → {printed}: {err}"));
+            assert_eq!(e, back, "{src} → {printed}");
+        }
+    }
+}
+
+#[test]
+fn test_expr_literal_builder_matches_literally_and_round_trips() {
+    use alnav::expr::TextField;
+    let e = Expr::literal(TextField::Msg, "a|b (0) \"q\" \\", true)
+        .and(Expr::literal(TextField::Tag, "MyTag", true).negate());
+    let line = entry_line(Level::I, "Other", "x A|B (0) \"q\" \\ y");
+    assert!(e.matches(&LogEntry::parse(&line).unwrap()));
+    assert!(!Expr::literal(TextField::Msg, "a|b", true)
+        .matches(&LogEntry::parse(&entry_line(Level::I, "T", "a")).unwrap()));
+    assert_eq!(Expr::parse(&e.to_string(), true).unwrap(), e);
 }
 
 #[test]

@@ -98,25 +98,10 @@ impl InputBox {
         self.chips.is_empty() && self.draft.is_empty() && self.draft_field.is_none()
     }
 
-    /// Toggle exclude mode; only allowed when chips and draft are fully empty.
-    pub fn toggle_exclude_mode(&mut self) -> bool {
-        if !self.is_empty() {
-            return false;
-        }
-        self.exclude_mode = !self.exclude_mode;
-        true
-    }
-
     /// True when Enter should commit a pill rather than submit the group:
     /// there is draft text and/or a selected field awaiting a value.
     pub fn has_pending_draft(&self) -> bool {
         !self.draft.is_empty() || self.draft_field.is_some()
-    }
-
-    /// Field-candidate panel is shown whenever draft is non-empty and no field
-    /// has been picked yet (value typing after a field pick hides it).
-    pub fn field_popup_visible(&self) -> bool {
-        !self.draft.is_empty() && self.draft_field.is_none()
     }
 
     /// Fields whose keyword fuzzy-matches `draft` (score-ordered).
@@ -161,7 +146,7 @@ impl InputBox {
     }
 
     /// Enter-only variant of [`Self::confirm_field_candidate`]: requires a
-    /// non-empty draft (legacy `field_popup_visible` contract). Enter is
+    /// non-empty draft. Enter is
     /// overloaded with pill-commit/group-submit, so it must not hijack a
     /// bare Enter on an empty draft as "pick the first field" — that
     /// selection is reserved for Tab (or typing a prefix, then Enter).
@@ -365,17 +350,15 @@ mod field_popup_tests {
     use super::*;
 
     #[test]
-    fn test_field_popup_hidden_when_draft_empty() {
+    fn test_field_candidates_all_when_draft_empty() {
         let input = InputBox::default();
-        assert!(!input.field_popup_visible());
         assert_eq!(input.field_candidates().len(), CHIP_FIELDS.len());
     }
 
     #[test]
-    fn test_field_popup_visible_and_filters_by_draft_fuzzy() {
+    fn test_field_candidates_filter_by_draft_fuzzy() {
         let mut input = InputBox::default();
         input.push_char('t');
-        assert!(input.field_popup_visible());
         let matches = input.field_candidates();
         assert!(matches.contains(&ChipField::Tag));
         assert!(matches.contains(&ChipField::Tid));
@@ -386,17 +369,16 @@ mod field_popup_tests {
     }
 
     #[test]
-    fn test_field_popup_hidden_after_field_picked() {
+    fn test_field_candidates_empty_after_field_picked() {
         let mut input = InputBox::default();
         input.push_char('t');
         assert!(input.confirm_field_candidate());
         assert_eq!(input.draft_field, Some(ChipField::Tag));
         assert!(input.draft.is_empty());
-        assert!(!input.field_popup_visible());
         input.push_char('x');
         assert!(
-            !input.field_popup_visible(),
-            "value typing must not show field popup"
+            input.field_candidates().is_empty(),
+            "value typing must not offer fields"
         );
     }
 
@@ -416,23 +398,10 @@ mod field_popup_tests {
     fn test_confirm_field_candidate_noop_when_no_matches() {
         let mut input = InputBox::default();
         input.push_char('z');
-        assert!(input.field_popup_visible());
         assert!(input.field_candidates().is_empty());
         assert!(!input.confirm_field_candidate());
         assert_eq!(input.draft, "z");
         assert!(input.draft_field.is_none());
-    }
-
-    #[test]
-    fn test_commit_pill_hides_popup() {
-        let mut input = InputBox::default();
-        for c in "error".chars() {
-            input.push_char(c);
-        }
-        assert!(input.field_popup_visible());
-        input.commit_draft_as_chip();
-        assert!(!input.field_popup_visible());
-        assert!(input.draft.is_empty());
     }
 
     #[test]
@@ -464,6 +433,13 @@ mod build_group_tests {
             "04-02 10:00:00.000  1  1 {level_line} {tag}   : {msg}"
         ))
         .unwrap()
+    }
+
+    impl Group {
+        fn matches(&self, row: &EntryRow) -> bool {
+            self.to_expr()
+                .map_or(true, |e| e.matches(&row.as_log_entry()))
+        }
     }
 
     #[test]

@@ -1,15 +1,18 @@
-use crate::fuzzy::{self, SameFieldOp};
+//! Filter / Exclude / time-window rule state and its compilation to one [`Expr`].
+
+use crate::fuzzy::SameFieldOp;
 use crate::input::{Chip, ChipField};
-use crate::model::EntryRow;
+use alnav::expr::{Expr, IdField, TextField, TimePoint};
+use alnav::parser::Level;
 
 /// One AND-combined filter clause. `label` is precomputed display text; `chips`
-/// drives pill rendering, dedup, and substring/exact matching. Session time
-/// window lives on [`crate::app::App`], not on groups.
+/// drives pill rendering, dedup, and compilation. Session time window lives on
+/// [`crate::app::App`], not on groups.
 #[derive(Debug, Clone)]
 pub struct Group {
     pub label: String,
     pub chips: Vec<Chip>,
-    /// When false, the group is ignored by `GroupList::matches` (soft disable
+    /// When false, the group is ignored by [`compile_predicate`] (soft disable
     /// via `di`; distinct from deleting with `dd`).
     pub enabled: bool,
     /// How same-field chips combine (interactive And / startup CLI Or).
@@ -17,8 +20,31 @@ pub struct Group {
 }
 
 impl Group {
-    pub fn matches(&self, row: &EntryRow) -> bool {
-        fuzzy::chips_match_row(&self.chips, row, self.same_field_op)
+    /// `None` when the group has no chips (matches everything).
+    pub fn to_expr(&self) -> Option<Expr> {
+        match self.same_field_op {
+            SameFieldOp::And => Expr::all(self.chips.iter().map(chip_expr)),
+            SameFieldOp::Or => {
+                // Same field OR'd, fields AND'd; only the last level chip counts.
+                let fields = [
+                    ChipField::Tag,
+                    ChipField::Msg,
+                    ChipField::Pkg,
+                    ChipField::Pid,
+                    ChipField::Tid,
+                ];
+                let per_field = fields.into_iter().filter_map(|f| {
+                    Expr::any(self.chips.iter().filter(|c| c.field == f).map(chip_expr))
+                });
+                let level = self
+                    .chips
+                    .iter()
+                    .rev()
+                    .find(|c| c.field == ChipField::Level)
+                    .map(chip_expr);
+                Expr::all(per_field.chain(level))
+            }
+        }
     }
 
     /// Chip multiset equality (field + ignore-case value).
@@ -41,9 +67,36 @@ fn normalize_chips(chips: &[Chip]) -> Vec<(ChipField, String)> {
         .collect()
 }
 
-/// Mirrors `filter::TimeFilter`'s auto-detect-format comparison using only
-/// `LogEntry`'s public `time_hms`/`time_full` accessors (that private enum
-/// isn't exposed from `alnav-core`, and this is the only piece needed).
+/// Constant-false expression (every parsed entry has level ≥ V).
+fn never() -> Expr {
+    Expr::LevelGte(Level::V).negate()
+}
+
+/// One chip as an ignore-case predicate:
+/// - tag / msg / pkg: every whitespace-separated atom is a contiguous substring
+///   of that field (empty field never matches; a blank value = field non-empty);
+/// - pid / tid: exact equality;
+/// - level: minimum level (an unknown level never matches).
+pub fn chip_expr(chip: &Chip) -> Expr {
+    let text = |field: TextField, kw: &str| {
+        Expr::all(
+            chip.value
+                .split_whitespace()
+                .map(|atom| Expr::literal(field, atom, true)),
+        )
+        .unwrap_or_else(|| Expr::parse(&format!("{kw} ~ \"(?s).\""), true).expect("static pattern"))
+    };
+    match chip.field {
+        ChipField::Tag => text(TextField::Tag, "tag"),
+        ChipField::Msg => text(TextField::Msg, "msg"),
+        ChipField::Pkg => text(TextField::Pkg, "pkg"),
+        ChipField::Pid => Expr::Eq(IdField::Pid, chip.value.clone()),
+        ChipField::Tid => Expr::Eq(IdField::Tid, chip.value.clone()),
+        ChipField::Level => Level::from_str(&chip.value).map_or_else(never, Expr::LevelGte),
+    }
+}
+
+/// Global session time window; either side may be open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeBound {
     pub since: Option<String>,
@@ -51,37 +104,21 @@ pub struct TimeBound {
 }
 
 impl TimeBound {
-    pub(crate) fn is_time_only(s: &str) -> bool {
-        s.len() == 8 && s.as_bytes().get(2) == Some(&b':') && s.as_bytes().get(5) == Some(&b':')
-    }
-
     /// True when at least one endpoint is set.
     pub fn is_active(&self) -> bool {
         self.since.is_some() || self.until.is_some()
     }
 
-    pub fn matches(&self, entry: &alnav::parser::LogEntry) -> bool {
-        if let Some(s) = &self.since {
-            let ok = if Self::is_time_only(s) {
-                entry.time_hms().map_or(true, |hms| hms >= s.as_str())
-            } else {
-                entry.time_full().map_or(true, |full| full >= s.as_str())
-            };
-            if !ok {
-                return false;
-            }
-        }
-        if let Some(u) = &self.until {
-            let ok = if Self::is_time_only(u) {
-                entry.time_hms().map_or(true, |hms| hms <= u.as_str())
-            } else {
-                entry.time_full().map_or(true, |full| full <= u.as_str())
-            };
-            if !ok {
-                return false;
-            }
-        }
-        true
+    /// `time >= since and time <= until` (unparseable sides are dropped).
+    fn to_expr(&self) -> Option<Expr> {
+        let since = self.since.as_deref().and_then(|s| TimePoint::parse(s).ok());
+        let until = self.until.as_deref().and_then(|u| TimePoint::parse(u).ok());
+        Expr::all(
+            since
+                .map(Expr::TimeGe)
+                .into_iter()
+                .chain(until.map(Expr::TimeLe)),
+        )
     }
 }
 
@@ -97,10 +134,6 @@ impl ExcludeEntry {
     pub fn same_chip_as(&self, chip: &Chip) -> bool {
         self.chip.field == chip.field && self.chip.value.eq_ignore_ascii_case(&chip.value)
     }
-
-    pub fn matches(&self, row: &EntryRow) -> bool {
-        fuzzy::chip_matches_row(&self.chip, row)
-    }
 }
 
 /// OR'd list of groups, plus global AND-NOT excludes (H9).
@@ -113,37 +146,9 @@ pub struct GroupList {
 }
 
 impl GroupList {
-    pub fn matches(&self, row: &EntryRow) -> bool {
-        self.include_matches(row) && self.excludes_allow(row)
-    }
-
     /// Whether any include group is enabled (the OR list is non-vacuous).
     pub fn has_any_enabled(&self) -> bool {
         self.groups.iter().any(|g| g.enabled)
-    }
-
-    fn include_matches(&self, row: &EntryRow) -> bool {
-        let mut any_enabled = false;
-        for g in &self.groups {
-            if !g.enabled {
-                continue;
-            }
-            any_enabled = true;
-            if g.matches(row) {
-                return true;
-            }
-        }
-        !any_enabled
-    }
-
-    /// False when any enabled exclude's positive chip matches the row.
-    fn excludes_allow(&self, row: &EntryRow) -> bool {
-        for e in &self.excludes {
-            if e.enabled && e.matches(row) {
-                return false;
-            }
-        }
-        true
     }
 
     /// Append an exclude chip. Returns false on duplicate.
@@ -162,6 +167,44 @@ impl GroupList {
     }
 }
 
+/// The whole row predicate (Filter OR-groups ∧ ¬Excludes ∧ lock ∧ time window)
+/// as one ignore-case [`Expr`]. Disabled rules are skipped; `None` = no filter.
+///
+/// `Display` of the result is a valid `alnav grep -i -e` argument that selects
+/// the same parsed rows.
+pub fn compile_predicate(
+    rules: &GroupList,
+    lock_pid: Option<&str>,
+    lock_tid: Option<&str>,
+    time: Option<&TimeBound>,
+) -> Option<Expr> {
+    let enabled: Vec<Option<Expr>> = rules
+        .groups
+        .iter()
+        .filter(|g| g.enabled)
+        .map(Group::to_expr)
+        .collect();
+    // A chip-less enabled group matches everything, so the OR is vacuous too.
+    let include = if enabled.iter().all(Option::is_some) {
+        Expr::any(enabled.into_iter().flatten())
+    } else {
+        None
+    };
+    let excludes = rules
+        .excludes
+        .iter()
+        .filter(|e| e.enabled)
+        .map(|e| chip_expr(&e.chip).negate());
+    // pid lock wins over tid (they are mutually exclusive in practice).
+    let lock = match (lock_pid, lock_tid) {
+        (Some(pid), _) => Some(Expr::Eq(IdField::Pid, pid.to_string())),
+        (None, Some(tid)) => Some(Expr::Eq(IdField::Tid, tid.to_string())),
+        (None, None) => None,
+    };
+    let time = time.and_then(TimeBound::to_expr);
+    Expr::all(include.into_iter().chain(excludes).chain(lock).chain(time))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +215,104 @@ mod tests {
             "04-02 10:00:00.000  1234  5678 {level_line} {tag}   : {msg}"
         ))
         .unwrap()
+    }
+
+    impl GroupList {
+        fn matches(&self, row: &EntryRow) -> bool {
+            compile_predicate(self, None, None, None)
+                .map_or(true, |e| e.matches(&row.as_log_entry()))
+        }
+    }
+
+    impl TimeBound {
+        fn matches(&self, entry: &alnav::parser::LogEntry) -> bool {
+            self.to_expr().map_or(true, |e| e.matches(entry))
+        }
+    }
+
+    #[test]
+    fn startup_or_group_ors_within_field_ands_across() {
+        let g = Group {
+            label: "s".into(),
+            chips: vec![
+                Chip {
+                    field: ChipField::Tag,
+                    value: "A".into(),
+                },
+                Chip {
+                    field: ChipField::Tag,
+                    value: "B".into(),
+                },
+                Chip {
+                    field: ChipField::Msg,
+                    value: "x".into(),
+                },
+            ],
+            enabled: true,
+            same_field_op: SameFieldOp::Or,
+        };
+        let list = GroupList {
+            groups: vec![g],
+            ..Default::default()
+        };
+        assert!(list.matches(&row("A", "x", "I")));
+        assert!(list.matches(&row("B", "x", "I")));
+        assert!(!list.matches(&row("A", "y", "I")));
+        assert!(!list.matches(&row("C", "x", "I")));
+    }
+
+    #[test]
+    fn multi_word_chip_requires_every_atom_any_order() {
+        let list = GroupList {
+            groups: vec![group_chips(
+                "msg:bar foo",
+                vec![Chip {
+                    field: ChipField::Msg,
+                    value: "bar foo".into(),
+                }],
+            )],
+            ..Default::default()
+        };
+        assert!(list.matches(&row("T", "foo x BAR", "I")));
+        assert!(!list.matches(&row("T", "foo only", "I")));
+    }
+
+    #[test]
+    fn lock_and_time_join_the_predicate() {
+        let p = compile_predicate(
+            &GroupList::default(),
+            Some("12"),
+            Some("ignored"),
+            Some(&TimeBound {
+                since: Some("10:00:00".into()),
+                until: None,
+            }),
+        )
+        .unwrap();
+        let at = |pid: &str, t: &str| {
+            EntryRow::from_line(&format!("04-02 {t}.000  {pid}  1 I T   : m")).unwrap()
+        };
+        assert!(p.matches(&at("12", "10:00:00").as_log_entry()));
+        assert!(!p.matches(&at("123", "10:00:00").as_log_entry()));
+        assert!(!p.matches(&at("12", "09:59:59").as_log_entry()));
+    }
+
+    #[test]
+    fn chipless_enabled_group_is_vacuous() {
+        let list = GroupList {
+            groups: vec![
+                group_chips("empty", Vec::new()),
+                group_chips(
+                    "tag:A",
+                    vec![Chip {
+                        field: ChipField::Tag,
+                        value: "A".into(),
+                    }],
+                ),
+            ],
+            ..Default::default()
+        };
+        assert!(list.matches(&row("Z", "m", "I")));
     }
 
     fn group_chips(label: &str, chips: Vec<Chip>) -> Group {
@@ -383,5 +524,64 @@ mod tests {
             })
             .unwrap());
         assert_eq!(list.excludes.len(), 1);
+    }
+
+    fn chip(field: ChipField, value: &str) -> Chip {
+        Chip {
+            field,
+            value: value.into(),
+        }
+    }
+
+    fn chip_hits(c: &Chip, row: &EntryRow) -> bool {
+        chip_expr(c).matches(&row.as_log_entry())
+    }
+
+    #[test]
+    fn chip_empty_field_never_matches_and_is_contiguous() {
+        let row = EntryRow::from_line("04-02 10:00:00.000  1234  5678 I Tag   : hello").unwrap();
+        assert!(!chip_hits(&chip(ChipField::Pkg, "x"), &row));
+        assert!(chip_hits(&chip(ChipField::Tag, "Tag"), &row));
+        assert!(!chip_hits(&chip(ChipField::Tag, "Tg"), &row));
+    }
+
+    #[test]
+    fn chip_hex_is_contiguous_not_fuzzy() {
+        let line = "2026-07-22 16:43:02.809|1[14107]14321|14107|I|NTKernel|[I] sys_msg_mgr.cc(526)::NotifyRecvSysMsg [SysMsgMgr]->notify recv sys msg: msg_type=0xf01, sub_type=0x6d, is_guild_msg=1";
+        let row = EntryRow::from_line(line).unwrap();
+        assert!(!chip_hits(&chip(ChipField::Msg, "0x1100"), &row));
+        assert!(chip_hits(&chip(ChipField::Msg, "0x6d"), &row));
+        assert!(chip_hits(&chip(ChipField::Tag, "ntkernel"), &row));
+    }
+
+    #[test]
+    fn chip_pid_exact_and_level_minimum() {
+        let row = EntryRow::from_line("04-02 10:00:00.000  1234  5678 E Tag   : hello").unwrap();
+        assert!(chip_hits(&chip(ChipField::Pid, "1234"), &row));
+        assert!(!chip_hits(&chip(ChipField::Pid, "12"), &row));
+        assert!(chip_hits(&chip(ChipField::Level, "W"), &row));
+        assert!(!chip_hits(&chip(ChipField::Level, "F"), &row));
+        assert!(!chip_hits(&chip(ChipField::Level, "bogus"), &row));
+    }
+
+    #[test]
+    fn compiled_predicate_display_reparses_to_same_expr() {
+        let mut list = GroupList::default();
+        list.groups.push(group_chips(
+            "g",
+            vec![
+                chip(ChipField::Msg, r#"say "hi" (0)|x \ done"#),
+                chip(ChipField::Level, "W"),
+            ],
+        ));
+        list.groups
+            .push(group_chips("g2", vec![chip(ChipField::Tag, "Other")]));
+        assert!(list.push_exclude(chip(ChipField::Pkg, "noise")).unwrap());
+        let time = TimeBound {
+            since: Some("04-02 10:00:00".into()),
+            until: Some("11:00:00".into()),
+        };
+        let e = compile_predicate(&list, None, Some("77"), Some(&time)).unwrap();
+        assert_eq!(Expr::parse(&e.to_string(), true).unwrap(), e);
     }
 }

@@ -229,6 +229,7 @@ fn row_passes_filters_rejects_unparsed_when_active() {
         enabled: true,
         same_field_op: crate::fuzzy::SameFieldOp::And,
     });
+    app.rebuild_visible();
     assert!(app.filter_active());
     assert!(!app.row_passes_filters(&raw));
 }

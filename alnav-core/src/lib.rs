@@ -45,7 +45,7 @@ pub struct Cli {
     #[arg(short, long, value_name = "LEVEL")]
     pub level: Option<String>,
 
-    /// Filter by package name (repeatable, OR logic within)
+    /// Filter by package name substring (repeatable, OR logic within). Lines without a package never match.
     #[arg(short, long, value_name = "NAME")]
     pub package: Vec<String>,
 
@@ -94,13 +94,13 @@ pub struct Cli {
     pub and: bool,
 
     /// Boolean expression filter (repeatable, OR between multiple -e).
-    /// Syntax: tag|msg|pkg ~ REGEX, level >= V|D|I|W|E|F. Combine with and/or/not/( ).
+    /// Syntax: tag|msg|pkg|pid|tid ~ REGEX, pid|tid == ID, level >= V|D|I|W|E|F, time >=|<= T. Combine with and/or/not/( ).
     /// e.g. -e 'msg ~ timeout and level >= W'
     #[arg(
         short = 'e',
         long = "expr",
         value_name = "EXPR",
-        long_help = "Boolean expression filter (repeatable, OR between multiple -e).\nSyntax: tag|msg|pkg ~ REGEX, level >= V|D|I|W|E|F. Combine with and/or/not/( ).\ne.g. -e 'msg ~ timeout and level >= W'"
+        long_help = "Boolean expression filter (repeatable, OR between multiple -e).\nSyntax: tag|msg|pkg|pid|tid ~ REGEX, pid|tid == ID, level >= V|D|I|W|E|F,\ntime >= T / time <= T (T = HH:MM:SS, MM-DD HH:MM:SS, or YYYY-MM-DD HH:MM:SS).\nCombine with and/or/not/( ). Quoted values accept \\\" and \\\\ escapes.\ne.g. -e 'msg ~ timeout and level >= W and time >= \"10:30:00\"'"
     )]
     pub expr: Vec<String>,
 
@@ -136,12 +136,12 @@ pub struct Cli {
     #[arg(long, value_name = "N", default_value_t = 0)]
     pub sample: usize,
 
-    /// Filter by PID (regex, repeatable, OR logic within)
-    #[arg(long, value_name = "REGEX")]
+    /// Filter by PID (exact, repeatable, OR logic within)
+    #[arg(long, value_name = "PID")]
     pub pid: Vec<String>,
 
-    /// Filter by TID (regex, repeatable, OR logic within)
-    #[arg(long, value_name = "REGEX")]
+    /// Filter by TID (exact, repeatable, OR logic within)
+    #[arg(long, value_name = "TID")]
     pub tid: Vec<String>,
 
     /// Time bucket histogram: group entries by interval (e.g. 10s, 1m, 5m)

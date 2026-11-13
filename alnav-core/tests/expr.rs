@@ -32,10 +32,10 @@ fn test_msg_match() {
 
 #[test]
 fn test_pkg_match() {
-    let line = entry(Level::I, "com.app", "starting service");
-    assert!(parse_and_match("pkg ~ com.app", &line));
-    assert!(parse_and_match("pkg ~ service", &line));
-    assert!(!parse_and_match("pkg ~ missing", &line));
+    let line = "04-16 11:52:56.297 1234 5678 I A00201/com.app.service/MyTag: starting";
+    assert!(parse_and_match("pkg ~ com.app", line));
+    assert!(parse_and_match("pkg ~ service", line));
+    assert!(!parse_and_match("pkg ~ missing", line));
 }
 
 #[test]

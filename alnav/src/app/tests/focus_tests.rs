@@ -13,19 +13,38 @@ fn g(label: &str) -> Group {
 }
 
 #[test]
-fn test_cycle_focus_forward_wraps() {
+fn test_visible_focus_cycle_skips_collapsed_strips() {
+    use crate::highlight_model::HighlightGroup;
+    use crate::input::{Chip, ChipField};
+
     let mut app = App::new(100);
-    assert_eq!(app.focus, Focus::LogList);
-    app.cycle_focus_forward();
-    assert_eq!(app.focus, Focus::Input);
-    app.cycle_focus_forward();
-    assert_eq!(app.focus, Focus::ChipStrip);
-    app.cycle_focus_forward();
-    assert_eq!(app.focus, Focus::ExcludeStrip);
-    app.cycle_focus_forward();
+    app.cycle_visible_focus_forward();
+    assert_eq!(app.focus, Focus::LogList, "only LogList visible");
+
+    app.groups.groups.push(g("g"));
+    assert!(app
+        .groups
+        .push_exclude(Chip {
+            field: ChipField::Tag,
+            value: "noise".into(),
+        })
+        .unwrap());
+    app.highlight_groups
+        .groups
+        .push(HighlightGroup::from_pattern("err").unwrap());
+
+    app.cycle_visible_focus_backward();
     assert_eq!(app.focus, Focus::HighlightStrip);
-    app.cycle_focus_forward();
-    assert_eq!(app.focus, Focus::LogList);
+    for want in [
+        Focus::LogList,
+        Focus::ChipStrip,
+        Focus::ExcludeStrip,
+        Focus::HighlightStrip,
+    ] {
+        app.cycle_visible_focus_forward();
+        assert_eq!(app.focus, want);
+    }
+    assert!(app.picker.is_none());
 }
 
 #[test]
@@ -86,6 +105,7 @@ fn test_toggle_disable_filter_rebuilds_visible() {
         enabled: true,
         same_field_op: crate::fuzzy::SameFieldOp::And,
     });
+    app.rebuild_visible();
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(EntryRow::from_line("04-02 10:00:00.000  1  1 I A   : m").unwrap())
         .unwrap();

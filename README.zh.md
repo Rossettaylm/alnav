@@ -87,7 +87,7 @@ alnav grep -f app.log --crashes
 alnav grep --help
 ```
 
-TUI 内 `?` 打开 Help，`C-p` 打开命令面板，`yc` 将当前过滤导出为一行 `alnav grep …`。
+TUI 内 `?` 打开 Help，`C-p` 打开命令面板，`yc` 将当前 Filter / Exclude / lock / 时间窗导出为一行 `alnav grep -i -e '…'`，选中的行与 TUI 一致。
 
 `-f` 会把每个文件的 Filter / Exclude / Highlight、lock、时间窗、光标与书签存到 `<配置目录>/sessions/`，下次打开同一文件时自动恢复。在 `config.toml` 设 `restore_session = false` 可关闭；命令行带任一过滤参数（`--tag`、`--level` 等）时本次运行不读也不写。
 
@@ -111,12 +111,13 @@ TUI 内 `?` 打开 Help，`C-p` 打开命令面板，`yc` 将当前过滤导出�
 ```bash
 alnav grep -f app.log --tag "OkHttp" --msg "timeout" --level W
 alnav grep -f app.log -e '(tag ~ OkHttp or tag ~ Retrofit) and level >= W'
+alnav grep -f app.log -e 'pid == 3542 and time >= "10:30:00" and time <= "10:35:00"'
 alnav grep -f app.log --since 10:30:00 --until 10:35:00
 alnav grep -f app.log --format json --fields timestamp,level,tag,msg --limit 50
 alnav grep --adb --device <serial> --level E
 ```
 
-同字段多值 OR，加 `--and` 改 AND；跨字段 AND。`--level W` 匹配 W/E/F。多个 `-e` 之间 OR。
+同字段多值 OR，加 `--and` 改 AND；跨字段 AND。`--level W` 匹配 W/E/F。`--pid` / `--tid` 精确匹配。多个 `-e` 之间 OR。
 
 `--adb` 与 `--hdc` 互斥，且不可与 `-f`、`--time-context`、`--follow-pid`/`--follow-tid`、`--sort-time` 同用。
 

@@ -1,7 +1,7 @@
 //! Picker, command palette, source panels, confirm dialog, detail overlay, and flash toasts.
 
 use super::Pending;
-use super::{App, DetailView, Focus, Mode, Surface};
+use super::{App, DetailView, Focus, Surface};
 use std::time::{Duration, Instant};
 
 impl App {
@@ -21,7 +21,6 @@ impl App {
     pub fn command_palette_available(&self) -> bool {
         self.surface() == Surface::Main
             && self.dialog().is_none()
-            && self.mode == Mode::Normal
             && matches!(
                 self.focus,
                 Focus::LogList | Focus::ChipStrip | Focus::ExcludeStrip | Focus::HighlightStrip

@@ -104,7 +104,6 @@ pub fn preselect_toc(focus: Focus) -> u8 {
         Focus::ExcludeStrip => 1,
         Focus::HighlightStrip => 2,
         Focus::LogList => 3,
-        Focus::Input => 0,
     }
 }
 
@@ -328,7 +327,7 @@ pub(super) fn page_entries(app: &App, page: HelpPage) -> Vec<HintEntry> {
                 out.push(HintEntry::new(
                     format!("{y} {c}"),
                     "export",
-                    "yank filters as alnav grep CLI (literal approx)",
+                    "yank filters as an exact alnav grep -e command",
                 ));
             }
             if let Some(y) = key_of(app, ActionId::LogListYank) {

@@ -78,31 +78,10 @@ impl App {
         self.set_flash("ALL CLEARED");
     }
 
-    pub fn cycle_focus_forward(&mut self) {
-        self.focus = match self.focus {
-            Focus::ChipStrip => Focus::ExcludeStrip,
-            Focus::ExcludeStrip => Focus::HighlightStrip,
-            Focus::HighlightStrip => Focus::LogList,
-            Focus::LogList => Focus::Input,
-            Focus::Input => Focus::ChipStrip,
-        };
-    }
-
-    pub fn cycle_focus_backward(&mut self) {
-        self.focus = match self.focus {
-            Focus::ChipStrip => Focus::Input,
-            Focus::ExcludeStrip => Focus::ChipStrip,
-            Focus::HighlightStrip => Focus::ExcludeStrip,
-            Focus::LogList => Focus::HighlightStrip,
-            Focus::Input => Focus::LogList,
-        };
-    }
-
     /// Cycle focus forward among *visible* regions only (Normal mode Tab).
     ///
     /// Visible = non-empty Filter/Exclude/Highlight strips + LogList. Empty
-    /// (collapsed) strips are skipped. Never returns `Focus::Input`, so the
-    /// unified picker is never opened via Tab.
+    /// (collapsed) strips are skipped.
     pub fn cycle_visible_focus_forward(&mut self) {
         self.focus = self.next_visible_focus(true);
     }

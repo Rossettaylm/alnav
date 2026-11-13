@@ -59,20 +59,14 @@ impl App {
     pub fn apply_yank(&mut self, text: String) {
         self.record_yank(text.clone());
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
-            Ok(()) => self.set_flash("YANKED (approx)"),
+            Ok(()) => self.set_flash("YANKED"),
             Err(e) => self.set_flash(format!("YANK FAILED: {e}")),
         }
     }
 
     /// H10: one-line `alnav grep` command for the current filter state.
     pub fn export_cli_command(&self) -> String {
-        crate::export::build_cli_command(
-            &self.export_source,
-            &self.groups,
-            self.lock_pid.as_deref(),
-            self.lock_tid.as_deref(),
-            self.time_bound.as_ref(),
-        )
+        crate::export::build_cli_command(&self.export_source, self.compiled_predicate().as_ref())
     }
 
     /// Arm `c` operator-pending (clear other pendings; stay on LogList).

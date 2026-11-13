@@ -5,15 +5,15 @@ use crate::app::App;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::picker::keys::handle_picker_key;
 use crate::handlers::picker::render_data::picker_render_data;
-use crate::{app, input, theme};
+use crate::{app, theme};
 use crossterm::event::KeyCode;
 use crossterm::event::{KeyEvent, KeyModifiers};
 
 #[test]
 fn slash_still_opens_highlight_new() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
+
+    handle_normal_key(&mut app, KeyCode::Char('/'));
     let picker = app.picker.as_ref().expect("highlight picker");
     assert_eq!(picker.kind, crate::picker::PickerKind::Highlight);
     assert!(matches!(picker.mode, crate::picker::PickerMode::New));
@@ -24,8 +24,8 @@ fn slash_opens_highlight_new() {
     use crate::picker::{PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
+
+    handle_normal_key(&mut app, KeyCode::Char('/'));
     assert!(!app.highlight_box.editing);
     let picker = app.picker.as_ref().expect("highlight picker");
     assert_eq!(picker.kind, PickerKind::Highlight);
@@ -60,9 +60,9 @@ fn slash_opens_highlight_manage_when_groups_exist() {
     use crate::picker::{PickerKind, PickerMode};
 
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.push_or_find_highlight_group(HighlightGroup::from_pattern("error").unwrap());
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('/'));
+    handle_normal_key(&mut app, KeyCode::Char('/'));
     let picker = app.picker.as_ref().expect("finder");
     assert_eq!(picker.kind, PickerKind::Highlight);
     assert_eq!(picker.mode, PickerMode::Manage);

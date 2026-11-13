@@ -1,62 +1,18 @@
 use regex::Regex;
 
-use crate::expr::Expr;
+use crate::expr::{Expr, TimePoint};
 use crate::parser::{Level, LogEntry};
 use crate::Cli;
-
-/// Time filter that auto-detects user input format.
-///
-/// - `HH:MM:SS` → compare against `time_hms()` (time only)
-/// - `YYYY-MM-DD HH:MM:SS` → compare against `time_full()` (full datetime)
-/// - `MM-DD HH:MM:SS` → compare against `time_full()` (threadtime date+time)
-enum TimeFilter {
-    /// HH:MM:SS — compare against time_hms()
-    TimeOnly(String),
-    /// Anything longer — compare against time_full()
-    Full(String),
-}
-
-impl TimeFilter {
-    fn parse(input: &str) -> Result<Self, String> {
-        let s = input.trim();
-        if s.is_empty() {
-            return Err("empty time value".to_string());
-        }
-        // HH:MM:SS (8 chars, e.g. "10:30:00")
-        if s.len() == 8 && s.as_bytes()[2] == b':' && s.as_bytes()[5] == b':' {
-            Ok(TimeFilter::TimeOnly(s.to_string()))
-        } else {
-            // YYYY-MM-DD HH:MM:SS (19 chars) or MM-DD HH:MM:SS (14 chars) or other
-            Ok(TimeFilter::Full(s.to_string()))
-        }
-    }
-
-    /// Check if entry timestamp >= this filter value.
-    fn entry_gte(&self, entry: &LogEntry) -> bool {
-        match self {
-            TimeFilter::TimeOnly(t) => entry.time_hms().map_or(true, |hms| hms >= t.as_str()),
-            TimeFilter::Full(t) => entry.time_full().map_or(true, |full| full >= t.as_str()),
-        }
-    }
-
-    /// Check if entry timestamp <= this filter value.
-    fn entry_lte(&self, entry: &LogEntry) -> bool {
-        match self {
-            TimeFilter::TimeOnly(t) => entry.time_hms().map_or(true, |hms| hms <= t.as_str()),
-            TimeFilter::Full(t) => entry.time_full().map_or(true, |full| full <= t.as_str()),
-        }
-    }
-}
 
 pub struct FilterChain {
     tag_filters: Vec<Regex>,
     msg_filters: Vec<Regex>,
     package_filters: Vec<Regex>,
-    pid_filters: Vec<Regex>,
-    tid_filters: Vec<Regex>,
+    pid_filters: Vec<String>,
+    tid_filters: Vec<String>,
     min_level: Option<Level>,
-    since: Option<TimeFilter>,
-    until: Option<TimeFilter>,
+    since: Option<TimePoint>,
+    until: Option<TimePoint>,
     use_and: bool,
     exprs: Vec<Expr>,
 }
@@ -81,8 +37,8 @@ impl FilterChain {
 
         let tag_filters = compile_patterns(&cli.tag, case_flag, "tag")?;
         let msg_filters = compile_patterns(&cli.msg, case_flag, "msg")?;
-        let pid_filters = compile_patterns(&cli.pid, case_flag, "pid")?;
-        let tid_filters = compile_patterns(&cli.tid, case_flag, "tid")?;
+        let pid_filters = cli.pid.iter().map(|p| p.trim().to_string()).collect();
+        let tid_filters = cli.tid.iter().map(|t| t.trim().to_string()).collect();
 
         let package_filters = cli
             .package
@@ -109,16 +65,8 @@ impl FilterChain {
             .map(|e| Expr::parse(e, cli.ignore_case))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let since = cli
-            .since
-            .as_ref()
-            .map(|s| TimeFilter::parse(s))
-            .transpose()?;
-        let until = cli
-            .until
-            .as_ref()
-            .map(|s| TimeFilter::parse(s))
-            .transpose()?;
+        let since = cli.since.as_deref().map(TimePoint::parse).transpose()?;
+        let until = cli.until.as_deref().map(TimePoint::parse).transpose()?;
 
         Ok(Self {
             tag_filters,
@@ -151,8 +99,8 @@ impl FilterChain {
             && self.match_time(entry)
             && self.match_group(&self.tag_filters, entry.tag)
             && self.match_group(&self.msg_filters, entry.msg)
-            && self.match_group(&self.pid_filters, entry.pid)
-            && self.match_group(&self.tid_filters, entry.tid)
+            && self.match_ids(&self.pid_filters, entry.pid)
+            && self.match_ids(&self.tid_filters, entry.tid)
             && self.match_package(entry)
             && self.match_exprs(entry)
     }
@@ -168,35 +116,37 @@ impl FilterChain {
         }
     }
 
+    /// `--pid` / `--tid`: exact id equality.
+    fn match_ids(&self, ids: &[String], value: &str) -> bool {
+        if ids.is_empty() {
+            return true;
+        }
+        if self.use_and {
+            ids.iter().all(|id| id == value)
+        } else {
+            ids.iter().any(|id| id == value)
+        }
+    }
+
     fn match_level(&self, entry: &LogEntry) -> bool {
         self.min_level.map_or(true, |min| entry.level >= min)
     }
 
     fn match_time(&self, entry: &LogEntry) -> bool {
-        if let Some(ref since) = self.since {
-            if !since.entry_gte(entry) {
-                return false;
-            }
-        }
-        if let Some(ref until) = self.until {
-            if !until.entry_lte(entry) {
-                return false;
-            }
-        }
-        true
+        self.since.as_ref().map_or(true, |t| t.entry_ge(entry))
+            && self.until.as_ref().map_or(true, |t| t.entry_le(entry))
     }
 
+    /// `--package`: literal substring of the entry's package; entries without
+    /// a package (threadtime / brief) never match.
     fn match_package(&self, entry: &LogEntry) -> bool {
         if self.package_filters.is_empty() {
             return true;
         }
-        if !entry.pkg.is_empty() {
-            self.package_filters.iter().any(|re| re.is_match(entry.pkg))
-        } else {
-            self.package_filters
-                .iter()
-                .any(|re| re.is_match(entry.tag) || re.is_match(entry.msg))
+        if entry.pkg.is_empty() {
+            return false;
         }
+        self.package_filters.iter().any(|re| re.is_match(entry.pkg))
     }
 
     fn match_exprs(&self, entry: &LogEntry) -> bool {

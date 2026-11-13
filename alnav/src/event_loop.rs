@@ -3,13 +3,13 @@
 use crate::app::{App, Dialog, Surface};
 use crate::handlers::{
     handle_compare_key, handle_confirm_key, handle_ctrl_c, handle_dashboard_key, handle_help_key,
-    handle_highlight_box_key, handle_hist_panel_key, handle_insert_key, handle_mouse_event,
-    handle_normal_event, handle_open_file_panel_key, handle_palette_key, handle_picker_key,
-    handle_preset_name_key, handle_stream_source_panel_key, handle_summary_key,
-    handle_time_panel_key, picker_render_data, popup_rect,
+    handle_highlight_box_key, handle_hist_panel_key, handle_mouse_event, handle_normal_event,
+    handle_open_file_panel_key, handle_palette_key, handle_picker_key, handle_preset_name_key,
+    handle_stream_source_panel_key, handle_summary_key, handle_time_panel_key, picker_render_data,
+    popup_rect,
 };
 use crate::live_ctl::LiveIngestCtl;
-use crate::{app, input, preview, theme, ui};
+use crate::{preview, theme, ui};
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::layout::Position;
 use ratatui::layout::{Constraint, Layout};
@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 pub(crate) fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    input: &mut input::InputBox,
     live: &mut Option<LiveIngestCtl>,
 ) -> Result<(), String> {
     // P4: minimum draw interval during active ingest to avoid thrashing the
@@ -66,7 +65,7 @@ pub(crate) fn run<B: ratatui::backend::Backend>(
             last_draw = Instant::now();
 
             terminal
-                .draw(|frame| draw_frame(frame, app, input))
+                .draw(|frame| draw_frame(frame, app))
                 .map_err(|e| e.to_string())?;
         } // end if should_draw
 
@@ -99,13 +98,13 @@ pub(crate) fn run<B: ratatui::backend::Backend>(
             _ => continue,
         };
 
-        route_key(app, input, live, key)?;
+        route_key(app, live, key)?;
     }
     Ok(())
 }
 
 /// One frame: canvas, Dashboard or main layout, overlays, hardware caret.
-fn draw_frame(frame: &mut ratatui::Frame, app: &mut App, input: &input::InputBox) {
+fn draw_frame(frame: &mut ratatui::Frame, app: &mut App) {
     let frame_area = frame.area();
     frame.render_widget(
         ratatui::widgets::Block::default().style(theme::canvas_style()),
@@ -187,7 +186,7 @@ fn draw_frame(frame: &mut ratatui::Frame, app: &mut App, input: &input::InputBox
                 );
             }
         }
-        // Search / Input use top stack: modal → candidates → Preview (H1).
+        // Search uses top stack: modal → candidates → Preview (H1).
         Surface::HighlightBox => {
             let area = ui::top_modal_rect(frame_area, modal_w, ui::search_modal_height());
             hw_cursor = ui::render_highlight_modal(&app.highlight_box, frame, area);
@@ -211,24 +210,6 @@ fn draw_frame(frame: &mut ratatui::Frame, app: &mut App, input: &input::InputBox
                 let limit = ui::preview_content_capacity(prev);
                 let preview_lines = preview::preview_search_lines(app, limit).unwrap_or_default();
                 ui::render_preview("Preview", &preview_lines, "type to preview", frame, prev);
-            }
-        }
-        Surface::Input => {
-            let input_area = ui::top_modal_rect(frame_area, modal_w, 3);
-            hw_cursor = ui::render_input_modal(input, app.mode, frame, input_area);
-            let mut stack_bottom = input_area;
-            if input.field_popup_visible() {
-                // `.max(1)` so empty-match state still gets a row for "no match".
-                let count = input.field_candidates().len().max(1);
-                let rect = popup_rect(input_area, frame_area, count);
-                ui::render_popup(input, frame, rect);
-                stack_bottom = rect;
-            }
-            let prev = ui::preview_popup_rect(stack_bottom, frame_area);
-            if prev.height > 0 {
-                let limit = ui::preview_content_capacity(prev);
-                let preview_lines = app.preview_filter_throttled(input, limit);
-                ui::render_preview("Preview", &preview_lines, "no matches", frame, prev);
             }
         }
         Surface::TimePanel => {
@@ -285,12 +266,11 @@ fn draw_frame(frame: &mut ratatui::Frame, app: &mut App, input: &input::InputBox
 /// Route one key event to the topmost owning surface (modal → panel → mode).
 fn route_key(
     app: &mut App,
-    input: &mut input::InputBox,
     live: &mut Option<LiveIngestCtl>,
     key: event::KeyEvent,
 ) -> Result<(), String> {
-    // Dialogs and surfaces before Ctrl+C / Normal/Insert so Ctrl+C cancels
-    // the draft like Esc, instead of quitting in Normal.
+    // Dialogs and surfaces before Ctrl+C / Normal so Ctrl+C cancels a draft
+    // like Esc, instead of quitting.
     match app.dialog() {
         Some(Dialog::Confirm) => {
             handle_confirm_key(app, key);
@@ -314,30 +294,17 @@ fn route_key(
         Surface::Help => handle_help_key(app, key),
         Surface::Summary => handle_summary_key(app, key),
         Surface::Hist => handle_hist_panel_key(app, key),
-        Surface::Detail | Surface::Input | Surface::Main => return route_mode_key(app, input, key),
+        Surface::Detail | Surface::Main => return route_mode_key(app, key),
     }
     Ok(())
 }
 
-/// Keys with no owning overlay: Ctrl+C, then Normal / Insert mode handlers.
-fn route_mode_key(
-    app: &mut App,
-    input: &mut input::InputBox,
-    key: event::KeyEvent,
-) -> Result<(), String> {
-    use app::Mode;
-
-    // Ctrl+C: quit from Normal (like `q`), but only cancel in-progress
-    // input from Insert (like Esc) — mirrors the shell/readline
-    // "abort current line" convention instead of nuking the session.
+/// Keys with no owning overlay: Ctrl+C, then Normal mode.
+fn route_mode_key(app: &mut App, key: event::KeyEvent) -> Result<(), String> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
-        handle_ctrl_c(app, input);
+        handle_ctrl_c(app);
         return Ok(());
     }
-
-    match app.mode {
-        Mode::Normal => handle_normal_event(app, input, key),
-        Mode::Insert => handle_insert_key(app, input, key.code)?,
-    }
+    handle_normal_event(app, key);
     Ok(())
 }

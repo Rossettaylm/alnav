@@ -4,6 +4,7 @@ use super::{App, ViewFocus, Visible};
 use crate::highlight_model::HighlightGroupList;
 use crate::model::EntryRow;
 use crate::store::{RowRef, StreamStore};
+use alnav::expr::Expr;
 use std::cmp::Ordering;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -42,16 +43,17 @@ impl App {
         self.export_source.is_file()
     }
 
-    /// Chip filter → session lock (H8) → global time → view focus. Used by drain/rebuild.
+    /// Compiled rule predicate → view focus. Used by drain/rebuild.
     ///
     /// CLI-aligned: when any filter is active, unparsed (raw-fallback) rows never pass.
     pub fn row_passes_filters(&self, row: &EntryRow) -> bool {
+        debug_assert!(
+            self.predicate.as_deref() == self.compiled_predicate().as_ref(),
+            "rule state changed without rebuild_visible()"
+        );
         Self::row_passes_filter_parts(
             row,
-            &self.groups,
-            self.lock_pid.as_deref(),
-            self.lock_tid.as_deref(),
-            self.time_bound.as_ref(),
+            self.predicate.as_deref(),
             self.view_focus,
             &self.highlight_groups,
             /*reject_unparsed*/ self.filter_active(),
@@ -62,10 +64,7 @@ impl App {
     /// File scans only run while filters are active → pass `reject_unparsed = true`.
     pub(crate) fn row_passes_filter_parts(
         row: &EntryRow,
-        groups: &crate::filter_model::GroupList,
-        lock_pid: Option<&str>,
-        lock_tid: Option<&str>,
-        time_bound: Option<&crate::filter_model::TimeBound>,
+        predicate: Option<&Expr>,
         view_focus: ViewFocus,
         highlight_groups: &HighlightGroupList,
         reject_unparsed: bool,
@@ -73,22 +72,8 @@ impl App {
         if reject_unparsed && !row.is_parsed() {
             return false;
         }
-        if !groups.matches(row) {
+        if predicate.is_some_and(|p| !p.matches(&row.as_log_entry())) {
             return false;
-        }
-        if let Some(pid) = lock_pid {
-            if row.pid != *pid {
-                return false;
-            }
-        } else if let Some(tid) = lock_tid {
-            if row.tid != *tid {
-                return false;
-            }
-        }
-        if let Some(bound) = time_bound {
-            if bound.is_active() && !bound.matches(&row.as_log_entry()) {
-                return false;
-            }
         }
         if view_focus.highlight && !highlight_groups.any_match_entry(row) {
             return false;
@@ -97,6 +82,16 @@ impl App {
             return false;
         }
         true
+    }
+
+    /// The Filter / Exclude / lock / time-window rules as one expression.
+    pub fn compiled_predicate(&self) -> Option<Expr> {
+        crate::filter_model::compile_predicate(
+            &self.groups,
+            self.lock_pid.as_deref(),
+            self.lock_tid.as_deref(),
+            self.time_bound.as_ref(),
+        )
     }
 
     /// Whether any include/exclude/lock/time/view-focus filter is currently active.
@@ -224,6 +219,8 @@ impl App {
     /// Stream: rebuilds `matched` from `rows`. File: starts a cancellable
     /// background filter scan into [`Visible::Subset`] (or All when inactive).
     pub fn rebuild_visible(&mut self) {
+        // Every rule mutation ends here, so this is the one recompile point.
+        self.predicate = self.compiled_predicate().map(Arc::new);
         let active = self.filter_active();
         if self.index.store.is_file() {
             if !active {
@@ -238,19 +235,13 @@ impl App {
             } else {
                 self.index.visible = Visible::Subset(self.alive_bookmark_file_line_indices());
                 self.ingest_done = false;
-                let groups = self.groups.clone();
-                let lock_pid = self.lock_pid.clone();
-                let lock_tid = self.lock_tid.clone();
-                let time_bound = self.time_bound.clone();
+                let predicate = self.predicate.clone();
                 let view_focus = self.view_focus;
                 let highlight_groups = self.highlight_groups.clone();
                 let pred: crate::store::FilterPred = Arc::new(move |row: &EntryRow| {
                     Self::row_passes_filter_parts(
                         row,
-                        &groups,
-                        lock_pid.as_deref(),
-                        lock_tid.as_deref(),
-                        time_bound.as_ref(),
+                        predicate.as_deref(),
                         view_focus,
                         &highlight_groups,
                         true,

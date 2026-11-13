@@ -201,7 +201,7 @@ impl TimePanel {
             if !hms.is_empty() {
                 side.time.set_text(hms);
             }
-        } else if TimeBound::is_time_only(raw) {
+        } else if alnav::expr::is_time_only(raw) {
             side.time.set_text(raw);
         }
     }

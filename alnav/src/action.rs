@@ -350,10 +350,6 @@ pub fn dispatch(app: &mut App, id: ActionId) {
         | HistPanelSubmit
         | HistPanelApplyWindow
         | HistPanelCancel
-        | InputDraftSpace
-        | InputCommit
-        | InputToggleExclude
-        | InputCancel
         | HighlightModalDraftSpace
         | HighlightModalConfirm
         | HighlightModalConfirmTab

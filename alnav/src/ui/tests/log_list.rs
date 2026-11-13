@@ -35,7 +35,7 @@ fn render_lines(app: &mut App, lines: &[&str]) -> ratatui::buffer::Buffer {
     }
     drop(tx);
     app.drain(&rx);
-    app.focus = Focus::Input;
+    app.focus = Focus::ChipStrip;
     let backend = TestBackend::new(100, 8);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
@@ -150,7 +150,7 @@ fn test_render_log_list_no_highlight_when_log_list_unfocused() {
     drop(tx);
     app.drain(&rx);
     app.cursor = 1;
-    app.focus = Focus::Input; // LogList no longer has keyboard focus
+    app.focus = Focus::ChipStrip; // LogList no longer has keyboard focus
 
     let backend = TestBackend::new(80, 5);
     let mut terminal = Terminal::new(backend).unwrap();

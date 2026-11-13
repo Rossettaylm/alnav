@@ -11,7 +11,7 @@ use crate::handlers::panels::{
 };
 use crate::handlers::picker::keys::handle_picker_key;
 use crate::handlers::picker::render_data::picker_render_data;
-use crate::{app, export, highlight_model, input, model};
+use crate::{app, export, highlight_model, model};
 use crossterm::event::{self, KeyCode};
 use crossterm::event::{KeyEvent, KeyModifiers};
 
@@ -174,7 +174,7 @@ fn test_highlight_box_literal_metacharacters_do_not_drop_prior_groups() {
 #[test]
 fn test_highlight_box_esc_and_enter_return_focus_to_loglist() {
     let mut app = App::new(100);
-    app.focus = app::Focus::Input;
+    app.focus = app::Focus::HighlightStrip;
     app.highlight_box.editing = true;
     app.highlight_box.push_char('x');
     handle_highlight_box_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -190,7 +190,7 @@ fn test_highlight_box_esc_and_enter_return_focus_to_loglist() {
 #[test]
 fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.export_source = export::ExportSource::File("demo.log".into());
     drain_lines(
         &mut app,
@@ -200,9 +200,9 @@ fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
         ],
     );
     app.following = true;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
     assert_eq!(app.pending, Pending::Time);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
     assert!(app.time_panel.is_some());
     assert!(!app.following, "tt opens with following=false");
     assert_ne!(app.pending, Pending::Time);
@@ -214,11 +214,13 @@ fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
     });
     assert!(app.filter_active());
     assert_eq!(app.index.visible.len(), 1);
-    assert!(app.export_cli_command().contains("--since "));
+    assert!(app
+        .export_cli_command()
+        .contains(r#"-e 'time >= "04-02 11:00:00"'"#));
 
     app.following = true;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('u'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('u'));
     assert!(app.time_bound.is_none());
     assert!(!app.following);
     assert_eq!(app.index.visible.len(), 2);
@@ -228,7 +230,7 @@ fn test_tt_opens_panel_in_file_mode_and_tu_clears() {
 #[test]
 fn test_th_opens_hist_enter_jumps_esc_closes() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.export_source = export::ExportSource::File("demo.log".into());
     drain_lines(
         &mut app,
@@ -239,8 +241,8 @@ fn test_th_opens_hist_enter_jumps_esc_closes() {
         ],
     );
     app.following = true;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('h'));
     assert!(app.hist_open());
     assert!(!app.following);
     app.flush_hist_job(std::time::Duration::from_secs(2));
@@ -258,8 +260,8 @@ fn test_th_opens_hist_enter_jumps_esc_closes() {
     assert!(!app.hist_open());
     assert_eq!(app.cursor, 1);
 
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('h'));
     app.flush_hist_job(std::time::Duration::from_secs(2));
     let following = app.following;
     handle_hist_panel_key(
@@ -273,7 +275,7 @@ fn test_th_opens_hist_enter_jumps_esc_closes() {
 #[test]
 fn test_hist_panel_fast_move_and_tab_cycles_interval() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.export_source = export::ExportSource::File("demo.log".into());
     let owned: Vec<String> = (0..20)
         .map(|i| {
@@ -288,8 +290,8 @@ fn test_hist_panel_fast_move_and_tab_cycles_interval() {
     let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
     drain_lines(&mut app, &lines);
 
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('h'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('h'));
     app.flush_hist_job(std::time::Duration::from_secs(2));
     let n = match &app.hist_view {
         crate::hist_panel::HistView::Ready(r) => {
@@ -364,19 +366,19 @@ fn test_hist_panel_fast_move_and_tab_cycles_interval() {
 #[test]
 fn test_tt_empty_candidates_flashes_and_live_modes_hide_t() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.export_source = export::ExportSource::File("demo.log".into());
     // No rows → no date candidates.
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
     assert!(app.time_panel.is_none());
     assert_eq!(app.status_msg.as_deref(), Some("NO DATES"));
 
     // Abandoned `ts` → UNKNOWN, panel stays closed.
     app.status_msg = None;
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : a"]);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('s'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('s'));
     assert!(app.time_panel.is_none());
     assert_eq!(app.status_msg.as_deref(), Some("UNKNOWN"));
 
@@ -384,12 +386,12 @@ fn test_tt_empty_candidates_flashes_and_live_modes_hide_t() {
     app.export_source = export::ExportSource::Hdc { device: None };
     app.status_msg = None;
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : a"]);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
     assert_ne!(app.pending, Pending::Time);
     assert!(app.time_panel.is_none());
 
     app.export_source = export::ExportSource::Adb { device: None };
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('t'));
+    handle_normal_key(&mut app, KeyCode::Char('t'));
     assert_ne!(app.pending, Pending::Time);
     assert!(app.time_panel.is_none());
 }
@@ -419,7 +421,7 @@ fn test_time_panel_ctrl_c_cancels_without_apply() {
 #[test]
 fn test_ma_toggles_and_mm_opens_compare_not_picker() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &[
@@ -429,20 +431,20 @@ fn test_ma_toggles_and_mm_opens_compare_not_picker() {
     );
     app.following = false;
     app.cursor = 0;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert_eq!(app.pending, Pending::Mark);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+    handle_normal_key(&mut app, KeyCode::Char('a'));
     assert_eq!(app.bookmarks.len(), 1);
     assert_eq!(app.status_msg.as_deref(), Some("BOOKMARKED"));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('a'));
     assert!(app.bookmarks.is_empty());
     assert_eq!(app.status_msg.as_deref(), Some("REMOVED"));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('a'));
     app.cursor = 1;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert!(app.picker.is_none());
     assert!(app.compare.is_some());
     handle_compare_key(
@@ -452,8 +454,8 @@ fn test_ma_toggles_and_mm_opens_compare_not_picker() {
     assert!(app.compare.is_none());
     assert!(!app.following);
     app.cursor = 0;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('d'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('d'));
     assert!(app.bookmarks.is_empty());
     assert_eq!(app.status_msg.as_deref(), Some("REMOVED"));
 }
@@ -461,7 +463,7 @@ fn test_ma_toggles_and_mm_opens_compare_not_picker() {
 #[test]
 fn compare_panel_enter_jumps_to_row_and_closes() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &[
@@ -473,8 +475,8 @@ fn compare_panel_enter_jumps_to_row_and_closes() {
     app.cursor = 0;
     app.bookmark_add_current();
     app.cursor = 1;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert!(app.compare.is_some());
     handle_compare_key(
         &mut app,
@@ -488,11 +490,11 @@ fn compare_panel_enter_jumps_to_row_and_closes() {
 #[test]
 fn compare_panel_swallows_slash_wrap_and_fast_scroll() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
     app.bookmark_add_current();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     assert!(app.compare.is_some());
     let collapsed = app.collapsed_view;
     handle_compare_key(
@@ -515,12 +517,12 @@ fn compare_panel_swallows_slash_wrap_and_fast_scroll() {
 #[test]
 fn compare_panel_dd_deletes_without_confirm() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
     app.bookmark_add_current();
     assert_eq!(app.bookmarks.len(), 1);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     handle_compare_key(
         &mut app,
         event::KeyEvent::new(KeyCode::Char('d'), event::KeyModifiers::NONE),
@@ -538,11 +540,11 @@ fn compare_panel_dd_deletes_without_confirm() {
 #[test]
 fn compare_panel_yy_yanks_snapshot_raw() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : yank-me"]);
     app.bookmark_add_current();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     handle_compare_key(
         &mut app,
         event::KeyEvent::new(KeyCode::Char('y'), event::KeyModifiers::NONE),
@@ -558,12 +560,12 @@ fn compare_panel_yy_yanks_snapshot_raw() {
 #[test]
 fn compare_panel_ctrl_c_closes_without_resume() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
     app.bookmark_add_current();
     app.following = false;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('m'));
     handle_compare_key(
         &mut app,
         event::KeyEvent::new(KeyCode::Char('c'), event::KeyModifiers::CONTROL),
@@ -616,11 +618,11 @@ fn bookmark_row_ids_cache_synced_on_add_and_remove() {
 #[test]
 fn test_ma_does_not_enter_insert() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     drain_lines(&mut app, &["04-02 10:00:00.000  1  1 I Tag     : x"]);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('m'));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('a'));
-    assert_eq!(app.mode, app::Mode::Normal);
+    handle_normal_key(&mut app, KeyCode::Char('m'));
+    handle_normal_key(&mut app, KeyCode::Char('a'));
+
     assert_eq!(app.focus, app::Focus::LogList);
     assert_eq!(app.bookmarks.len(), 1);
 }
@@ -633,7 +635,7 @@ fn ctrl_s_opens_save_dialog_and_ctrl_o_applies_preset() {
     let dir = TempDir::new().unwrap();
     let mut app = App::new(100);
     app.config_dir = dir.path().to_path_buf();
-    let mut input = input::InputBox::default();
+
     drain_lines(
         &mut app,
         &[
@@ -657,7 +659,6 @@ fn ctrl_s_opens_save_dialog_and_ctrl_o_applies_preset() {
 
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
     );
     assert!(app.preset_name.is_some());
@@ -678,7 +679,6 @@ fn ctrl_s_opens_save_dialog_and_ctrl_o_applies_preset() {
 
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
     );
     assert!(matches!(
@@ -703,10 +703,9 @@ fn ctrl_o_empty_library_flashes_without_opening() {
     let dir = TempDir::new().unwrap();
     let mut app = App::new(100);
     app.config_dir = dir.path().to_path_buf();
-    let mut input = input::InputBox::default();
+
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
     );
     assert!(app.picker.is_none());

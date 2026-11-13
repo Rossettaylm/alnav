@@ -1,6 +1,6 @@
 //! Which surface owns input and paints on top: one precedence order for routing and drawing.
 
-use super::{App, Focus};
+use super::App;
 
 /// Topmost interactive surface (below [`Dialog`]). Key routing and overlay
 /// painting both `match` on [`App::surface`], so precedence is defined once.
@@ -19,8 +19,6 @@ pub enum Surface {
     Hist,
     /// Row detail overlay; keys still route through Normal mode.
     Detail,
-    /// Retired standalone Input modal; keys route through Insert mode.
-    Input,
     /// Log list / strips with no overlay.
     Main,
 }
@@ -58,8 +56,6 @@ impl App {
             Surface::Hist
         } else if self.detail_open() {
             Surface::Detail
-        } else if self.focus == Focus::Input {
-            Surface::Input
         } else {
             Surface::Main
         }

@@ -1,20 +1,20 @@
 //! Help panel, command palette and summary panel key tests.
 
+use crate::app;
 use crate::app::App;
 use crate::app::Pending;
 use crate::handlers::normal::handle_normal_key;
 use crate::handlers::panels::{handle_help_key, handle_palette_key, handle_summary_key};
 use crate::handlers::{handle_normal_event, FAST_SCROLL_STEP};
-use crate::{app, input};
 use crossterm::event::KeyCode;
 use crossterm::event::{KeyEvent, KeyModifiers};
 
 #[test]
 fn question_opens_help_and_esc_closes_without_follow() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.following = false;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     assert!(app.help_open);
     handle_help_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!app.help_open);
@@ -24,8 +24,8 @@ fn question_opens_help_and_esc_closes_without_follow() {
 #[test]
 fn help_shift_jk_scrolls_by_fast_step() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     assert!(app.help_open);
     handle_help_key(
         &mut app,
@@ -70,9 +70,9 @@ fn help_shift_jk_scrolls_by_fast_step() {
 #[test]
 fn help_jk_scrolls_one_line_and_question_closes_without_follow() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.following = false;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     assert!(app.help_open);
     handle_help_key(
         &mut app,
@@ -114,8 +114,8 @@ fn help_jk_scrolls_one_line_and_question_closes_without_follow() {
 #[test]
 fn help_h_backs_to_home_esc_closes() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     handle_help_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
@@ -157,8 +157,8 @@ fn help_h_backs_to_home_esc_closes() {
 #[test]
 fn help_home_h_is_noop() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     handle_help_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
@@ -173,8 +173,8 @@ fn help_home_h_is_noop() {
 #[test]
 fn help_digit_jumps_across_pages() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     handle_help_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -213,9 +213,9 @@ fn help_digit_jumps_across_pages() {
 #[test]
 fn help_enter_opens_preselected_exclude() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.focus = app::Focus::ExcludeStrip;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     assert!(matches!(
         app.help_view,
         crate::help::HelpView::Home { toc: 1, .. }
@@ -233,8 +233,8 @@ fn help_enter_opens_preselected_exclude() {
 #[test]
 fn help_search_prompt_k_types_and_esc_clears() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     handle_help_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
@@ -262,8 +262,8 @@ fn help_search_prompt_k_types_and_esc_clears() {
 #[test]
 fn help_search_empty_enter_clears() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     handle_help_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
@@ -276,9 +276,9 @@ fn help_search_empty_enter_clears() {
 #[test]
 fn help_search_n_walks_hits_and_ctrl_c_closes() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.following = false;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     handle_help_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
@@ -314,8 +314,8 @@ fn help_search_n_walks_hits_and_ctrl_c_closes() {
 #[test]
 fn help_search_no_match_flashes() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     let view = app.help_view.clone();
     handle_help_key(
         &mut app,
@@ -335,20 +335,19 @@ fn help_search_no_match_flashes() {
 #[test]
 fn question_ignored_while_operator_pending() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.pending = Pending::Yank;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('?'));
+    handle_normal_key(&mut app, KeyCode::Char('?'));
     assert!(!app.help_open);
 }
 
 #[test]
 fn ctrl_p_opens_empty_command_palette() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.following = true;
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
     );
     let pal = app.command_palette.as_ref().expect("palette");
@@ -360,10 +359,9 @@ fn ctrl_p_opens_empty_command_palette() {
 #[test]
 fn colon_does_not_open_command_palette() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
     );
     assert!(app.command_palette.is_none());
@@ -372,12 +370,11 @@ fn colon_does_not_open_command_palette() {
 #[test]
 fn pending_chip_then_ctrl_p_opens_palette() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('c'));
+
+    handle_normal_key(&mut app, KeyCode::Char('c'));
     assert_eq!(app.pending, Pending::Chip);
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
     );
     assert!(app.command_palette.is_some());
@@ -388,12 +385,11 @@ fn pending_chip_then_ctrl_p_opens_palette() {
 #[test]
 fn ctrl_p_ignored_when_detail_open() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.toggle_detail_fields();
     assert!(app.detail_open());
     handle_normal_event(
         &mut app,
-        &mut input,
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
     );
     assert!(
@@ -477,11 +473,11 @@ fn palette_enter_filter_opens_filter_new() {
 #[test]
 fn space_i_opens_summary_panel_and_esc_closes_without_follow() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     app.following = false;
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char(' '));
     assert_eq!(app.pending, Pending::Leader);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+    handle_normal_key(&mut app, KeyCode::Char('i'));
     assert_ne!(app.pending, Pending::Leader);
     assert!(app.summary_open());
 
@@ -493,9 +489,9 @@ fn space_i_opens_summary_panel_and_esc_closes_without_follow() {
 #[test]
 fn space_i_while_open_toggles_close() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+
+    handle_normal_key(&mut app, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char('i'));
     assert!(app.summary_open());
 
     handle_summary_key(
@@ -514,7 +510,7 @@ fn space_i_while_open_toggles_close() {
 #[test]
 fn summary_jk_scrolls_ready_body() {
     let mut app = App::new(100);
-    let mut input = input::InputBox::default();
+
     let (tx, rx) = std::sync::mpsc::channel();
     for i in 0..3 {
         tx.send(
@@ -527,8 +523,8 @@ fn summary_jk_scrolls_ready_body() {
     }
     drop(tx);
     app.drain(&rx);
-    handle_normal_key(&mut app, &mut input, KeyCode::Char(' '));
-    handle_normal_key(&mut app, &mut input, KeyCode::Char('i'));
+    handle_normal_key(&mut app, KeyCode::Char(' '));
+    handle_normal_key(&mut app, KeyCode::Char('i'));
     app.flush_summary_job(std::time::Duration::from_secs(5));
     assert!(matches!(app.summary_view, app::SummaryView::Ready(_)));
 

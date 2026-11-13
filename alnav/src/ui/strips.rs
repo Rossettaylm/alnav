@@ -281,25 +281,6 @@ pub fn render_highlight_chip_strip(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-pub(super) fn committed_chip_spans(
-    chips: &[crate::input::Chip],
-    exclude_mode: bool,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    for (i, chip) in chips.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw(" ".repeat(PILL_GAP as usize)));
-        }
-        let pill = if exclude_mode {
-            theme::exclude_pill_spans(chip.field, &chip.value, false)
-        } else {
-            theme::chip_pill_spans(chip.field, &chip.value, false)
-        };
-        spans.extend(pill);
-    }
-    spans
-}
-
 /// Wrap committed pills to `width` (each chip is an atomic flow group).
 pub(super) fn committed_chip_lines(
     chips: &[crate::input::Chip],

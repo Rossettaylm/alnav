@@ -6,7 +6,6 @@ mod crash_detail;
 mod dashboard;
 mod entry;
 mod help;
-mod input;
 mod layout;
 mod log_list;
 mod palette;

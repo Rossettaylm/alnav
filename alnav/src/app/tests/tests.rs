@@ -102,6 +102,7 @@ fn test_time_bound_alone_activates_filter_and_matches() {
         since: Some("10:00:00".into()),
         until: Some("10:00:00".into()),
     });
+    app.rebuild_visible();
     assert!(app.filter_active());
     let keep = row("A");
     let late = EntryRow::from_line("04-02 11:00:00.000  1  1 I B   : m").unwrap();
@@ -118,7 +119,9 @@ fn test_time_bound_alone_activates_filter_and_matches() {
         "A"
     );
     assert_eq!(app.time_badge_label().as_deref(), Some("10:00:00…10:00:00"));
-    assert!(app.export_cli_command().contains("--since '10:00:00'"));
+    assert!(app
+        .export_cli_command()
+        .contains(r#"time >= "10:00:00" and time <= "10:00:00""#));
 }
 
 #[test]
@@ -128,6 +131,7 @@ fn test_clear_time_bound_restores_visibility() {
         since: Some("11:00:00".into()),
         until: None,
     });
+    app.rebuild_visible();
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap();
     drop(tx);
@@ -287,6 +291,7 @@ fn test_di_group_zero_does_not_clear_time_bound() {
         enabled: true,
         same_field_op: crate::fuzzy::SameFieldOp::And,
     });
+    app.rebuild_visible();
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap(); // 10:00:00 — excluded by since
     tx.send(EntryRow::from_line("04-02 11:00:00.000  1  1 I A   : late").unwrap())
@@ -337,6 +342,7 @@ fn test_visible_all_identity_under_filter_active() {
         groups: vec![filter_group("keep-A", "A")],
         excludes: Vec::new(),
     };
+    app.rebuild_visible();
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap();
     tx.send(row("B")).unwrap();
@@ -423,6 +429,7 @@ fn test_evicting_visible_front_decrements_list_offset() {
         groups: vec![filter_group("keep-A", "A")],
         excludes: Vec::new(),
     };
+    app.rebuild_visible();
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap(); // matched=[A0], visible=[0]
     tx.send(row("A")).unwrap(); // matched=[A0,A1], visible=[0,1]
@@ -491,6 +498,7 @@ fn clear_buffered_logs_drops_buffers_keeps_filters_and_resumes() {
     };
     app.push_or_find_highlight_group(HighlightGroup::from_pattern("err").unwrap());
     app.lock_pid = Some("1".into());
+    app.rebuild_visible();
 
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap();
@@ -554,6 +562,7 @@ fn reset_for_source_switch_keeps_only_filter_exclude_highlight() {
         since: Some("01-01 00:00:00.000".into()),
         until: None,
     });
+    app.rebuild_visible();
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap();
     drop(tx);
@@ -577,6 +586,7 @@ fn test_cursor_unaffected_when_evicted_row_was_already_filtered_out() {
         groups: vec![filter_group("x", "X")],
         excludes: Vec::new(),
     };
+    app.rebuild_visible();
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(row("N1")).unwrap(); // filtered out, not in `matched`/`visible`
     tx.send(row("X1")).unwrap();
@@ -611,6 +621,7 @@ fn test_matched_rows_survive_rows_overflow() {
         groups: vec![filter_group("keep-A", "A")],
         excludes: Vec::new(),
     };
+    app.rebuild_visible();
     let (tx, rx) = mpsc::channel();
     tx.send(row("A")).unwrap(); // A0: matched=[A0], rows=[A0]
     tx.send(row("X")).unwrap(); // rows=[A0,X], matched=[A0]
